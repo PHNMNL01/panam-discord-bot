@@ -245,7 +245,7 @@ Panam co je v priloze?
 Panam analyzuj prilohu
 ```
 
-Panam se pokusi pouzit podporovanou prilohu z aktualni nebo predchozi vhodne zpravy.
+Panam se pokusi pouzit podporovanou prilohu ze stejne zpravy nebo z predchozi vhodne zpravy.
 
 ## Bezpecnost
 

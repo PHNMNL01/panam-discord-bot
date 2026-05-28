@@ -167,15 +167,6 @@ def find_supported_attachment_in_message(
     return None
 
 
-def find_first_attachment_in_message(
-    message: discord.Message,
-) -> discord.Attachment | None:
-    for attachment in message.attachments:
-        return attachment
-
-    return None
-
-
 async def read_attachment_bytes(file: discord.Attachment) -> bytes:
     return await file.read()
 
@@ -840,10 +831,6 @@ class DiscordAIBot(discord.Client):
         if is_natural_attachment_analyze_request(request_text):
             try:
                 selected_file = find_supported_attachment_in_message(message)
-                first_message_file = find_first_attachment_in_message(message)
-                if selected_file is None and first_message_file is not None:
-                    selected_file = first_message_file
-
                 if selected_file is None:
                     selected_file = await find_recent_supported_attachment(message.channel)
 
