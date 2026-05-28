@@ -1,7 +1,7 @@
 from datetime import datetime, timezone
 
 
-MAX_MESSAGES_PER_CHANNEL = 20
+MAX_MESSAGES_PER_CHANNEL = 30
 
 _channel_memory: dict[int, list[dict]] = {}
 

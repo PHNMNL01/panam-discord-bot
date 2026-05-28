@@ -126,7 +126,7 @@ async def ask_panam(
 
     response = await openai_client.responses.create(
         model=model,
-        input=response_input,
+        input=cast(ResponseInputParam, response_input),
     )
 
     answer = response.output_text.strip()
