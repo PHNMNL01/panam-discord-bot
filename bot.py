@@ -475,8 +475,10 @@ def get_help_text() -> str:
         "`/analyze` s obrázkem .png, .jpg, .jpeg, .webp, .gif nebo dokumentem "
         ".txt, .md, .csv, .pdf, .docx, .xlsx do 20 MB, "
         "`Panam analyzuj obrázek`, `Panam koukni na obrázek`, "
-        "`Panam co je na obrázku?`, `Panam co je tady za chybu?`\n"
-        "Panam použije obrázek z aktuální zprávy nebo z nejbližší předchozí vhodné zprávy.\n"
+        "`Panam co je na obrázku?`, `Panam co je tady za chybu?`, "
+        "`Panam shrň to PDF`, `Panam co je v tabulce?`, `Panam přečti soubor`\n"
+        "`to`, `toto`, `ten soubor`, `ta příloha`, `ta tabulka` použijí stejnou "
+        "nebo nejbližší předchozí vhodnou zprávu/přílohu.\n"
         "Dokumenty:\n"
         "`/read_file` s přílohou .txt, .md, .csv, .pdf, .docx nebo .xlsx do 20 MB\n"
         "Help:\n"
@@ -553,6 +555,14 @@ def extract_panam_request(
     return None
 
 
+def extract_basic_panam_prompt(content: str) -> str | None:
+    match = re.match(r"^(?:hey\s+)?panam\b[\s,.:;!-]*(.*)$", content.strip(), re.IGNORECASE)
+    if not match:
+        return None
+
+    return match.group(1).strip()
+
+
 def normalize_natural_text(text: str) -> str:
     normalized = unicodedata.normalize("NFKD", text.lower())
     without_diacritics = "".join(
@@ -561,6 +571,105 @@ def normalize_natural_text(text: str) -> str:
         if not unicodedata.combining(character)
     )
     return re.sub(r"\s+", " ", without_diacritics).strip(" \t\n\r,.:;!-?")
+
+
+def normalize_text(text: str) -> str:
+    return normalize_natural_text(text)
+
+
+def is_panam_addressed(content: str) -> bool:
+    text = normalize_text(content)
+    return (
+        text.startswith("panam")
+        or text.startswith("hey panam")
+        or re.search(r"\bpanam\b", text) is not None
+    )
+
+
+def is_context_reference(text: str) -> bool:
+    normalized = normalize_text(text)
+    references = {
+        "to",
+        "toto",
+        "tom",
+        "tenhle",
+        "tohle",
+        "tento",
+        "tuhle",
+        "ten soubor",
+        "ten dokument",
+        "ta priloha",
+        "ta tabulka",
+        "ten obrazek",
+        "ten screenshot",
+        "to pdf",
+        "ten word",
+        "ten docx",
+        "ten excel",
+        "ta xlsx",
+        "to csv",
+        "to txt",
+        "ten markdown",
+    }
+    return normalized in references
+
+
+def extract_inline_content_after_trigger(content: str, trigger_phrases: list[str]) -> str:
+    text = content.strip()
+    text = re.sub(r"^(?:hey\s+)?panam\b[\s,.:;!-]*", "", text, flags=re.IGNORECASE)
+
+    for phrase in trigger_phrases:
+        pattern = rf"^{re.escape(phrase)}\b\s*(.*)$"
+        match = re.match(pattern, text, re.IGNORECASE)
+        if not match:
+            continue
+
+        value = match.group(1).strip()
+        if is_context_reference(value):
+            return ""
+        return value
+
+    return ""
+
+
+async def find_recent_text_message(channel) -> str | None:
+    history = getattr(channel, "history", None)
+    if history is None:
+        return None
+
+    async for message in history(limit=15):
+        if message.author.bot:
+            continue
+
+        content = (message.content or "").strip()
+        if not content:
+            continue
+
+        if content.startswith("/"):
+            continue
+
+        request_text = None
+        if is_panam_addressed(content):
+            request_text = re.sub(
+                r"^(?:hey\s+)?panam\b[\s,.:;!-]*",
+                "",
+                content,
+                flags=re.IGNORECASE,
+            ).strip()
+
+        normalized = normalize_text(request_text or content)
+        if not normalized or normalized == "panam":
+            continue
+
+        if (
+            is_natural_attachment_analyze_request(normalized)
+            or parse_natural_intent(normalized) is not None
+        ):
+            continue
+
+        return content
+
+    return None
 
 
 def is_natural_analyze_request(content: str) -> bool:
@@ -863,9 +972,22 @@ class DiscordAIBot(discord.Client):
 
         intent = parse_natural_intent(request_text)
         if intent is None:
-            await message.channel.send(
-                "Tohle zatím neumím převést na akci. Zkus /help."
-            )
+            basic_prompt = extract_basic_panam_prompt(message.content or "")
+            if basic_prompt is not None:
+                if not basic_prompt.strip():
+                    await message.reply(
+                        "Jsem tady. Co potřebuješ?",
+                        mention_author=False,
+                    )
+                    return
+
+                await message.reply(
+                    await ask_panam(OPENAI_MODEL, basic_prompt),
+                    mention_author=False,
+                )
+                return
+
+            await message.channel.send("Tohle zatím neumím převést na akci. Zkus /help.")
             return
 
         intent_name, value = intent
@@ -876,13 +998,10 @@ class DiscordAIBot(discord.Client):
                 return
 
             if intent_name == "note_add_previous":
-                previous_content = await find_previous_message_content(
-                    message,
-                    prefer_same_author=False,
-                )
+                previous_content = await find_recent_text_message(message.channel)
                 if previous_content is None:
                     await message.channel.send(
-                        "Nenašla jsem předchozí zprávu k uložení."
+                        "Nemám co uložit. Napiš text poznámky nebo to pošli pod zprávu, kterou si mám zapamatovat."
                     )
                     return
 
@@ -891,6 +1010,34 @@ class DiscordAIBot(discord.Client):
                 return
 
             if intent_name == "note_add" and value:
+                inline_note = extract_inline_content_after_trigger(
+                    request_text,
+                    [
+                        "přidej poznámku",
+                        "pridej poznamku",
+                        "ulož poznámku",
+                        "uloz poznamku",
+                        "zapamatuj si",
+                        "pamatuj si",
+                        "ulož si",
+                        "uloz si",
+                    ],
+                )
+                if inline_note:
+                    value = inline_note
+
+                if is_context_reference(value):
+                    previous_content = await find_recent_text_message(message.channel)
+                    if previous_content is None:
+                        await message.channel.send(
+                            "Nemám co uložit. Napiš text poznámky nebo to pošli pod zprávu, kterou si mám zapamatovat."
+                        )
+                        return
+
+                    create_note(previous_content, message.author, message.channel.id)
+                    await message.channel.send("Poznámka uložená.")
+                    return
+
                 create_note(value, message.author, message.channel.id)
                 await message.channel.send("Poznámka uložená.")
                 return
@@ -913,14 +1060,87 @@ class DiscordAIBot(discord.Client):
                 return
 
             if intent_name == "ask" and value:
+                inline_question = extract_inline_content_after_trigger(
+                    request_text,
+                    [
+                        "řekni mi",
+                        "rekni mi",
+                        "řekni",
+                        "rekni",
+                        "odpověz",
+                        "odpovez",
+                        "co si myslíš o",
+                        "co si myslis o",
+                        "co si myslí panam o",
+                        "co si mysli panam o",
+                    ],
+                )
+                if inline_question:
+                    value = inline_question
+
+                if is_context_reference(value):
+                    selected_file = find_supported_attachment_in_message(message)
+                    if selected_file is not None:
+                        answer = await analyze_selected_attachment(
+                            selected_file,
+                            "Co si o této příloze myslíš?",
+                        )
+                        await message.reply(answer, mention_author=False)
+                        return
+
+                    previous_content = await find_recent_text_message(message.channel)
+                    if previous_content is None:
+                        selected_file = await find_recent_supported_attachment(message.channel)
+                        if selected_file is not None:
+                            answer = await analyze_selected_attachment(
+                                selected_file,
+                                "Co si o této příloze myslíš?",
+                            )
+                            await message.reply(answer, mention_author=False)
+                            return
+
+                    if previous_content is None:
+                        await message.channel.send(
+                            "Nevím, k čemu se mám vyjádřit. Pošli text, přílohu, nebo to napiš pod zprávu."
+                        )
+                        return
+
+                    await send_channel_chunks(
+                        message,
+                        await ask_panam(
+                            OPENAI_MODEL,
+                            "Co si o tom myslíš?\n\n" + previous_content,
+                        ),
+                    )
+                    return
+
                 await send_channel_chunks(message, await ask_panam(OPENAI_MODEL, value))
                 return
 
             if intent_name == "ask_previous":
-                previous_content = await find_previous_message_content(message)
+                selected_file = find_supported_attachment_in_message(message)
+                if selected_file is not None:
+                    answer = await analyze_selected_attachment(
+                        selected_file,
+                        "Co si o této příloze myslíš?",
+                    )
+                    await message.reply(answer, mention_author=False)
+                    return
+
+                previous_content = await find_recent_text_message(message.channel)
+                if previous_content is None:
+                    selected_file = await find_recent_supported_attachment(message.channel)
+                    if selected_file is not None:
+                        answer = await analyze_selected_attachment(
+                            selected_file,
+                            "Co si o této příloze myslíš?",
+                        )
+                        await message.reply(answer, mention_author=False)
+                        return
+
                 if previous_content is None:
                     await message.channel.send(
-                        "Nenašla jsem předchozí zprávu, ke které se mám vyjádřit."
+                        "Nevím, k čemu se mám vyjádřit. Pošli text, přílohu, nebo to napiš pod zprávu."
                     )
                     return
 
@@ -934,14 +1154,60 @@ class DiscordAIBot(discord.Client):
                 return
 
             if intent_name == "summary" and value:
+                inline_summary = extract_inline_content_after_trigger(
+                    request_text,
+                    [
+                        "shrň mi",
+                        "shrn mi",
+                        "shrň",
+                        "shrn",
+                        "udělej summary",
+                        "udelej summary",
+                    ],
+                )
+                if inline_summary:
+                    value = inline_summary
+
+                selected_file = find_supported_attachment_in_message(message)
+                if selected_file is not None:
+                    answer = await analyze_selected_attachment(
+                        selected_file,
+                        "Shrň tuto přílohu.",
+                    )
+                    await message.reply(answer, mention_author=False)
+                    return
+
+                if is_context_reference(value):
+                    previous_content = await find_recent_text_message(message.channel)
+                    if previous_content is None:
+                        await message.channel.send(
+                            "Nemám co shrnout. Pošli text, přílohu, nebo to napiš hned pod zprávu, kterou chceš shrnout."
+                        )
+                        return
+
+                    await send_channel_chunks(
+                        message,
+                        await summarize_text(OPENAI_MODEL, previous_content),
+                    )
+                    return
+
                 await send_channel_chunks(message, await summarize_text(OPENAI_MODEL, value))
                 return
 
             if intent_name == "summary_previous":
-                previous_content = await find_previous_message_content(message)
+                selected_file = find_supported_attachment_in_message(message)
+                if selected_file is not None:
+                    answer = await analyze_selected_attachment(
+                        selected_file,
+                        "Shrň tuto přílohu.",
+                    )
+                    await message.reply(answer, mention_author=False)
+                    return
+
+                previous_content = await find_recent_text_message(message.channel)
                 if previous_content is None:
                     await message.channel.send(
-                        "Nenašla jsem předchozí zprávu ke shrnutí."
+                        "Nemám co shrnout. Pošli text, přílohu, nebo to napiš hned pod zprávu, kterou chceš shrnout."
                     )
                     return
 
@@ -955,6 +1221,21 @@ class DiscordAIBot(discord.Client):
                 await send_channel_chunks(
                     message,
                     await ask_panam_talk(OPENAI_MODEL, value),
+                )
+                return
+
+            basic_prompt = extract_basic_panam_prompt(message.content or "")
+            if basic_prompt is not None:
+                if not basic_prompt.strip():
+                    await message.reply(
+                        "Jsem tady. Co potřebuješ?",
+                        mention_author=False,
+                    )
+                    return
+
+                await message.reply(
+                    await ask_panam(OPENAI_MODEL, basic_prompt),
+                    mention_author=False,
                 )
                 return
 

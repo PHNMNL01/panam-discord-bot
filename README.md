@@ -150,6 +150,7 @@ Panam ukaz ukoly
 ### AI otazky
 
 ```text
+Panam <dotaz>
 Panam rekni mi <dotaz>
 Panam řekni mi <dotaz>
 Panam rekni <dotaz>
@@ -246,6 +247,8 @@ Panam analyzuj prilohu
 ```
 
 Panam se pokusi pouzit podporovanou prilohu ze stejne zpravy nebo z predchozi vhodne zpravy.
+
+Fraze typu `to`, `toto`, `ten soubor`, `ta priloha`, `ta tabulka` nebo `ten obrazek` se pokusi pouzit aktualni zpravu nebo nejblizsi predchozi vhodnou zpravu/prilohu.
 
 ## Bezpecnost
 
