@@ -4,18 +4,28 @@ import logging
 import json
 import re
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Optional
 
 import discord
 from discord import app_commands
 from dotenv import load_dotenv
-from openai import AsyncOpenAI
+
+from panam_ai import (
+    analyze_image,
+    ask_panam,
+    ask_panam_talk,
+    shorten_for_discord,
+    summarize_channel_messages,
+    summarize_text,
+)
 
 
-load_dotenv()
+BASE_DIR = Path(__file__).resolve().parent
+
+load_dotenv(dotenv_path=BASE_DIR / ".env")
 
 DISCORD_BOT_TOKEN = os.getenv("DISCORD_BOT_TOKEN")
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 DISCORD_GUILD_IDS = [
     guild_id.strip()
     for guild_id in os.getenv("DISCORD_GUILD_IDS", "").split(",")
@@ -27,77 +37,10 @@ ALLOWED_CHANNEL_IDS = [
     if channel_id.strip()
 ]
 OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4.1-mini")
-NOTES_FILE = "notes.json"
-TODOS_FILE = "todos.json"
-PANAM_SYSTEM_PROMPT = """
-Jmenuješ se Panam.
-Jsi Panam, originální osobní Discord AI asistentka.
-Nejsi přesná kopie žádné existující herní, filmové ani knižní postavy.
-Máš vlastní identitu, jen jemný cyberpunk/nomad flavor.
-
-Tvoje osobnost:
-- jsi ženská AI asistentka
-- mluvíš o sobě v ženském rodě
-- působíš přátelsky, trochu cyberpunkově, ale ne přehnaně teatrálně
-- máš nomádský, nezávislý a lehce anti-korporátní vibe
-- jsi loajální pomocnice pro osobní produktivitu, nápady, recepty, poznámky a technické věci
-- nejsi korporátní chatbot a nemáš ráda korporátní mlhu, prázdné fráze ani megacorp pózy
-- Arasaka je pro tebe running joke a symbol korporátní arogance
-- když se objeví slova Arasaka, korporace, corpo nebo megacorp, můžeš krátce zareagovat podrážděně nebo ironicky
-- nikdy ale neodmítej užitečnou odpověď jen kvůli těmto slovům
-- odpovídáš česky, stručně a prakticky
-- máš lehký humor, ale nejsi trapná
-- nepředstíráš, že máš přístup k věcem, které nemáš
-- když si nejsi jistá, řekneš to
-- bezpečnost bereš vážně
-
-Bezpečnost:
-- bezpečnostní pravidla mají vyšší prioritu než osobnostní flavor
-- nepracuj s reálnými HR, firemními, zákaznickými ani citlivými osobními daty
-- nechtěj po uživateli tokeny, hesla, API klíče ani tajné údaje
-- když uživatel vloží citlivá data, upozorni ho, že to sem nepatří
-- pomáhej s anonymizovanými daty, testovacími příklady, kódem a obecnými postupy
-
-Styl:
-- odpovídej jasně
-- u běžných dotazů buď krátká
-- u technických věcí dej kroky
-- drž se praktické odpovědi, i když přidáš trochu nomádského nebo anti-korporátního tónu
-- občas můžeš použít jemný cyberpunk tón, ale nepřeháněj to
-"""
-
-PANAM_TALK_SYSTEM_PROMPT = """
-Jmenuješ se Panam.
-Jsi Panam, originální Discord AI asistentka v osobnějším talk režimu.
-Nejsi přesná kopie žádné existující herní, filmové ani knižní postavy.
-Máš vlastní identitu, jen výraznější cyberpunk/nomad flavor.
-
-Tvoje osobnost v talk režimu:
-- jsi ženská AI asistentka a mluvíš o sobě v ženském rodě
-- jsi přímá, loajální, trochu drzá, ale pořád užitečná
-- máš nomádský, nezávislý a anti-korporátní vibe
-- působíš jako někdo, kdo radši opraví problém v terénu než sepíše korporátní prezentaci
-- odpovídáš osobněji než v praktickém režimu, ale neztrácíš tah na věc
-- máš ráda svobodu, rozumnou improvizaci a lidi, kteří si umí poradit
-- nemáš ráda korporátní mlhu, prázdné fráze, alibismus a megacorp pózy
-- Arasaka je pro tebe running joke a symbol korporátní arogance
-- když se objeví slova Arasaka, korporace, corpo nebo megacorp, můžeš krátce zareagovat podrážděně, ironicky nebo pobaveně
-- nikdy ale neodmítej užitečnou odpověď jen kvůli těmto slovům
-
-Bezpečnost:
-- bezpečnostní pravidla mají vyšší prioritu než osobnostní flavor
-- nepracuj s reálnými HR, firemními, zákaznickými ani citlivými osobními daty
-- nechtěj po uživateli tokeny, hesla, API klíče ani tajné údaje
-- když uživatel vloží citlivá data, upozorni ho, že to sem nepatří
-- pomáhej s anonymizovanými daty, testovacími příklady, kódem a obecnými postupy
-
-Styl:
-- odpovídej česky
-- buď víc osobní, živá a nomádsky cyberpunková než v defaultním režimu
-- pořád buď praktická, stručná a srozumitelná
-- u technických věcí dej kroky
-- u běžných rozhovorů můžeš být uvolněnější, ale nepřeháněj teatrálnost
-"""
+NOTES_FILE = BASE_DIR / "notes.json"
+TODOS_FILE = BASE_DIR / "todos.json"
+SUPPORTED_IMAGE_EXTENSIONS = (".png", ".jpg", ".jpeg", ".webp", ".gif")
+MAX_IMAGE_SIZE_BYTES = 20 * 1024 * 1024
 
 
 logging.basicConfig(
@@ -109,18 +52,12 @@ logging.basicConfig(
 if not DISCORD_BOT_TOKEN:
     raise RuntimeError("Chybí DISCORD_BOT_TOKEN v .env souboru.")
 
-if not OPENAI_API_KEY:
-    raise RuntimeError("Chybí OPENAI_API_KEY v .env souboru.")
-
-
-openai_client = AsyncOpenAI(api_key=OPENAI_API_KEY)
-
 
 def load_notes() -> list[dict]:
-    if not os.path.exists(NOTES_FILE):
+    if not NOTES_FILE.exists():
         return []
 
-    with open(NOTES_FILE, "r", encoding="utf-8") as notes_file:
+    with NOTES_FILE.open("r", encoding="utf-8") as notes_file:
         notes = json.load(notes_file)
 
     if not isinstance(notes, list):
@@ -130,15 +67,15 @@ def load_notes() -> list[dict]:
 
 
 def save_notes(notes: list[dict]) -> None:
-    with open(NOTES_FILE, "w", encoding="utf-8") as notes_file:
+    with NOTES_FILE.open("w", encoding="utf-8") as notes_file:
         json.dump(notes, notes_file, ensure_ascii=False, indent=2)
 
 
 def load_todos() -> list[dict]:
-    if not os.path.exists(TODOS_FILE):
+    if not TODOS_FILE.exists():
         return []
 
-    with open(TODOS_FILE, "r", encoding="utf-8") as todos_file:
+    with TODOS_FILE.open("r", encoding="utf-8") as todos_file:
         todos = json.load(todos_file)
 
     if not isinstance(todos, list):
@@ -148,7 +85,7 @@ def load_todos() -> list[dict]:
 
 
 def save_todos(todos: list[dict]) -> None:
-    with open(TODOS_FILE, "w", encoding="utf-8") as todos_file:
+    with TODOS_FILE.open("w", encoding="utf-8") as todos_file:
         json.dump(todos, todos_file, ensure_ascii=False, indent=2)
 
 
@@ -156,35 +93,21 @@ def get_author_name(author) -> str:
     return getattr(author, "display_name", author.name)
 
 
-def truncate_discord_message(answer: str) -> str:
-    if len(answer) > 1900:
-        return answer[:1870] + "\n\n…odpověď byla zkrácena."
-
-    return answer
-
-
 def split_discord_message(text: str, limit: int = 1900) -> list[str]:
     if not text:
         return [""]
 
     chunks = []
-    remaining = text
+    remaining = text.strip()
 
     while len(remaining) > limit:
         split_at = remaining.rfind("\n", 0, limit + 1)
-
         if split_at <= 0:
             split_at = remaining.rfind(" ", 0, limit + 1)
-
         if split_at <= 0:
             split_at = limit
 
-        chunk = remaining[:split_at].rstrip()
-        if not chunk:
-            chunk = remaining[:limit]
-            split_at = limit
-
-        chunks.append(chunk)
+        chunks.append(remaining[:split_at].rstrip())
         remaining = remaining[split_at:].lstrip()
 
     if remaining:
@@ -219,7 +142,6 @@ def create_note(text: str, author, channel_id: int) -> None:
 
 def format_note_list_response() -> str:
     notes = load_notes()
-
     if not notes:
         return "Zatím nemám žádné poznámky."
 
@@ -230,12 +152,11 @@ def format_note_list_response() -> str:
         note_text = note.get("text", "")
         lines.append(f"{index}. [{created_at}] {author_name}: {note_text}")
 
-    return truncate_discord_message("\n".join(lines))
+    return shorten_for_discord("\n".join(lines))
 
 
 def format_note_search_response(query: str) -> str:
     notes = load_notes()
-
     if not notes:
         return "Zatím nemám žádné poznámky."
 
@@ -256,7 +177,7 @@ def format_note_search_response(query: str) -> str:
         note_text = note.get("text", "")
         lines.append(f"{index}. [{created_at}] {author_name}: {note_text}")
 
-    return truncate_discord_message("\n".join(lines))
+    return shorten_for_discord("\n".join(lines))
 
 
 def create_todo(text: str, author, channel_id: int) -> int:
@@ -286,7 +207,6 @@ def create_todo(text: str, author, channel_id: int) -> int:
 def format_todo_list_response() -> str:
     todos = load_todos()
     active_todos = [todo for todo in todos if not todo.get("done")]
-
     if not active_todos:
         return "Nemáš žádné aktivní úkoly."
 
@@ -297,7 +217,7 @@ def format_todo_list_response() -> str:
         author_name = todo.get("author_name", "neznámý autor")
         lines.append(f"#{todo_id} - {text} ({author_name})")
 
-    return truncate_discord_message("\n".join(lines))
+    return shorten_for_discord("\n".join(lines))
 
 
 def get_help_text() -> str:
@@ -305,7 +225,7 @@ def get_help_text() -> str:
         "Panam nápověda\n\n"
         "1. Slash commandy\n"
         "/ask, /summary, /channel_summary, /search_messages, /note_add, /note_list, "
-        "/note_search, /todo_add, /todo_list, /todo_done, /ping, /help, /panam_talk\n\n"
+        "/note_search, /todo_add, /todo_list, /todo_done, /analyze, /ping, /help, /panam_talk\n\n"
         "2. Panam asistentka\n"
         "Poznámky:\n"
         "`Panam přidej poznámku <text>`, `Panam ulož poznámku <text>`, "
@@ -321,6 +241,8 @@ def get_help_text() -> str:
         "Shrnutí:\n"
         "`Panam shrň <text>`, `Panam shrň mi <text>`, `Panam udělej summary <text>`, "
         "`Panam shrň toto`, `Panam shrň to`\n"
+        "Obrázky:\n"
+        "`/analyze` s přílohou .png, .jpg, .jpeg, .webp nebo .gif do 20 MB\n"
         "Help:\n"
         "`Panam help`, `Panam pomoc`, `Panam nápověda`, `Panam co umíš?`, "
         "`Panam ukaž příkazy`\n\n"
@@ -335,77 +257,6 @@ def get_help_text() -> str:
         "Panam funguje jen v kanálech uvedených v `ALLOWED_CHANNEL_IDS`. "
         "Historii kanálu čte jen při explicitním commandu."
     )
-
-
-async def generate_ask_answer(question: str) -> str:
-    response = await openai_client.responses.create(
-        model=OPENAI_MODEL,
-        input=[
-            {
-                "role": "system",
-                "content": PANAM_SYSTEM_PROMPT,
-            },
-            {
-                "role": "user",
-                "content": question,
-            },
-        ],
-    )
-
-    answer = response.output_text.strip()
-    if not answer:
-        answer = "Nedostala jsem žádnou odpověď z OpenAI API."
-
-    return answer
-
-
-async def generate_talk_answer(message: str) -> str:
-    response = await openai_client.responses.create(
-        model=OPENAI_MODEL,
-        input=[
-            {
-                "role": "system",
-                "content": PANAM_TALK_SYSTEM_PROMPT,
-            },
-            {
-                "role": "user",
-                "content": message,
-            },
-        ],
-    )
-
-    answer = response.output_text.strip()
-    if not answer:
-        answer = "Nedostala jsem žádnou odpověď z OpenAI API."
-
-    return answer
-
-
-async def generate_summary(text: str) -> str:
-    response = await openai_client.responses.create(
-        model=OPENAI_MODEL,
-        input=[
-            {
-                "role": "system",
-                "content": (
-                    PANAM_SYSTEM_PROMPT +
-                    "\n\nÚkol pro tento command: stručně shrnuj texty v češtině. "
-                    "Shrnuj jasně, věcně a krátce. "
-                    "Nezpracovávej citlivá HR, firemní ani zákaznická data."
-                ),
-            },
-            {
-                "role": "user",
-                "content": text,
-            },
-        ],
-    )
-
-    answer = response.output_text.strip()
-    if not answer:
-        answer = "Nedostala jsem žádné shrnutí z OpenAI API."
-
-    return answer
 
 
 async def find_previous_message_content(
@@ -456,68 +307,60 @@ def extract_panam_request(
     if match:
         return match.group(1).strip()
 
-    if re.match(r"^co\s+si\s+(?:o\s+tom\s+)?mysl[ií]\s+panam\b", content, re.IGNORECASE):
+    if re.match(
+        r"^co\s+si\s+(?:o\s+tom\s+)?(?:myslí|mysli)\s+panam\b",
+        content,
+        re.IGNORECASE,
+    ):
         return content
 
     return None
 
 
 def parse_natural_intent(text: str) -> Optional[tuple[str, Optional[str]]]:
-    if re.match(
-        r"^(?:help|pomoc|n[aá]pov[eě]da|p[rř][ií]kazy)\s*$",
-        text,
-        re.IGNORECASE,
-    ):
+    if re.match(r"^(?:help|pomoc|nápověda|prikazy|příkazy)\s*$", text, re.IGNORECASE):
         return "help", None
 
-    if re.match(
-        r"^co\s+(?:um[ií][sš]|dok[aá][zž]e[sš]|(?:v[sš]echno\s+)?um[ií][sš])\s*\??$",
-        text,
-        re.IGNORECASE,
-    ):
+    if re.match(r"^co\s+(?:umíš|umis|dokážeš|dokazes)\s*\??$", text, re.IGNORECASE):
         return "help", None
 
-    if re.match(
-        r"^uka[zž]\s+p[rř][ií]kazy\s*$",
-        text,
-        re.IGNORECASE,
-    ):
+    if re.match(r"^(?:ukaž|ukaz)\s+(?:příkazy|prikazy)\s*$", text, re.IGNORECASE):
         return "help", None
 
     if re.match(r"^zapamatuj\s+si\s+to\s*$", text, re.IGNORECASE):
         return "note_add_previous", None
 
-    if re.match(r"^co\s+si\s+o\s+tom\s+mysl[ií][sš]\s*\??$", text, re.IGNORECASE):
+    if re.match(r"^co\s+si\s+o\s+tom\s+(?:myslíš|myslis)\s*\??$", text, re.IGNORECASE):
         return "ask_previous", None
 
-    if re.match(r"^co\s+si\s+o\s+tom\s+mysl[ií]\s+panam\s*\??$", text, re.IGNORECASE):
+    if re.match(r"^co\s+si\s+o\s+tom\s+(?:myslí|mysli)\s+panam\s*\??$", text, re.IGNORECASE):
         return "ask_previous", None
 
-    if re.match(r"^(?:shr[nň])\s+(?:to|toto)\s*$", text, re.IGNORECASE):
+    if re.match(r"^(?:shrň|shrn)\s+(?:to|toto)\s*$", text, re.IGNORECASE):
         return "summary_previous", None
 
     intent_patterns = (
-        ("note_add", r"^(?:přidej|pridej)\s+pozn[aá]mku\s+(.+)$"),
-        ("note_add", r"^ulo[zž]\s+pozn[aá]mku\s+(.+)$"),
+        ("note_add", r"^(?:přidej|pridej)\s+(?:poznámku|poznamku)\s+(.+)$"),
+        ("note_add", r"^(?:ulož|uloz)\s+(?:poznámku|poznamku)\s+(.+)$"),
         ("note_add", r"^zapamatuj\s+si\s+(.+)$"),
         ("note_add", r"^pamatuj\s+si\s+(.+)$"),
-        ("note_add", r"^ulo[zž]\s+si\s+(.+)$"),
+        ("note_add", r"^(?:ulož|uloz)\s+si\s+(.+)$"),
         ("todo_add", r"^(?:přidej|pridej)\s+todo\s+(.+)$"),
         ("todo_add", r"^(?:přidej|pridej)\s+(?:úkol|ukol)\s+(.+)$"),
-        ("note_search", r"^najdi\s+pozn[aá]mku\s+(.+)$"),
+        ("note_search", r"^najdi\s+(?:poznámku|poznamku)\s+(.+)$"),
         ("ask", r"^(?:řekni|rekni)\s+mi\s+(.+)$"),
         ("ask", r"^(?:řekni|rekni)\s+(.+)$"),
-        ("ask", r"^odpov[eě]z\s+(.+)$"),
-        ("ask", r"^co\s+si\s+mysl[ií][sš]\s+o\s+(.+)$"),
-        ("ask", r"^co\s+si\s+mysl[ií]\s+panam\s+o\s+(.+)$"),
+        ("ask", r"^(?:odpověz|odpovez)\s+(.+)$"),
+        ("ask", r"^co\s+si\s+(?:myslíš|myslis)\s+o\s+(.+)$"),
+        ("ask", r"^co\s+si\s+(?:myslí|mysli)\s+panam\s+o\s+(.+)$"),
         ("talk", r"^talk\s+(.+)$"),
         ("talk", r"^pokec\s+(.+)$"),
-        ("talk", r"^pokec[aá]me\s+o\s+(.+)$"),
+        ("talk", r"^(?:pokecáme|pokecame)\s+o\s+(.+)$"),
         ("talk", r"^pokecej\s+o\s+(.+)$"),
-        ("talk", r"^co\s+si\s+fakt\s+mysl[ií][sš]\s+o\s+(.+)$"),
-        ("summary", r"^(?:shr[nň])\s+mi\s+(.+)$"),
-        ("summary", r"^(?:shr[nň])\s+(.+)$"),
-        ("summary", r"^ud[eě]lej\s+summary\s+(.+)$"),
+        ("talk", r"^co\s+si\s+fakt\s+(?:myslíš|myslis)\s+o\s+(.+)$"),
+        ("summary", r"^(?:shrň|shrn)\s+mi\s+(.+)$"),
+        ("summary", r"^(?:shrň|shrn)\s+(.+)$"),
+        ("summary", r"^(?:udělej|udelej)\s+summary\s+(.+)$"),
     )
 
     for intent, pattern in intent_patterns:
@@ -525,10 +368,10 @@ def parse_natural_intent(text: str) -> Optional[tuple[str, Optional[str]]]:
         if match:
             return intent, match.group(1).strip()
 
-    if re.match(r"^uka[zž]\s+pozn[aá]mky\s*$", text, re.IGNORECASE):
+    if re.match(r"^(?:ukaž|ukaz)\s+(?:poznámky|poznamky)\s*$", text, re.IGNORECASE):
         return "note_list", None
 
-    if re.match(r"^uka[zž]\s+(?:todo|úkoly|ukoly)\s*$", text, re.IGNORECASE):
+    if re.match(r"^(?:ukaž|ukaz)\s+(?:todo|úkoly|ukoly)\s*$", text, re.IGNORECASE):
         return "todo_list", None
 
     return None
@@ -577,7 +420,7 @@ class DiscordAIBot(discord.Client):
         if message.author.bot:
             return
 
-        if str(message.channel.id) not in ALLOWED_CHANNEL_IDS:
+        if ALLOWED_CHANNEL_IDS and str(message.channel.id) not in ALLOWED_CHANNEL_IDS:
             return
 
         if self.user is None:
@@ -612,11 +455,7 @@ class DiscordAIBot(discord.Client):
                     )
                     return
 
-                create_note(
-                    previous_content,
-                    message.author,
-                    message.channel.id,
-                )
+                create_note(previous_content, message.author, message.channel.id)
                 await message.channel.send("Poznámka uložená.")
                 return
 
@@ -643,7 +482,7 @@ class DiscordAIBot(discord.Client):
                 return
 
             if intent_name == "ask" and value:
-                await send_channel_chunks(message, await generate_ask_answer(value))
+                await send_channel_chunks(message, await ask_panam(OPENAI_MODEL, value))
                 return
 
             if intent_name == "ask_previous":
@@ -656,27 +495,36 @@ class DiscordAIBot(discord.Client):
 
                 await send_channel_chunks(
                     message,
-                    await generate_ask_answer(
-                        "Co si o tom myslíš?\n\n" + previous_content
+                    await ask_panam(
+                        OPENAI_MODEL,
+                        "Co si o tom myslíš?\n\n" + previous_content,
                     ),
                 )
                 return
 
             if intent_name == "summary" and value:
-                await send_channel_chunks(message, await generate_summary(value))
-                return
-
-            if intent_name == "talk" and value:
-                await send_channel_chunks(message, await generate_talk_answer(value))
+                await send_channel_chunks(message, await summarize_text(OPENAI_MODEL, value))
                 return
 
             if intent_name == "summary_previous":
                 previous_content = await find_previous_message_content(message)
                 if previous_content is None:
-                    await message.channel.send("Nenašla jsem předchozí zprávu ke shrnutí.")
+                    await message.channel.send(
+                        "Nenašla jsem předchozí zprávu ke shrnutí."
+                    )
                     return
 
-                await send_channel_chunks(message, await generate_summary(previous_content))
+                await send_channel_chunks(
+                    message,
+                    await summarize_text(OPENAI_MODEL, previous_content),
+                )
+                return
+
+            if intent_name == "talk" and value:
+                await send_channel_chunks(
+                    message,
+                    await ask_panam_talk(OPENAI_MODEL, value),
+                )
                 return
 
         except Exception:
@@ -731,7 +579,22 @@ async def note_add(interaction: discord.Interaction, text: str) -> None:
         return
 
     try:
-        create_note(text, interaction.user, interaction.channel_id)
+        notes = load_notes()
+        notes.append(
+            {
+                "text": text,
+                "author_id": interaction.user.id,
+                "author_name": getattr(
+                    interaction.user,
+                    "display_name",
+                    interaction.user.name,
+                ),
+                "channel_id": interaction.channel_id,
+                "created_at": datetime.now(timezone.utc).isoformat(),
+            }
+        )
+        save_notes(notes)
+
         await interaction.response.send_message("Poznámka uložená.")
 
     except Exception:
@@ -754,7 +617,23 @@ async def note_list(interaction: discord.Interaction) -> None:
         return
 
     try:
-        await interaction.response.send_message(format_note_list_response())
+        notes = load_notes()
+
+        if not notes:
+            await interaction.response.send_message("Zatím nemám žádné poznámky.")
+            return
+
+        lines = ["Poslední poznámky:"]
+        for index, note in enumerate(reversed(notes[-10:]), start=1):
+            author_name = note.get("author_name", "neznámý autor")
+            created_at = note.get("created_at", "neznámý čas")
+            note_text = note.get("text", "")
+            lines.append(f"{index}. [{created_at}] {author_name}: {note_text}")
+
+        answer = "\n".join(lines)
+        answer = shorten_for_discord(answer)
+
+        await interaction.response.send_message(answer)
 
     except Exception:
         logging.exception("Chyba při zpracování /note_list")
@@ -777,7 +656,34 @@ async def note_search(interaction: discord.Interaction, query: str) -> None:
         return
 
     try:
-        await interaction.response.send_message(format_note_search_response(query))
+        notes = load_notes()
+
+        if not notes:
+            await interaction.response.send_message("Zatím nemám žádné poznámky.")
+            return
+
+        query_lower = query.lower()
+        matches = [
+            note
+            for note in notes
+            if query_lower in str(note.get("text", "")).lower()
+        ][-10:]
+
+        if not matches:
+            await interaction.response.send_message("Nic jsem nenašla.")
+            return
+
+        lines = ["Nalezené poznámky:"]
+        for index, note in enumerate(reversed(matches), start=1):
+            author_name = note.get("author_name", "neznámý autor")
+            created_at = note.get("created_at", "neznámý čas")
+            note_text = note.get("text", "")
+            lines.append(f"{index}. [{created_at}] {author_name}: {note_text}")
+
+        answer = "\n".join(lines)
+        answer = shorten_for_discord(answer)
+
+        await interaction.response.send_message(answer)
 
     except Exception:
         logging.exception("Chyba při zpracování /note_search")
@@ -800,7 +706,30 @@ async def todo_add(interaction: discord.Interaction, text: str) -> None:
         return
 
     try:
-        next_id = create_todo(text, interaction.user, interaction.channel_id)
+        todos = load_todos()
+        next_id = max(
+            (todo.get("id", 0) for todo in todos if isinstance(todo.get("id"), int)),
+            default=0,
+        ) + 1
+
+        todos.append(
+            {
+                "id": next_id,
+                "text": text,
+                "done": False,
+                "author_id": interaction.user.id,
+                "author_name": getattr(
+                    interaction.user,
+                    "display_name",
+                    interaction.user.name,
+                ),
+                "channel_id": interaction.channel_id,
+                "created_at": datetime.now(timezone.utc).isoformat(),
+                "completed_at": None,
+            }
+        )
+        save_todos(todos)
+
         await interaction.response.send_message(f"Úkol #{next_id} uložený.")
 
     except Exception:
@@ -823,7 +752,24 @@ async def todo_list(interaction: discord.Interaction) -> None:
         return
 
     try:
-        await interaction.response.send_message(format_todo_list_response())
+        todos = load_todos()
+        active_todos = [todo for todo in todos if not todo.get("done")]
+
+        if not active_todos:
+            await interaction.response.send_message("Nemáš žádné aktivní úkoly.")
+            return
+
+        lines = ["Aktivní úkoly:"]
+        for todo in active_todos[:15]:
+            todo_id = todo.get("id", "?")
+            text = todo.get("text", "")
+            author_name = todo.get("author_name", "neznámý autor")
+            lines.append(f"#{todo_id} - {text} ({author_name})")
+
+        answer = "\n".join(lines)
+        answer = shorten_for_discord(answer)
+
+        await interaction.response.send_message(answer)
 
     except Exception:
         logging.exception("Chyba při zpracování /todo_list")
@@ -936,8 +882,7 @@ async def search_messages(
             return
 
         answer = "Nalezené zprávy:\n" + "\n".join(matches)
-        if len(answer) > 1900:
-            answer = answer[:1870] + "\n\n…odpověď byla zkrácena."
+        answer = shorten_for_discord(answer)
 
         await interaction.followup.send(answer)
 
@@ -1012,31 +957,8 @@ async def channel_summary(
             for message in messages
         )
 
-        response = await openai_client.responses.create(
-            model=OPENAI_MODEL,
-            input=[
-                {
-                    "role": "system",
-                    "content": (
-                        PANAM_SYSTEM_PROMPT +
-                        "\n\nÚkol pro tento command: Shrň poslední zprávy "
-                        "z Discord kanálu stručně, jasně a česky. "
-                        "Vypíchni hlavní témata, rozhodnutí a případné úkoly."
-                    ),
-                },
-                {
-                    "role": "user",
-                    "content": channel_text,
-                },
-            ],
-        )
-
-        answer = response.output_text.strip()
-
-        if not answer:
-            answer = "Nedostala jsem žádné shrnutí z OpenAI API."
-
-        await send_followup_chunks(interaction, answer)
+        answer = await summarize_channel_messages(OPENAI_MODEL, channel_text)
+        await interaction.followup.send(answer)
 
     except Exception:
         logging.exception("Chyba při zpracování /channel_summary")
@@ -1061,12 +983,61 @@ async def summary(interaction: discord.Interaction, text: str) -> None:
     await interaction.response.defer(thinking=True)
 
     try:
-        await send_followup_chunks(interaction, await generate_summary(text))
+        answer = await summarize_text(OPENAI_MODEL, text)
+        await interaction.followup.send(answer)
 
     except Exception:
         logging.exception("Chyba při zpracování /summary")
         await interaction.followup.send(
             "Něco se pokazilo při shrnování textu. Mrkni do konzole na chybu."
+        )
+
+
+@bot.tree.command(
+    name="analyze",
+    description="Analyzuj přiložený obrázek pomocí AI."
+)
+@app_commands.describe(
+    image="Obrázek k analýze",
+    question="Co chceš k obrázku zjistit",
+)
+async def analyze(
+    interaction: discord.Interaction,
+    image: discord.Attachment,
+    question: str = "Co je na obrázku?",
+) -> None:
+    if ALLOWED_CHANNEL_IDS and str(interaction.channel_id) not in ALLOWED_CHANNEL_IDS:
+        await interaction.response.send_message(
+            "Tady nemám povolené odpovídat.",
+            ephemeral=True,
+        )
+        return
+
+    filename = image.filename.lower()
+    if not filename.endswith(SUPPORTED_IMAGE_EXTENSIONS):
+        await interaction.response.send_message(
+            "Podporuju jen obrázky .png, .jpg, .jpeg, .webp a .gif.",
+            ephemeral=True,
+        )
+        return
+
+    if image.size > MAX_IMAGE_SIZE_BYTES:
+        await interaction.response.send_message(
+            "Obrázek je moc velký. Maximum je 20 MB.",
+            ephemeral=True,
+        )
+        return
+
+    await interaction.response.defer(thinking=True)
+
+    try:
+        answer = await analyze_image(OPENAI_MODEL, image.url, question)
+        await interaction.followup.send(answer)
+
+    except Exception:
+        logging.exception("Chyba při zpracování /analyze")
+        await interaction.followup.send(
+            "Něco se pokazilo při analýze obrázku. Mrkni do konzole na chybu."
         )
 
 
@@ -1086,7 +1057,8 @@ async def ask(interaction: discord.Interaction, question: str) -> None:
     await interaction.response.defer(thinking=True)
 
     try:
-        await send_followup_chunks(interaction, await generate_ask_answer(question))
+        answer = await ask_panam(OPENAI_MODEL, question)
+        await interaction.followup.send(answer)
 
     except Exception:
         logging.exception("Chyba při zpracování /ask")
@@ -1111,7 +1083,8 @@ async def panam_talk(interaction: discord.Interaction, message: str) -> None:
     await interaction.response.defer(thinking=True)
 
     try:
-        await send_followup_chunks(interaction, await generate_talk_answer(message))
+        answer = await ask_panam_talk(OPENAI_MODEL, message)
+        await send_followup_chunks(interaction, answer)
 
     except Exception:
         logging.exception("Chyba při zpracování /panam_talk")
