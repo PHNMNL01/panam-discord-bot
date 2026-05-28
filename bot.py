@@ -23,10 +23,12 @@ from panam_ai import (
     summarize_text,
 )
 from panam_phrases import (
-    ATTACHMENT_ANALYZE_SUBJECTS,
+    ATTACHMENT_ANALYZE_PATTERNS,
+    ATTACHMENT_SUBJECTS,
     BASIC_PANAM_EMPTY_RESPONSE,
     CONTEXT_REFERENCES,
-    GENERIC_IMAGE_ANALYZE_TRIGGERS,
+    GENERIC_ATTACHMENT_PATTERNS,
+    GENERIC_IMAGE_PHRASES,
     HELP_PATTERNS,
     IMAGE_ANALYZE_TRIGGERS,
     NATURAL_INTENT_PATTERNS,
@@ -35,6 +37,9 @@ from panam_phrases import (
     NOTE_LIST_PATTERN,
     OPINION_CONTEXT_PATTERNS,
     OPINION_TRIGGERS,
+    PANAM_OPINION_MENTION_PATTERN,
+    PANAM_PREFIX_PATTERN,
+    PANAM_STRIP_PREFIX_PATTERN,
     SUMMARY_CONTEXT_PATTERN,
     SUMMARY_TRIGGERS,
     TODO_LIST_PATTERN,
@@ -559,12 +564,12 @@ def extract_panam_request(
         if content.startswith(mention):
             return content[len(mention):].strip(" \t\n\r,.:;!-")
 
-    match = re.match(r"^(?:hey\s+)?panam\b[\s,.:;!-]*(.*)$", content, re.IGNORECASE)
+    match = re.match(PANAM_PREFIX_PATTERN, content, re.IGNORECASE)
     if match:
         return match.group(1).strip()
 
     if re.match(
-        r"^co\s+si\s+(?:o\s+tom\s+)?(?:myslí|mysli)\s+panam\b",
+        PANAM_OPINION_MENTION_PATTERN,
         content,
         re.IGNORECASE,
     ):
@@ -574,7 +579,7 @@ def extract_panam_request(
 
 
 def extract_basic_panam_prompt(content: str) -> str | None:
-    match = re.match(r"^(?:hey\s+)?panam\b[\s,.:;!-]*(.*)$", content.strip(), re.IGNORECASE)
+    match = re.match(PANAM_PREFIX_PATTERN, content.strip(), re.IGNORECASE)
     if not match:
         return None
 
@@ -611,7 +616,7 @@ def is_context_reference(text: str) -> bool:
 
 def extract_inline_content_after_trigger(content: str, trigger_phrases: list[str]) -> str:
     text = content.strip()
-    text = re.sub(r"^(?:hey\s+)?panam\b[\s,.:;!-]*", "", text, flags=re.IGNORECASE)
+    text = re.sub(PANAM_STRIP_PREFIX_PATTERN, "", text, flags=re.IGNORECASE)
 
     for phrase in trigger_phrases:
         pattern = rf"^{re.escape(phrase)}\b\s*(.*)$"
@@ -646,7 +651,7 @@ async def find_recent_text_message(channel) -> str | None:
         request_text = None
         if is_panam_addressed(content):
             request_text = re.sub(
-                r"^(?:hey\s+)?panam\b[\s,.:;!-]*",
+                PANAM_STRIP_PREFIX_PATTERN,
                 "",
                 content,
                 flags=re.IGNORECASE,
@@ -677,36 +682,39 @@ def is_natural_attachment_analyze_request(content: str) -> bool:
         return True
 
     text = normalize_natural_text(content)
-    subject_pattern = "|".join(ATTACHMENT_ANALYZE_SUBJECTS)
+    subject_pattern = "|".join(re.escape(subject) for subject in ATTACHMENT_SUBJECTS)
 
-    action_patterns = (
-        rf"^(?:analyzuj|koukni na|podivej se na|precti|shrn|vysvetli)\s+(?:(?:ten|to|tu|tento|tuto|te)\s+)?(?:{subject_pattern})\b",
-        rf"^co\s+je\s+(?:v|ve)\s+(?:(?:tom|te)\s+)?(?:{subject_pattern})\b",
-        rf"^co\s+obsahuje\s+(?:(?:ten|to|ta)\s+)?(?:{subject_pattern})\b",
+    return any(
+        re.match(
+            pattern_template.format(subject_pattern=subject_pattern),
+            text,
+            re.IGNORECASE,
+        )
+        for pattern_template in ATTACHMENT_ANALYZE_PATTERNS
     )
-
-    return any(re.match(pattern, text, re.IGNORECASE) for pattern in action_patterns)
 
 
 def is_generic_natural_attachment_request(content: str) -> bool:
     if is_natural_analyze_request(content):
         text = normalize_natural_text(content)
-        return text in GENERIC_IMAGE_ANALYZE_TRIGGERS
+        return text in GENERIC_IMAGE_PHRASES
 
     text = normalize_natural_text(content)
-    subject_pattern = "|".join(ATTACHMENT_ANALYZE_SUBJECTS)
-    generic_patterns = (
-        rf"^(?:analyzuj|koukni na|podivej se na|precti|shrn|vysvetli)\s+(?:(?:ten|to|tu|tento|tuto|te)\s+)?(?:{subject_pattern})$",
-        rf"^co\s+je\s+(?:v|ve)\s+(?:(?:tom|te)\s+)?(?:{subject_pattern})$",
-        rf"^co\s+obsahuje\s+(?:(?:ten|to|ta)\s+)?(?:{subject_pattern})$",
+    subject_pattern = "|".join(re.escape(subject) for subject in ATTACHMENT_SUBJECTS)
+    return any(
+        re.match(
+            pattern_template.format(subject_pattern=subject_pattern),
+            text,
+            re.IGNORECASE,
+        )
+        for pattern_template in GENERIC_ATTACHMENT_PATTERNS
     )
-    return any(re.match(pattern, text, re.IGNORECASE) for pattern in generic_patterns)
 
 
 def get_natural_analyze_question(content: str) -> str:
     text = normalize_natural_text(content)
     default_question = "Popiš, co je na obrázku."
-    if text in GENERIC_IMAGE_ANALYZE_TRIGGERS:
+    if text in GENERIC_IMAGE_PHRASES:
         return default_question
 
     return content.strip() or default_question

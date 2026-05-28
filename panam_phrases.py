@@ -1,4 +1,7 @@
 PANAM_NAME = "panam"
+PANAM_PREFIX_PATTERN = r"^(?:hey\s+)?panam\b[\s,.:;!-]*(.*)$"
+PANAM_STRIP_PREFIX_PATTERN = r"^(?:hey\s+)?panam\b[\s,.:;!-]*"
+PANAM_OPINION_MENTION_PATTERN = r"^co\s+si\s+(?:o\s+tom\s+)?(?:myslí|mysli)\s+panam\b"
 
 BASIC_PANAM_EMPTY_RESPONSE = "Jsem tady. Co potřebuješ?"
 
@@ -131,6 +134,7 @@ GENERIC_IMAGE_ANALYZE_TRIGGERS = (
     "co je na screenshotu",
     "co je na screenu",
 )
+GENERIC_IMAGE_PHRASES = GENERIC_IMAGE_ANALYZE_TRIGGERS
 
 ATTACHMENT_ANALYZE_TRIGGERS = (
     "soubor",
@@ -170,6 +174,18 @@ ATTACHMENT_ANALYZE_SUBJECTS = (
     + EXCEL_ANALYZE_TRIGGERS
     + CSV_ANALYZE_TRIGGERS
     + TEXT_FILE_ANALYZE_TRIGGERS
+)
+ATTACHMENT_SUBJECTS = ATTACHMENT_ANALYZE_SUBJECTS
+
+ATTACHMENT_ANALYZE_PATTERNS = (
+    r"^(?:analyzuj|koukni na|podivej se na|precti|shrn|vysvetli)\s+(?:(?:ten|to|tu|tento|tuto|te)\s+)?(?:{subject_pattern})\b",
+    r"^co\s+je\s+(?:v|ve)\s+(?:(?:tom|te)\s+)?(?:{subject_pattern})\b",
+    r"^co\s+obsahuje\s+(?:(?:ten|to|ta)\s+)?(?:{subject_pattern})\b",
+)
+GENERIC_ATTACHMENT_PATTERNS = (
+    r"^(?:analyzuj|koukni na|podivej se na|precti|shrn|vysvetli)\s+(?:(?:ten|to|tu|tento|tuto|te)\s+)?(?:{subject_pattern})$",
+    r"^co\s+je\s+(?:v|ve)\s+(?:(?:tom|te)\s+)?(?:{subject_pattern})$",
+    r"^co\s+obsahuje\s+(?:(?:ten|to|ta)\s+)?(?:{subject_pattern})$",
 )
 
 HELP_PATTERNS = (
