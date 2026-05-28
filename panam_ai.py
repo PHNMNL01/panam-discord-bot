@@ -228,3 +228,42 @@ async def analyze_image(model: str, image_url: str, question: str) -> str:
         answer = "Nedostala jsem žádnou analýzu z OpenAI API."
 
     return shorten_for_discord(answer)
+
+
+async def analyze_document_text(
+    model: str,
+    document_text: str,
+    question: str,
+    filename: str,
+) -> str:
+    response = await openai_client.responses.create(
+        model=model,
+        input=[
+            {
+                "role": "system",
+                "content": (
+                    PANAM_SYSTEM_PROMPT +
+                    "\n\nÚkol pro tento command: analyzuj text dokumentu. "
+                    "Odpovídej česky, jasně a prakticky. "
+                    "Pokud se uživatel ptá na shrnutí, udělej stručné shrnutí. "
+                    "Pokud se ptá konkrétně, odpověz podle obsahu dokumentu. "
+                    "Pokud odpověď v dokumentu není, řekni to."
+                ),
+            },
+            {
+                "role": "user",
+                "content": (
+                    f"Název souboru: {filename}\n"
+                    f"Otázka: {question}\n\n"
+                    "Text dokumentu:\n"
+                    f"{document_text}"
+                ),
+            },
+        ],
+    )
+
+    answer = response.output_text.strip()
+    if not answer:
+        answer = "Nedostala jsem žádnou analýzu dokumentu z OpenAI API."
+
+    return shorten_for_discord(answer)

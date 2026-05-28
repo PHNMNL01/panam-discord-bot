@@ -1,8 +1,10 @@
 import os
 import asyncio
+import io
 import logging
 import json
 import re
+import unicodedata
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
@@ -13,6 +15,7 @@ from dotenv import load_dotenv
 
 from panam_ai import (
     analyze_image,
+    analyze_document_text,
     ask_panam,
     ask_panam_talk,
     shorten_for_discord,
@@ -40,7 +43,10 @@ OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4.1-mini")
 NOTES_FILE = BASE_DIR / "notes.json"
 TODOS_FILE = BASE_DIR / "todos.json"
 SUPPORTED_IMAGE_EXTENSIONS = (".png", ".jpg", ".jpeg", ".webp", ".gif")
+SUPPORTED_DOCUMENT_EXTENSIONS = (".txt", ".md", ".csv", ".pdf", ".docx", ".xlsx")
 MAX_IMAGE_SIZE_BYTES = 20 * 1024 * 1024
+MAX_DOCUMENT_SIZE_BYTES = 20 * 1024 * 1024
+MAX_DOCUMENT_TEXT_LENGTH = 20000
 
 
 logging.basicConfig(
@@ -114,6 +120,238 @@ def split_discord_message(text: str, limit: int = 1900) -> list[str]:
         chunks.append(remaining)
 
     return chunks
+
+
+def get_file_extension(filename: str) -> str:
+    return Path(filename).suffix.lower()
+
+
+def is_supported_image_attachment(attachment: discord.Attachment) -> bool:
+    return get_file_extension(attachment.filename) in SUPPORTED_IMAGE_EXTENSIONS
+
+
+def is_supported_document_attachment(attachment: discord.Attachment) -> bool:
+    return get_file_extension(attachment.filename) in SUPPORTED_DOCUMENT_EXTENSIONS
+
+
+def get_attachment_kind(file: discord.Attachment) -> str | None:
+    extension = get_file_extension(file.filename)
+    if extension in SUPPORTED_IMAGE_EXTENSIONS:
+        return "image"
+    if extension in SUPPORTED_DOCUMENT_EXTENSIONS:
+        return "document"
+    return None
+
+
+class AttachmentAnalysisUserError(Exception):
+    pass
+
+
+def find_image_attachment_in_message(
+    message: discord.Message,
+) -> discord.Attachment | None:
+    for attachment in message.attachments:
+        if is_supported_image_attachment(attachment):
+            return attachment
+
+    return None
+
+
+def find_supported_attachment_in_message(
+    message: discord.Message,
+) -> discord.Attachment | None:
+    for attachment in message.attachments:
+        if get_attachment_kind(attachment) is not None:
+            return attachment
+
+    return None
+
+
+def find_first_attachment_in_message(
+    message: discord.Message,
+) -> discord.Attachment | None:
+    for attachment in message.attachments:
+        return attachment
+
+    return None
+
+
+async def read_attachment_bytes(file: discord.Attachment) -> bytes:
+    return await file.read()
+
+
+def extract_text_from_plain_file(data: bytes) -> str:
+    try:
+        return data.decode("utf-8")
+    except UnicodeDecodeError:
+        return data.decode("utf-8", errors="replace")
+
+
+def extract_text_from_pdf(data: bytes) -> str:
+    from pypdf import PdfReader
+
+    reader = PdfReader(io.BytesIO(data))
+    page_texts = []
+
+    for page in reader.pages:
+        text = page.extract_text() or ""
+        text = text.strip()
+        if text:
+            page_texts.append(text)
+
+    return "\n\n".join(page_texts).strip()
+
+
+def extract_text_from_attachment(filename: str, data: bytes) -> str:
+    extension = get_file_extension(filename)
+    if extension == ".pdf":
+        return extract_text_from_pdf(data)
+    if extension == ".docx":
+        return extract_text_from_docx(data)
+    if extension == ".xlsx":
+        return extract_text_from_xlsx(data)
+    return extract_text_from_plain_file(data)
+
+
+def extract_text_from_docx(data: bytes) -> str:
+    from docx import Document
+
+    document = Document(io.BytesIO(data))
+    lines = []
+
+    for paragraph in document.paragraphs:
+        text = paragraph.text.strip()
+        if text:
+            lines.append(text)
+
+    for table in document.tables:
+        for row in table.rows:
+            cell_texts = []
+            for cell in row.cells:
+                text = cell.text.strip()
+                if text:
+                    cell_texts.append(text)
+
+            if cell_texts:
+                lines.append(" | ".join(cell_texts))
+
+    return "\n".join(lines).strip()
+
+
+def extract_text_from_xlsx(data: bytes) -> str:
+    from openpyxl import load_workbook
+
+    workbook = load_workbook(
+        io.BytesIO(data),
+        data_only=True,
+        read_only=True,
+    )
+    lines = []
+
+    try:
+        for worksheet in workbook.worksheets:
+            sheet_lines = []
+
+            for row in worksheet.iter_rows(max_row=200, max_col=20, values_only=True):
+                values = []
+                for cell in row:
+                    if cell is None:
+                        continue
+
+                    text = str(cell).strip()
+                    if text:
+                        values.append(text)
+
+                if values:
+                    sheet_lines.append(" | ".join(values))
+
+            if sheet_lines:
+                lines.append(f"List: {worksheet.title}")
+                lines.extend(sheet_lines)
+
+    finally:
+        workbook.close()
+
+    return "\n".join(lines).strip()
+
+
+def trim_document_text(text: str) -> str:
+    if len(text) <= MAX_DOCUMENT_TEXT_LENGTH:
+        return text
+
+    suffix = "\n\n...text dokumentu byl zkrácen."
+    return text[: max(MAX_DOCUMENT_TEXT_LENGTH - len(suffix), 0)].rstrip() + suffix
+
+
+async def find_recent_image_attachment(channel) -> discord.Attachment | None:
+    history = getattr(channel, "history", None)
+    if history is None:
+        return None
+
+    async for message in history(limit=15):
+        if message.author.bot:
+            continue
+
+        for attachment in message.attachments:
+            if is_supported_image_attachment(attachment):
+                return attachment
+
+    return None
+
+
+async def find_recent_supported_attachment(channel) -> discord.Attachment | None:
+    history = getattr(channel, "history", None)
+    if history is None:
+        return None
+
+    async for message in history(limit=15):
+        if message.author.bot:
+            continue
+
+        for attachment in message.attachments:
+            if get_attachment_kind(attachment) is not None:
+                return attachment
+
+    return None
+
+
+async def analyze_selected_attachment(file: discord.Attachment, question: str) -> str:
+    attachment_kind = get_attachment_kind(file)
+    if attachment_kind is None:
+        raise AttachmentAnalysisUserError(
+            "Tenhle typ souboru zatím neumím přečíst. Podporuju obrázky PNG, JPG, JPEG, WEBP, GIF a dokumenty TXT, MD, CSV, PDF, DOCX, XLSX."
+        )
+
+    if file.size > MAX_IMAGE_SIZE_BYTES:
+        raise AttachmentAnalysisUserError(
+            "Ten soubor je moc velký. Zatím beru max 20 MB."
+        )
+
+    if attachment_kind == "image":
+        answer = await analyze_image(OPENAI_MODEL, file.url, question)
+        return shorten_for_discord(answer)
+
+    data = await read_attachment_bytes(file)
+    document_text = extract_text_from_attachment(file.filename, data)
+
+    if not document_text.strip():
+        if get_file_extension(file.filename) == ".pdf":
+            raise AttachmentAnalysisUserError(
+                "Z toho PDF se mi nepodařilo vytáhnout žádný text. Možná je to sken nebo obrázkové PDF."
+            )
+
+        raise AttachmentAnalysisUserError(
+            "Z toho dokumentu se mi nepodařilo vytáhnout žádný text."
+        )
+
+    document_text = trim_document_text(document_text)
+    answer = await analyze_document_text(
+        OPENAI_MODEL,
+        document_text,
+        question,
+        file.filename,
+    )
+    return shorten_for_discord(answer)
 
 
 async def send_followup_chunks(interaction: discord.Interaction, text: str) -> None:
@@ -225,7 +463,8 @@ def get_help_text() -> str:
         "Panam nápověda\n\n"
         "1. Slash commandy\n"
         "/ask, /summary, /channel_summary, /search_messages, /note_add, /note_list, "
-        "/note_search, /todo_add, /todo_list, /todo_done, /analyze, /ping, /help, /panam_talk\n\n"
+        "/note_search, /todo_add, /todo_list, /todo_done, /analyze, /read_file, "
+        "/ping, /help, /panam_talk\n\n"
         "2. Panam asistentka\n"
         "Poznámky:\n"
         "`Panam přidej poznámku <text>`, `Panam ulož poznámku <text>`, "
@@ -241,8 +480,14 @@ def get_help_text() -> str:
         "Shrnutí:\n"
         "`Panam shrň <text>`, `Panam shrň mi <text>`, `Panam udělej summary <text>`, "
         "`Panam shrň toto`, `Panam shrň to`\n"
-        "Obrázky:\n"
-        "`/analyze` s přílohou .png, .jpg, .jpeg, .webp nebo .gif do 20 MB\n"
+        "Přílohy:\n"
+        "`/analyze` s obrázkem .png, .jpg, .jpeg, .webp, .gif nebo dokumentem "
+        ".txt, .md, .csv, .pdf, .docx, .xlsx do 20 MB, "
+        "`Panam analyzuj obrázek`, `Panam koukni na obrázek`, "
+        "`Panam co je na obrázku?`, `Panam co je tady za chybu?`\n"
+        "Panam použije obrázek z aktuální zprávy nebo z nejbližší předchozí vhodné zprávy.\n"
+        "Dokumenty:\n"
+        "`/read_file` s přílohou .txt, .md, .csv, .pdf, .docx nebo .xlsx do 20 MB\n"
         "Help:\n"
         "`Panam help`, `Panam pomoc`, `Panam nápověda`, `Panam co umíš?`, "
         "`Panam ukaž příkazy`\n\n"
@@ -315,6 +560,168 @@ def extract_panam_request(
         return content
 
     return None
+
+
+def normalize_natural_text(text: str) -> str:
+    normalized = unicodedata.normalize("NFKD", text.lower())
+    without_diacritics = "".join(
+        character
+        for character in normalized
+        if not unicodedata.combining(character)
+    )
+    return re.sub(r"\s+", " ", without_diacritics).strip(" \t\n\r,.:;!-?")
+
+
+def is_natural_analyze_request(content: str) -> bool:
+    text = normalize_natural_text(content)
+    analyze_phrases = (
+        "analyzuj obrazek",
+        "analyzuj ten obrazek",
+        "koukni na obrazek",
+        "koukni na tohle",
+        "podivej se na obrazek",
+        "podivej se na tohle",
+        "co je na obrazku",
+        "co je na tom obrazku",
+        "co vidis",
+        "co tam vidis",
+        "popis obrazek",
+        "popis ten obrazek",
+        "vysvetli obrazek",
+        "vysvetli ten screenshot",
+        "co je na screenshotu",
+        "co je na screenu",
+        "co je tady za chybu",
+        "co je tam za chybu",
+    )
+    return any(phrase in text for phrase in analyze_phrases)
+
+
+def is_natural_attachment_analyze_request(content: str) -> bool:
+    if is_natural_analyze_request(content):
+        return True
+
+    text = normalize_natural_text(content)
+    subjects = (
+        "soubor",
+        "souboru",
+        "dokument",
+        "dokumentu",
+        "pdf",
+        "word",
+        "wordu",
+        "docx",
+        "excel",
+        "excelu",
+        "xlsx",
+        "tabulku",
+        "tabulce",
+        "tabulka",
+        "csv",
+        "txt",
+        "markdown",
+        "prilohu",
+        "priloze",
+    )
+    subject_pattern = "|".join(subjects)
+
+    action_patterns = (
+        rf"^(?:analyzuj|koukni na|podivej se na|precti|shrn|vysvetli)\s+(?:(?:ten|to|tu|tento|tuto|te)\s+)?(?:{subject_pattern})\b",
+        rf"^co\s+je\s+(?:v|ve)\s+(?:(?:tom|te)\s+)?(?:{subject_pattern})\b",
+        rf"^co\s+obsahuje\s+(?:(?:ten|to|ta)\s+)?(?:{subject_pattern})\b",
+    )
+
+    return any(re.match(pattern, text, re.IGNORECASE) for pattern in action_patterns)
+
+
+def is_generic_natural_attachment_request(content: str) -> bool:
+    if is_natural_analyze_request(content):
+        text = normalize_natural_text(content)
+        generic_image_phrases = {
+            "analyzuj obrazek",
+            "analyzuj ten obrazek",
+            "koukni na obrazek",
+            "koukni na tohle",
+            "podivej se na obrazek",
+            "podivej se na tohle",
+            "co je na obrazku",
+            "co je na tom obrazku",
+            "co vidis",
+            "co tam vidis",
+            "popis obrazek",
+            "popis ten obrazek",
+            "vysvetli obrazek",
+            "vysvetli ten screenshot",
+            "co je na screenshotu",
+            "co je na screenu",
+        }
+        return text in generic_image_phrases
+
+    text = normalize_natural_text(content)
+    subjects = (
+        "soubor",
+        "souboru",
+        "dokument",
+        "dokumentu",
+        "pdf",
+        "word",
+        "wordu",
+        "docx",
+        "excel",
+        "excelu",
+        "xlsx",
+        "tabulku",
+        "tabulce",
+        "tabulka",
+        "csv",
+        "txt",
+        "markdown",
+        "prilohu",
+        "priloze",
+    )
+    subject_pattern = "|".join(subjects)
+    generic_patterns = (
+        rf"^(?:analyzuj|koukni na|podivej se na|precti|shrn|vysvetli)\s+(?:(?:ten|to|tu|tento|tuto|te)\s+)?(?:{subject_pattern})$",
+        rf"^co\s+je\s+(?:v|ve)\s+(?:(?:tom|te)\s+)?(?:{subject_pattern})$",
+        rf"^co\s+obsahuje\s+(?:(?:ten|to|ta)\s+)?(?:{subject_pattern})$",
+    )
+    return any(re.match(pattern, text, re.IGNORECASE) for pattern in generic_patterns)
+
+
+def get_natural_analyze_question(content: str) -> str:
+    text = normalize_natural_text(content)
+    default_question = "Popiš, co je na obrázku."
+    generic_phrases = {
+        "analyzuj obrazek",
+        "analyzuj ten obrazek",
+        "koukni na obrazek",
+        "koukni na tohle",
+        "podivej se na obrazek",
+        "podivej se na tohle",
+        "co je na obrazku",
+        "co je na tom obrazku",
+        "co vidis",
+        "co tam vidis",
+        "popis obrazek",
+        "popis ten obrazek",
+        "vysvetli obrazek",
+        "vysvetli ten screenshot",
+        "co je na screenshotu",
+        "co je na screenu",
+    }
+
+    if text in generic_phrases:
+        return default_question
+
+    return content.strip() or default_question
+
+
+def get_natural_attachment_analyze_question(content: str) -> str:
+    default_question = "Analyzuj tuto přílohu a stručně popiš, co obsahuje."
+    if is_generic_natural_attachment_request(content):
+        return default_question
+
+    return content.strip() or default_question
 
 
 def parse_natural_intent(text: str) -> Optional[tuple[str, Optional[str]]]:
@@ -429,6 +836,43 @@ class DiscordAIBot(discord.Client):
         request_text = extract_panam_request(message, self.user)
         if request_text is None:
             return
+
+        if is_natural_attachment_analyze_request(request_text):
+            try:
+                selected_file = find_supported_attachment_in_message(message)
+                first_message_file = find_first_attachment_in_message(message)
+                if selected_file is None and first_message_file is not None:
+                    selected_file = first_message_file
+
+                if selected_file is None:
+                    selected_file = await find_recent_supported_attachment(message.channel)
+
+                if selected_file is None:
+                    await message.reply(
+                        "Nevidím žádnou podporovanou přílohu ani v této zprávě, ani v předchozích zprávách.",
+                        mention_author=False,
+                    )
+                    return
+
+                question = get_natural_attachment_analyze_question(request_text)
+                answer = await analyze_selected_attachment(selected_file, question)
+                await message.reply(answer, mention_author=False)
+                return
+
+            except AttachmentAnalysisUserError as error:
+                await message.reply(
+                    str(error),
+                    mention_author=False,
+                )
+                return
+
+            except Exception:
+                logging.exception("Chyba při zpracování přirozené analýzy přílohy")
+                await message.reply(
+                    "Něco se pokazilo při analýze přílohy. Mrkni do konzole na chybu.",
+                    mention_author=False,
+                )
+                return
 
         intent = parse_natural_intent(request_text)
         if intent is None:
@@ -995,16 +1439,16 @@ async def summary(interaction: discord.Interaction, text: str) -> None:
 
 @bot.tree.command(
     name="analyze",
-    description="Analyzuj přiložený obrázek pomocí AI."
+    description="Analyzuj přiložený obrázek nebo dokument pomocí AI."
 )
 @app_commands.describe(
-    image="Obrázek k analýze",
-    question="Co chceš k obrázku zjistit",
+    file="Soubor k analýze",
+    question="Co chceš k souboru zjistit",
 )
 async def analyze(
     interaction: discord.Interaction,
-    image: discord.Attachment,
-    question: str = "Co je na obrázku?",
+    file: discord.Attachment | None = None,
+    question: str = "Popiš, co je v příloze.",
 ) -> None:
     if ALLOWED_CHANNEL_IDS and str(interaction.channel_id) not in ALLOWED_CHANNEL_IDS:
         await interaction.response.send_message(
@@ -1013,17 +1457,63 @@ async def analyze(
         )
         return
 
-    filename = image.filename.lower()
-    if not filename.endswith(SUPPORTED_IMAGE_EXTENSIONS):
+    await interaction.response.defer(thinking=True)
+
+    selected_file = file
+    if selected_file is None:
+        selected_file = await find_recent_supported_attachment(interaction.channel)
+
+    if selected_file is None:
+        await interaction.followup.send(
+            "Nevidím žádnou podporovanou přílohu ani v commandu, ani v předchozí zprávě."
+        )
+        return
+
+    try:
+        answer = await analyze_selected_attachment(selected_file, question)
+        await interaction.followup.send(answer)
+
+    except AttachmentAnalysisUserError as error:
+        await interaction.followup.send(str(error))
+
+    except Exception:
+        logging.exception("Chyba při zpracování /analyze")
+        await interaction.followup.send(
+            "Něco se pokazilo při analýze přílohy. Mrkni do konzole na chybu."
+        )
+
+
+@bot.tree.command(
+    name="read_file",
+    description="Přečti TXT, MD, CSV, PDF, DOCX nebo XLSX přílohu pomocí AI."
+)
+@app_commands.describe(
+    file="Dokument k přečtení",
+    question="Co chceš k dokumentu zjistit",
+)
+async def read_file(
+    interaction: discord.Interaction,
+    file: discord.Attachment,
+    question: str = "Shrň mi tento dokument.",
+) -> None:
+    if ALLOWED_CHANNEL_IDS and str(interaction.channel_id) not in ALLOWED_CHANNEL_IDS:
         await interaction.response.send_message(
-            "Podporuju jen obrázky .png, .jpg, .jpeg, .webp a .gif.",
+            "Tady nemám povolené odpovídat.",
             ephemeral=True,
         )
         return
 
-    if image.size > MAX_IMAGE_SIZE_BYTES:
+    if file.size > MAX_DOCUMENT_SIZE_BYTES:
         await interaction.response.send_message(
-            "Obrázek je moc velký. Maximum je 20 MB.",
+            "Ten soubor je moc velký. Zatím beru max 20 MB.",
+            ephemeral=True,
+        )
+        return
+
+    extension = get_file_extension(file.filename)
+    if extension not in SUPPORTED_DOCUMENT_EXTENSIONS:
+        await interaction.response.send_message(
+            "Tenhle typ dokumentu zatím neumím přečíst. Pošli mi prosím TXT, MD, CSV, PDF, DOCX nebo XLSX.",
             ephemeral=True,
         )
         return
@@ -1031,13 +1521,41 @@ async def analyze(
     await interaction.response.defer(thinking=True)
 
     try:
-        answer = await analyze_image(OPENAI_MODEL, image.url, question)
+        data = await read_attachment_bytes(file)
+
+        if extension == ".pdf":
+            document_text = extract_text_from_pdf(data)
+            if not document_text:
+                await interaction.followup.send(
+                    "Z toho PDF se mi nepodařilo vytáhnout žádný text. Možná je to sken nebo obrázkové PDF."
+                )
+                return
+        elif extension == ".docx":
+            document_text = extract_text_from_docx(data)
+        elif extension == ".xlsx":
+            document_text = extract_text_from_xlsx(data)
+        else:
+            document_text = extract_text_from_plain_file(data)
+
+        if not document_text.strip():
+            await interaction.followup.send(
+                "Z toho dokumentu se mi nepodařilo vytáhnout žádný text."
+            )
+            return
+
+        document_text = trim_document_text(document_text)
+        answer = await analyze_document_text(
+            OPENAI_MODEL,
+            document_text,
+            question,
+            file.filename,
+        )
         await interaction.followup.send(answer)
 
     except Exception:
-        logging.exception("Chyba při zpracování /analyze")
+        logging.exception("Chyba při zpracování /read_file")
         await interaction.followup.send(
-            "Něco se pokazilo při analýze obrázku. Mrkni do konzole na chybu."
+            "Něco se pokazilo při čtení dokumentu. Mrkni do konzole na chybu."
         )
 
 
