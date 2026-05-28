@@ -91,19 +91,42 @@ def shorten_for_discord(text: str, limit: int = 1900) -> str:
     return answer[: max(limit - len(suffix), 0)] + suffix
 
 
-async def ask_panam(model: str, question: str) -> str:
+async def ask_panam(
+    model: str,
+    question: str,
+    history: list[dict] | None = None,
+) -> str:
+    response_input = [
+        {
+            "role": "system",
+            "content": PANAM_SYSTEM_PROMPT,
+        },
+    ]
+
+    if history:
+        for message in history:
+            role = message.get("role")
+            content = message.get("content")
+            if role not in {"user", "assistant"} or not content:
+                continue
+
+            response_input.append(
+                {
+                    "role": role,
+                    "content": str(content),
+                }
+            )
+
+    response_input.append(
+        {
+            "role": "user",
+            "content": question,
+        }
+    )
+
     response = await openai_client.responses.create(
         model=model,
-        input=[
-            {
-                "role": "system",
-                "content": PANAM_SYSTEM_PROMPT,
-            },
-            {
-                "role": "user",
-                "content": question,
-            },
-        ],
+        input=response_input,
     )
 
     answer = response.output_text.strip()

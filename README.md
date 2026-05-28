@@ -47,6 +47,7 @@ OPENAI_MODEL=gpt-5-mini
 - `/todo_done` - oznaci ukol jako hotovy.
 - `/analyze` - analyzuje prilozeny obrazek nebo dokument, pripadne podporovanou prilohu z predchozi zpravy.
 - `/read_file` - precte TXT, MD, CSV, PDF, DOCX nebo XLSX prilohu a odpovi na otazku k dokumentu.
+- `/memory_clear` - vymaze kratkou konverzacni pamet Panam pro aktualni kanal.
 - `/ping` - overi, ze je bot online.
 - `/help` - zobrazi napovedu.
 
@@ -250,11 +251,19 @@ Panam se pokusi pouzit podporovanou prilohu ze stejne zpravy nebo z predchozi vh
 
 Fraze typu `to`, `toto`, `ten soubor`, `ta priloha`, `ta tabulka` nebo `ten obrazek` se pokusi pouzit aktualni zpravu nebo nejblizsi predchozi vhodnou zpravu/prilohu.
 
+## Kratka konverzacni pamet
+
+- Panam si v RAM pamatuje poslednich nekolik beznych konverzacnich zprav v kanalu.
+- Pamet se pouziva pro bezne dotazy typu `Panam <dotaz>`.
+- Po restartu bota se smaze.
+- Pamet lze smazat pres `/memory_clear`.
+- Poznamky a todo jsou samostatne funkce a ukladaji se do `notes.json`/`todos.json`.
+
 ## Bezpecnost
 
 - Panam funguje jen v kanalech uvedenych v `ALLOWED_CHANNEL_IDS`, pokud jsou nastavene.
 - Panam cte historii kanalu jen pri explicitnim commandu nebo pri osloveni podporovanou frazi.
-- Panam neuklada historii kanalu automaticky.
+- Panam uklada jen kratkou RAM historii beznych konverzacnich dotazu.
 - Do Panam nezadavej hesla, tokeny, API klice, HR data, zakaznicka data ani jina citliva data.
 - `.env`, `notes.json` a `todos.json` nepatri do gitu.
 
@@ -273,6 +282,7 @@ python bot.py
 panam-discord-bot/
 |-- bot.py
 |-- panam_ai.py
+|-- panam_memory.py
 |-- panam_phrases.py
 |-- requirements.txt
 |-- .env
@@ -287,6 +297,7 @@ panam-discord-bot/
 
 - `bot.py` - Discord cast bota, commandy, prace s kanaly a zpravami.
 - `panam_ai.py` - OpenAI cast, systemovy prompt Panam, AI odpovedi, shrnuti a analyza obrazku.
+- `panam_memory.py` - kratka RAM konverzacni pamet oddelena podle kanalu.
 - `panam_phrases.py` - seznamy prirozenych frazi a kontextovych vyrazu Panam.
 - `requirements.txt` - Python zavislosti.
 - `.env.example` - sablona konfigurace.

@@ -13,6 +13,7 @@ import discord
 from discord import app_commands
 from dotenv import load_dotenv
 
+import panam_memory
 from panam_ai import (
     analyze_image,
     analyze_document_text,
@@ -477,7 +478,7 @@ def get_help_text() -> str:
         "1. Slash commandy\n"
         "/ask, /summary, /channel_summary, /search_messages, /note_add, /note_list, "
         "/note_search, /todo_add, /todo_list, /todo_done, /analyze, /read_file, "
-        "/ping, /help, /panam_talk\n\n"
+        "/memory_clear, /ping, /help, /panam_talk\n\n"
         "2. Panam asistentka\n"
         "Poznámky:\n"
         "`Panam přidej poznámku <text>`, `Panam ulož poznámku <text>`, "
@@ -511,10 +512,12 @@ def get_help_text() -> str:
         "Volnější rozhovor s výraznější osobností Panam:\n"
         "`/panam_talk <text>`, `Panam talk <text>`, `Panam pokec <text>`, "
         "`Panam pokecej o <text>`, `Panam co si fakt myslíš o <text>`\n\n"
-        "4. Bezpečnostní pravidla\n"
+        "4. Krátká konverzační paměť\n"
+        "`/memory_clear` - vymaže krátkou konverzační paměť Panam pro aktuální kanál\n\n"
+        "5. Bezpečnostní pravidla\n"
         "Nezadávej hesla, tokeny, API klíče, HR data, zákaznická data ani jiné citlivé údaje. "
-        "Panam neukládá historii kanálu automaticky.\n\n"
-        "5. Allowed channels\n"
+        "Panam si pamatuje jen krátkou RAM historii běžných konverzačních dotazů.\n\n"
+        "6. Allowed channels\n"
         "Panam funguje jen v kanálech uvedených v `ALLOWED_CHANNEL_IDS`. "
         "Historii kanálu čte jen při explicitním commandu."
     )
@@ -584,6 +587,24 @@ def extract_basic_panam_prompt(content: str) -> str | None:
         return None
 
     return match.group(1).strip()
+
+
+async def handle_basic_panam_message(
+    message: discord.Message,
+    basic_prompt: str,
+) -> None:
+    if not basic_prompt.strip():
+        answer = BASIC_PANAM_EMPTY_RESPONSE
+        await message.reply(answer, mention_author=False)
+        panam_memory.add_message(message.channel.id, "user", message.content or "Panam")
+        panam_memory.add_message(message.channel.id, "assistant", answer)
+        return
+
+    history = panam_memory.get_messages(message.channel.id)
+    answer = await ask_panam(OPENAI_MODEL, basic_prompt, history=history)
+    await message.reply(answer, mention_author=False)
+    panam_memory.add_message(message.channel.id, "user", message.content or basic_prompt)
+    panam_memory.add_message(message.channel.id, "assistant", answer)
 
 
 def normalize_natural_text(text: str) -> str:
@@ -847,17 +868,7 @@ class DiscordAIBot(discord.Client):
         if intent is None:
             basic_prompt = extract_basic_panam_prompt(message.content or "")
             if basic_prompt is not None:
-                if not basic_prompt.strip():
-                    await message.reply(
-                        BASIC_PANAM_EMPTY_RESPONSE,
-                        mention_author=False,
-                    )
-                    return
-
-                await message.reply(
-                    await ask_panam(OPENAI_MODEL, basic_prompt),
-                    mention_author=False,
-                )
+                await handle_basic_panam_message(message, basic_prompt)
                 return
 
             await message.channel.send("Tohle zatím neumím převést na akci. Zkus /help.")
@@ -1072,17 +1083,7 @@ class DiscordAIBot(discord.Client):
 
             basic_prompt = extract_basic_panam_prompt(message.content or "")
             if basic_prompt is not None:
-                if not basic_prompt.strip():
-                    await message.reply(
-                        BASIC_PANAM_EMPTY_RESPONSE,
-                        mention_author=False,
-                    )
-                    return
-
-                await message.reply(
-                    await ask_panam(OPENAI_MODEL, basic_prompt),
-                    mention_author=False,
-                )
+                await handle_basic_panam_message(message, basic_prompt)
                 return
 
         except Exception:
@@ -1121,6 +1122,32 @@ async def help_command(interaction: discord.Interaction) -> None:
         return
 
     await interaction.response.send_message(get_help_text())
+
+
+@bot.tree.command(
+    name="memory_clear",
+    description="Vymaž krátkou konverzační paměť Panam pro tento kanál."
+)
+async def memory_clear(interaction: discord.Interaction) -> None:
+    channel_id = interaction.channel_id
+    if channel_id is None:
+        await interaction.response.send_message(
+            "Tenhle command potřebuje běžet v kanálu.",
+            ephemeral=True,
+        )
+        return
+
+    if ALLOWED_CHANNEL_IDS and str(channel_id) not in ALLOWED_CHANNEL_IDS:
+        await interaction.response.send_message(
+            "Tady nemám povolené odpovídat.",
+            ephemeral=True,
+        )
+        return
+
+    panam_memory.clear_channel_memory(channel_id)
+    await interaction.response.send_message(
+        "Krátká paměť pro tento kanál je vymazaná."
+    )
 
 
 @bot.tree.command(
