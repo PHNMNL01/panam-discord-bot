@@ -1,4 +1,4 @@
-# Discord AI Bot PoC
+# PANAM Discord AI Bot PoC
 
 Jednoduchy Discord AI bot v Pythonu.
 
