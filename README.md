@@ -273,6 +273,7 @@ python bot.py
 panam-discord-bot/
 |-- bot.py
 |-- panam_ai.py
+|-- panam_phrases.py
 |-- requirements.txt
 |-- .env
 |-- .env.example
@@ -286,6 +287,7 @@ panam-discord-bot/
 
 - `bot.py` - Discord cast bota, commandy, prace s kanaly a zpravami.
 - `panam_ai.py` - OpenAI cast, systemovy prompt Panam, AI odpovedi, shrnuti a analyza obrazku.
+- `panam_phrases.py` - seznamy prirozenych frazi a kontextovych vyrazu Panam.
 - `requirements.txt` - Python zavislosti.
 - `.env.example` - sablona konfigurace.
 - `.env` - lokalni konfigurace s tokeny a klici. Nepatri do gitu.
@@ -299,6 +301,7 @@ Do gitu patri:
 
 - `bot.py`
 - `panam_ai.py`
+- `panam_phrases.py`
 - `requirements.txt`
 - `README.md`
 - `.env.example`

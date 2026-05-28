@@ -22,6 +22,23 @@ from panam_ai import (
     summarize_channel_messages,
     summarize_text,
 )
+from panam_phrases import (
+    ATTACHMENT_ANALYZE_SUBJECTS,
+    BASIC_PANAM_EMPTY_RESPONSE,
+    CONTEXT_REFERENCES,
+    GENERIC_IMAGE_ANALYZE_TRIGGERS,
+    HELP_PATTERNS,
+    IMAGE_ANALYZE_TRIGGERS,
+    NATURAL_INTENT_PATTERNS,
+    NOTE_ADD_PREVIOUS_PATTERN,
+    NOTE_ADD_TRIGGERS,
+    NOTE_LIST_PATTERN,
+    OPINION_CONTEXT_PATTERNS,
+    OPINION_TRIGGERS,
+    SUMMARY_CONTEXT_PATTERN,
+    SUMMARY_TRIGGERS,
+    TODO_LIST_PATTERN,
+)
 
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -465,7 +482,8 @@ def get_help_text() -> str:
         "`Panam přidej todo <text>`, `Panam přidej úkol <text>`, "
         "`Panam ukaž todo`, `Panam ukaž úkoly`\n"
         "AI:\n"
-        "`Panam řekni mi <dotaz>`, `Panam řekni <dotaz>`, `Panam odpověz <dotaz>`, "
+        "`Panam <dotaz>`, `Panam řekni mi <dotaz>`, `Panam řekni <dotaz>`, "
+        "`Panam odpověz <dotaz>`, "
         "`Panam co si myslíš o <text>`, `Co si myslí Panam o <text>`, "
         "`Panam co si o tom myslíš?`\n"
         "Shrnutí:\n"
@@ -588,30 +606,7 @@ def is_panam_addressed(content: str) -> bool:
 
 def is_context_reference(text: str) -> bool:
     normalized = normalize_text(text)
-    references = {
-        "to",
-        "toto",
-        "tom",
-        "tenhle",
-        "tohle",
-        "tento",
-        "tuhle",
-        "ten soubor",
-        "ten dokument",
-        "ta priloha",
-        "ta tabulka",
-        "ten obrazek",
-        "ten screenshot",
-        "to pdf",
-        "ten word",
-        "ten docx",
-        "ten excel",
-        "ta xlsx",
-        "to csv",
-        "to txt",
-        "ten markdown",
-    }
-    return normalized in references
+    return normalized in CONTEXT_REFERENCES
 
 
 def extract_inline_content_after_trigger(content: str, trigger_phrases: list[str]) -> str:
@@ -674,27 +669,7 @@ async def find_recent_text_message(channel) -> str | None:
 
 def is_natural_analyze_request(content: str) -> bool:
     text = normalize_natural_text(content)
-    analyze_phrases = (
-        "analyzuj obrazek",
-        "analyzuj ten obrazek",
-        "koukni na obrazek",
-        "koukni na tohle",
-        "podivej se na obrazek",
-        "podivej se na tohle",
-        "co je na obrazku",
-        "co je na tom obrazku",
-        "co vidis",
-        "co tam vidis",
-        "popis obrazek",
-        "popis ten obrazek",
-        "vysvetli obrazek",
-        "vysvetli ten screenshot",
-        "co je na screenshotu",
-        "co je na screenu",
-        "co je tady za chybu",
-        "co je tam za chybu",
-    )
-    return any(phrase in text for phrase in analyze_phrases)
+    return any(phrase in text for phrase in IMAGE_ANALYZE_TRIGGERS)
 
 
 def is_natural_attachment_analyze_request(content: str) -> bool:
@@ -702,28 +677,7 @@ def is_natural_attachment_analyze_request(content: str) -> bool:
         return True
 
     text = normalize_natural_text(content)
-    subjects = (
-        "soubor",
-        "souboru",
-        "dokument",
-        "dokumentu",
-        "pdf",
-        "word",
-        "wordu",
-        "docx",
-        "excel",
-        "excelu",
-        "xlsx",
-        "tabulku",
-        "tabulce",
-        "tabulka",
-        "csv",
-        "txt",
-        "markdown",
-        "prilohu",
-        "priloze",
-    )
-    subject_pattern = "|".join(subjects)
+    subject_pattern = "|".join(ATTACHMENT_ANALYZE_SUBJECTS)
 
     action_patterns = (
         rf"^(?:analyzuj|koukni na|podivej se na|precti|shrn|vysvetli)\s+(?:(?:ten|to|tu|tento|tuto|te)\s+)?(?:{subject_pattern})\b",
@@ -737,49 +691,10 @@ def is_natural_attachment_analyze_request(content: str) -> bool:
 def is_generic_natural_attachment_request(content: str) -> bool:
     if is_natural_analyze_request(content):
         text = normalize_natural_text(content)
-        generic_image_phrases = {
-            "analyzuj obrazek",
-            "analyzuj ten obrazek",
-            "koukni na obrazek",
-            "koukni na tohle",
-            "podivej se na obrazek",
-            "podivej se na tohle",
-            "co je na obrazku",
-            "co je na tom obrazku",
-            "co vidis",
-            "co tam vidis",
-            "popis obrazek",
-            "popis ten obrazek",
-            "vysvetli obrazek",
-            "vysvetli ten screenshot",
-            "co je na screenshotu",
-            "co je na screenu",
-        }
-        return text in generic_image_phrases
+        return text in GENERIC_IMAGE_ANALYZE_TRIGGERS
 
     text = normalize_natural_text(content)
-    subjects = (
-        "soubor",
-        "souboru",
-        "dokument",
-        "dokumentu",
-        "pdf",
-        "word",
-        "wordu",
-        "docx",
-        "excel",
-        "excelu",
-        "xlsx",
-        "tabulku",
-        "tabulce",
-        "tabulka",
-        "csv",
-        "txt",
-        "markdown",
-        "prilohu",
-        "priloze",
-    )
-    subject_pattern = "|".join(subjects)
+    subject_pattern = "|".join(ATTACHMENT_ANALYZE_SUBJECTS)
     generic_patterns = (
         rf"^(?:analyzuj|koukni na|podivej se na|precti|shrn|vysvetli)\s+(?:(?:ten|to|tu|tento|tuto|te)\s+)?(?:{subject_pattern})$",
         rf"^co\s+je\s+(?:v|ve)\s+(?:(?:tom|te)\s+)?(?:{subject_pattern})$",
@@ -791,26 +706,7 @@ def is_generic_natural_attachment_request(content: str) -> bool:
 def get_natural_analyze_question(content: str) -> str:
     text = normalize_natural_text(content)
     default_question = "Popiš, co je na obrázku."
-    generic_phrases = {
-        "analyzuj obrazek",
-        "analyzuj ten obrazek",
-        "koukni na obrazek",
-        "koukni na tohle",
-        "podivej se na obrazek",
-        "podivej se na tohle",
-        "co je na obrazku",
-        "co je na tom obrazku",
-        "co vidis",
-        "co tam vidis",
-        "popis obrazek",
-        "popis ten obrazek",
-        "vysvetli obrazek",
-        "vysvetli ten screenshot",
-        "co je na screenshotu",
-        "co je na screenu",
-    }
-
-    if text in generic_phrases:
+    if text in GENERIC_IMAGE_ANALYZE_TRIGGERS:
         return default_question
 
     return content.strip() or default_question
@@ -825,60 +721,29 @@ def get_natural_attachment_analyze_question(content: str) -> str:
 
 
 def parse_natural_intent(text: str) -> Optional[tuple[str, Optional[str]]]:
-    if re.match(r"^(?:help|pomoc|nápověda|prikazy|příkazy)\s*$", text, re.IGNORECASE):
-        return "help", None
+    for pattern in HELP_PATTERNS:
+        if re.match(pattern, text, re.IGNORECASE):
+            return "help", None
 
-    if re.match(r"^co\s+(?:umíš|umis|dokážeš|dokazes)\s*\??$", text, re.IGNORECASE):
-        return "help", None
-
-    if re.match(r"^(?:ukaž|ukaz)\s+(?:příkazy|prikazy)\s*$", text, re.IGNORECASE):
-        return "help", None
-
-    if re.match(r"^zapamatuj\s+si\s+to\s*$", text, re.IGNORECASE):
+    if re.match(NOTE_ADD_PREVIOUS_PATTERN, text, re.IGNORECASE):
         return "note_add_previous", None
 
-    if re.match(r"^co\s+si\s+o\s+tom\s+(?:myslíš|myslis)\s*\??$", text, re.IGNORECASE):
-        return "ask_previous", None
+    for pattern in OPINION_CONTEXT_PATTERNS:
+        if re.match(pattern, text, re.IGNORECASE):
+            return "ask_previous", None
 
-    if re.match(r"^co\s+si\s+o\s+tom\s+(?:myslí|mysli)\s+panam\s*\??$", text, re.IGNORECASE):
-        return "ask_previous", None
-
-    if re.match(r"^(?:shrň|shrn)\s+(?:to|toto)\s*$", text, re.IGNORECASE):
+    if re.match(SUMMARY_CONTEXT_PATTERN, text, re.IGNORECASE):
         return "summary_previous", None
 
-    intent_patterns = (
-        ("note_add", r"^(?:přidej|pridej)\s+(?:poznámku|poznamku)\s+(.+)$"),
-        ("note_add", r"^(?:ulož|uloz)\s+(?:poznámku|poznamku)\s+(.+)$"),
-        ("note_add", r"^zapamatuj\s+si\s+(.+)$"),
-        ("note_add", r"^pamatuj\s+si\s+(.+)$"),
-        ("note_add", r"^(?:ulož|uloz)\s+si\s+(.+)$"),
-        ("todo_add", r"^(?:přidej|pridej)\s+todo\s+(.+)$"),
-        ("todo_add", r"^(?:přidej|pridej)\s+(?:úkol|ukol)\s+(.+)$"),
-        ("note_search", r"^najdi\s+(?:poznámku|poznamku)\s+(.+)$"),
-        ("ask", r"^(?:řekni|rekni)\s+mi\s+(.+)$"),
-        ("ask", r"^(?:řekni|rekni)\s+(.+)$"),
-        ("ask", r"^(?:odpověz|odpovez)\s+(.+)$"),
-        ("ask", r"^co\s+si\s+(?:myslíš|myslis)\s+o\s+(.+)$"),
-        ("ask", r"^co\s+si\s+(?:myslí|mysli)\s+panam\s+o\s+(.+)$"),
-        ("talk", r"^talk\s+(.+)$"),
-        ("talk", r"^pokec\s+(.+)$"),
-        ("talk", r"^(?:pokecáme|pokecame)\s+o\s+(.+)$"),
-        ("talk", r"^pokecej\s+o\s+(.+)$"),
-        ("talk", r"^co\s+si\s+fakt\s+(?:myslíš|myslis)\s+o\s+(.+)$"),
-        ("summary", r"^(?:shrň|shrn)\s+mi\s+(.+)$"),
-        ("summary", r"^(?:shrň|shrn)\s+(.+)$"),
-        ("summary", r"^(?:udělej|udelej)\s+summary\s+(.+)$"),
-    )
-
-    for intent, pattern in intent_patterns:
+    for intent, pattern in NATURAL_INTENT_PATTERNS:
         match = re.match(pattern, text, re.IGNORECASE)
         if match:
             return intent, match.group(1).strip()
 
-    if re.match(r"^(?:ukaž|ukaz)\s+(?:poznámky|poznamky)\s*$", text, re.IGNORECASE):
+    if re.match(NOTE_LIST_PATTERN, text, re.IGNORECASE):
         return "note_list", None
 
-    if re.match(r"^(?:ukaž|ukaz)\s+(?:todo|úkoly|ukoly)\s*$", text, re.IGNORECASE):
+    if re.match(TODO_LIST_PATTERN, text, re.IGNORECASE):
         return "todo_list", None
 
     return None
@@ -976,7 +841,7 @@ class DiscordAIBot(discord.Client):
             if basic_prompt is not None:
                 if not basic_prompt.strip():
                     await message.reply(
-                        "Jsem tady. Co potřebuješ?",
+                        BASIC_PANAM_EMPTY_RESPONSE,
                         mention_author=False,
                     )
                     return
@@ -1012,16 +877,7 @@ class DiscordAIBot(discord.Client):
             if intent_name == "note_add" and value:
                 inline_note = extract_inline_content_after_trigger(
                     request_text,
-                    [
-                        "přidej poznámku",
-                        "pridej poznamku",
-                        "ulož poznámku",
-                        "uloz poznamku",
-                        "zapamatuj si",
-                        "pamatuj si",
-                        "ulož si",
-                        "uloz si",
-                    ],
+                    list(NOTE_ADD_TRIGGERS),
                 )
                 if inline_note:
                     value = inline_note
@@ -1062,18 +918,7 @@ class DiscordAIBot(discord.Client):
             if intent_name == "ask" and value:
                 inline_question = extract_inline_content_after_trigger(
                     request_text,
-                    [
-                        "řekni mi",
-                        "rekni mi",
-                        "řekni",
-                        "rekni",
-                        "odpověz",
-                        "odpovez",
-                        "co si myslíš o",
-                        "co si myslis o",
-                        "co si myslí panam o",
-                        "co si mysli panam o",
-                    ],
+                    list(OPINION_TRIGGERS),
                 )
                 if inline_question:
                     value = inline_question
@@ -1156,14 +1001,7 @@ class DiscordAIBot(discord.Client):
             if intent_name == "summary" and value:
                 inline_summary = extract_inline_content_after_trigger(
                     request_text,
-                    [
-                        "shrň mi",
-                        "shrn mi",
-                        "shrň",
-                        "shrn",
-                        "udělej summary",
-                        "udelej summary",
-                    ],
+                    list(SUMMARY_TRIGGERS),
                 )
                 if inline_summary:
                     value = inline_summary
@@ -1228,7 +1066,7 @@ class DiscordAIBot(discord.Client):
             if basic_prompt is not None:
                 if not basic_prompt.strip():
                     await message.reply(
-                        "Jsem tady. Co potřebuješ?",
+                        BASIC_PANAM_EMPTY_RESPONSE,
                         mention_author=False,
                     )
                     return
