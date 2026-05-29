@@ -23,6 +23,7 @@ from panam_ai import (
     analyze_document_text,
     ask_panam,
     ask_panam_talk,
+    classify_file_request_intent,
     extract_structured_data,
     process_document_text,
     shorten_for_discord,
@@ -84,6 +85,7 @@ MAX_XLSX_SHEETS = 10
 MAX_XLSX_ROWS_PER_SHEET = 500
 MAX_XLSX_COLUMNS_PER_SHEET = 50
 COMMAND_STATUSES: dict[int, str] = {}
+_last_file_context: dict[int, dict[str, str | None]] = {}
 
 
 logger = logging.getLogger("panam")
@@ -147,6 +149,53 @@ def get_context_int(context: dict[str, str | int | None], key: str) -> int:
     if isinstance(value, str) and value.isdecimal():
         return int(value)
     return 0
+
+
+def normalize_channel_id(channel_id: int | str | None) -> int | None:
+    if isinstance(channel_id, int):
+        return channel_id
+    if isinstance(channel_id, str) and channel_id.isdecimal():
+        return int(channel_id)
+    return None
+
+
+def set_last_file_context(
+    channel_id: int | str | None,
+    source_filename: str,
+    source_extension: str,
+    last_mode: str,
+    last_output_filename: str | None = None,
+) -> None:
+    normalized_channel_id = normalize_channel_id(channel_id)
+    if normalized_channel_id is None:
+        return
+
+    _last_file_context[normalized_channel_id] = {
+        "source_filename": Path(source_filename).name,
+        "source_extension": source_extension,
+        "last_output_filename": last_output_filename,
+        "last_mode": last_mode,
+        "updated_at": datetime.now(timezone.utc).isoformat(),
+    }
+
+
+def get_last_file_context(channel_id: int | str | None) -> dict[str, str | None] | None:
+    normalized_channel_id = normalize_channel_id(channel_id)
+    if normalized_channel_id is None:
+        return None
+
+    context = _last_file_context.get(normalized_channel_id)
+    if context is None:
+        return None
+    return dict(context)
+
+
+def clear_last_file_context(channel_id: int | str | None) -> None:
+    normalized_channel_id = normalize_channel_id(channel_id)
+    if normalized_channel_id is None:
+        return
+
+    _last_file_context.pop(normalized_channel_id, None)
 
 
 def get_safe_attachment_info(file: discord.Attachment | None) -> dict[str, str | int | None]:
@@ -1199,6 +1248,145 @@ def is_file_router_candidate(text: str) -> bool:
     return has_explicit_file_subject(text) or has_explicit_file_output_request(text)
 
 
+def is_ambiguous_context_request(text: str) -> bool:
+    if has_explicit_file_subject(text) or has_explicit_file_output_request(text):
+        return False
+
+    normalized = normalize_natural_text(text)
+    patterns = (
+        r"^shrn\s+(?:to|toto|tomuhle|tohle)$",
+        r"^vysvetli\s+(?:to|toto|tohle)$",
+        r"^co\s+je\s+na\s+tom\s+spatne\??$",
+        r"^co\s+je\s+tam\s+spatne\??$",
+        r"^co\s+dal\??$",
+        r"^udelej\s+s\s+tim\s+neco.*$",
+        r"^priprav(?:\s+mi)?\s+to\s+nejak.*$",
+        r"^prehod(?:\s+mi)?\s+to\s+do\s+lepsi\s+podoby.*$",
+        r"^potrebuju\s+z\s+toho\s+neco\s+vytahnout.*$",
+        r"^(?:koukni|mrkni)\s+na\s+to\s+a\s+neco\s+s\s+tim\s+udelej.*$",
+    )
+    return any(re.match(pattern, normalized) is not None for pattern in patterns)
+
+
+def sanitize_classifier_context_text(text: str) -> str:
+    normalized = normalize_natural_text(text)
+    sensitive_markers = (
+        "token",
+        "api key",
+        "apikey",
+        "heslo",
+        "password",
+        "secret",
+        "klic",
+        "key",
+    )
+    if any(marker in normalized for marker in sensitive_markers):
+        return "[sensitive content omitted]"
+
+    return text[:500]
+
+
+def get_recent_classifier_context(channel_id: int, limit: int = 4) -> list[dict]:
+    recent_messages = panam_memory.get_messages(channel_id)[-limit:]
+    context = []
+    for message in recent_messages:
+        role = message.get("role")
+        content = str(message.get("content", "")).strip()
+        if role not in {"user", "assistant"} or not content:
+            continue
+
+        context.append(
+            {
+                "role": role,
+                "content": sanitize_classifier_context_text(content),
+            }
+        )
+
+    return context
+
+
+def fallback_ai_file_intent() -> dict:
+    return {
+        "target": "conversation",
+        "mode": "chat_answer",
+        "output_format": None,
+        "question": None,
+        "instruction": None,
+        "confidence": 0.0,
+        "reason": "fallback",
+    }
+
+
+def validate_ai_file_intent(
+    raw_intent,
+    has_current_attachment: bool,
+    has_last_file_context: bool,
+) -> dict:
+    if isinstance(raw_intent, str):
+        try:
+            intent = json.loads(raw_intent)
+        except json.JSONDecodeError:
+            return fallback_ai_file_intent()
+    elif isinstance(raw_intent, dict):
+        intent = raw_intent
+    else:
+        return fallback_ai_file_intent()
+
+    allowed_targets = {"conversation", "current_attachment", "last_file_context", "none"}
+    allowed_modes = {"chat_answer", "human_document", "structured_data", "unsupported_direct_edit"}
+    allowed_formats = {"md", "txt", "json", "csv", "xlsx", None}
+
+    target = intent.get("target")
+    mode = intent.get("mode")
+    output_format = intent.get("output_format")
+    if output_format == "null":
+        output_format = None
+    confidence = intent.get("confidence")
+
+    if target not in allowed_targets or mode not in allowed_modes:
+        return fallback_ai_file_intent()
+    if output_format not in allowed_formats:
+        return fallback_ai_file_intent()
+    if not isinstance(confidence, (int, float)):
+        return fallback_ai_file_intent()
+
+    confidence = max(0.0, min(float(confidence), 1.0))
+    if confidence < 0.65:
+        return fallback_ai_file_intent()
+
+    if target == "current_attachment" and not has_current_attachment:
+        return fallback_ai_file_intent()
+    if target == "last_file_context" and not has_last_file_context:
+        return fallback_ai_file_intent()
+
+    if mode == "human_document":
+        if output_format not in {"md", "txt", None}:
+            return fallback_ai_file_intent()
+        output_format = output_format or "md"
+    elif mode == "structured_data":
+        if output_format not in {"json", "csv", "md", "xlsx", None}:
+            return fallback_ai_file_intent()
+        output_format = output_format or "json"
+    elif mode == "chat_answer":
+        output_format = None
+    elif mode == "unsupported_direct_edit":
+        output_format = None
+
+    question = intent.get("question")
+    instruction = intent.get("instruction")
+    reason = intent.get("reason")
+
+    return {
+        "target": target,
+        "mode": mode,
+        "output_format": output_format,
+        "question": question if isinstance(question, str) and question.strip() else None,
+        "instruction": instruction if isinstance(instruction, str) and instruction.strip() else None,
+        "confidence": confidence,
+        "reason": reason if isinstance(reason, str) else "",
+    }
+
+
 def get_natural_file_action_name(decision: dict) -> str:
     mode = decision.get("mode")
     if mode == "human_document":
@@ -1343,6 +1531,13 @@ async def run_human_document_file_job(
         panam_files.write_job_metadata(job)
 
         await send_source_message(source, "Soubor je zpracovany.", output_path)
+        set_last_file_context(
+            context.get("channel_id"),
+            Path(file.filename).name,
+            extension,
+            "human_document",
+            output_path.name,
+        )
         log_action(
             action_type,
             action_name,
@@ -1581,6 +1776,13 @@ async def run_structured_data_file_job(
         panam_files.write_job_metadata(job)
 
         await send_source_message(source, "Data jsou vytezena.", output_path)
+        set_last_file_context(
+            context.get("channel_id"),
+            Path(file.filename).name,
+            extension,
+            "structured_data",
+            output_path.name,
+        )
         log_action(
             action_type,
             action_name,
@@ -1681,6 +1883,12 @@ async def handle_natural_file_request(
             )
             answer = await analyze_selected_attachment(file, question)
             await message.reply(answer, mention_author=False)
+            set_last_file_context(
+                message.channel.id,
+                Path(file.filename).name,
+                get_file_extension(file.filename),
+                "chat_answer",
+            )
             log_action(
                 "natural_message",
                 action_name,
@@ -1768,6 +1976,111 @@ async def handle_natural_file_request(
         "Tohle jsem u prilohy nepoznala, tak volim bezpecnou odpoved do chatu.",
         mention_author=False,
     )
+
+
+async def handle_ai_classified_file_request(
+    message: discord.Message,
+    request_text: str,
+    current_file: discord.Attachment | None,
+) -> bool:
+    last_file_context = get_last_file_context(message.channel.id)
+    recent_context = get_recent_classifier_context(message.channel.id)
+
+    if not (current_file is not None or last_file_context is not None or recent_context):
+        return False
+
+    current_attachment_context = {}
+    if current_file is not None:
+        current_attachment_context = {
+            "exists": True,
+            "filename": Path(current_file.filename).name,
+            "extension": get_file_extension(current_file.filename),
+        }
+    else:
+        current_attachment_context = {"exists": False}
+
+    file_context = {
+        "current_attachment": current_attachment_context,
+        "last_file_context": last_file_context,
+    }
+
+    try:
+        raw_intent = await classify_file_request_intent(
+            OPENAI_MODEL,
+            request_text,
+            file_context=file_context,
+            recent_context=recent_context,
+        )
+        intent = validate_ai_file_intent(
+            raw_intent,
+            has_current_attachment=current_file is not None,
+            has_last_file_context=last_file_context is not None,
+        )
+    except Exception:
+        log_action(
+            "natural_message",
+            "ai_file_intent_classifier",
+            "error",
+            message,
+            classifier_used=True,
+        )
+        logger.exception("Chyba pri AI klasifikaci nejasneho file/context dotazu")
+        return False
+
+    log_action(
+        "natural_message",
+        "ai_file_intent_classifier",
+        "success",
+        message,
+        classifier_used=True,
+        target=intent.get("target"),
+        mode=intent.get("mode"),
+        output_format=intent.get("output_format"),
+        confidence=round(float(intent.get("confidence", 0.0)), 2),
+    )
+
+    target = intent.get("target")
+    mode = intent.get("mode")
+    if target in {"conversation", "none"}:
+        return False
+
+    if mode == "unsupported_direct_edit":
+        await message.reply(
+            "Puvodni prilohu zatim primo neupravuju. Muzu ale vytvorit novy XLSX, CSV, Markdown nebo TXT vystup.",
+            mention_author=False,
+        )
+        return True
+
+    selected_file = current_file
+    if target == "last_file_context":
+        selected_file = await find_recent_supported_attachment(message.channel)
+
+    if selected_file is None:
+        return False
+
+    if mode == "human_document":
+        decision = {
+            "mode": "human_document",
+            "instruction": intent.get("instruction") or request_text,
+            "output_format": intent.get("output_format") or "md",
+        }
+    elif mode == "structured_data":
+        decision = {
+            "mode": "structured_data",
+            "instruction": intent.get("instruction") or request_text,
+            "output_format": intent.get("output_format") or "json",
+        }
+    else:
+        decision = {
+            "mode": "chat_answer",
+            "question": intent.get("question") or get_attachment_context_question(
+                request_text,
+                get_attachment_kind(selected_file) or "document",
+            ),
+        }
+
+    await handle_natural_file_request(message, selected_file, decision)
+    return True
 
 
 def get_items_for_xlsx(data) -> list[dict]:
@@ -1903,7 +2216,8 @@ class DiscordAIBot(discord.Client):
         if request_text is None:
             return
 
-        selected_file = find_supported_attachment_in_message(message)
+        current_file = find_supported_attachment_in_message(message)
+        selected_file = current_file
         natural_action = get_natural_action_name(request_text, message.content or "")
         if ALLOWED_CHANNEL_IDS and str(message.channel.id) not in ALLOWED_CHANNEL_IDS:
             if natural_action is not None:
@@ -1912,11 +2226,7 @@ class DiscordAIBot(discord.Client):
 
         explicit_file_subject = has_explicit_file_subject(request_text)
         explicit_file_output_request = has_explicit_file_output_request(request_text)
-        file_router_candidate = (
-            selected_file is not None
-            or explicit_file_subject
-            or explicit_file_output_request
-        )
+        file_router_candidate = explicit_file_subject or explicit_file_output_request
         if file_router_candidate and selected_file is None:
             selected_file = await find_recent_supported_attachment(message.channel)
 
@@ -1934,8 +2244,18 @@ class DiscordAIBot(discord.Client):
             await handle_natural_file_request(message, selected_file, file_decision)
             return
 
+        if is_ambiguous_context_request(request_text):
+            handled_by_classifier = await handle_ai_classified_file_request(
+                message,
+                request_text,
+                current_file,
+            )
+            if handled_by_classifier:
+                return
+
         context_attachment_request = (
             selected_file is not None
+            and not is_ambiguous_context_request(request_text)
             and is_general_attachment_context_request(request_text)
         )
         if context_attachment_request and selected_file is None:
@@ -2845,6 +3165,12 @@ async def analyze(
     try:
         answer = await analyze_selected_attachment(selected_file, question)
         await interaction.followup.send(answer)
+        set_last_file_context(
+            interaction.channel_id,
+            Path(selected_file.filename).name,
+            get_file_extension(selected_file.filename),
+            "chat_answer",
+        )
 
     except AttachmentAnalysisUserError as error:
         await interaction.followup.send(str(error))
@@ -2934,6 +3260,12 @@ async def read_file(
             file.filename,
         )
         await interaction.followup.send(answer)
+        set_last_file_context(
+            interaction.channel_id,
+            Path(file.filename).name,
+            extension,
+            "chat_answer",
+        )
 
     except AttachmentAnalysisUserError as error:
         mark_command_status(interaction, "error")
@@ -3231,6 +3563,13 @@ async def process_file(
         await interaction.followup.send(
             "Soubor je zpracovany.",
             file=discord.File(output_path),
+        )
+        set_last_file_context(
+            interaction.channel_id,
+            Path(file.filename).name,
+            extension,
+            "human_document",
+            output_path.name,
         )
         log_action(
             "slash_command",
@@ -3548,6 +3887,13 @@ async def extract_data(
         await interaction.followup.send(
             "Data jsou vytezena.",
             file=discord.File(output_path),
+        )
+        set_last_file_context(
+            interaction.channel_id,
+            Path(file.filename).name,
+            extension,
+            "structured_data",
+            output_path.name,
         )
         log_action(
             "slash_command",

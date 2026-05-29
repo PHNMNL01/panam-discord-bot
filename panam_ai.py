@@ -1,3 +1,4 @@
+import json
 import os
 from pathlib import Path
 from typing import cast
@@ -410,3 +411,56 @@ async def extract_structured_data(
         return "V dokumentu jsem nenasla pozadovana data."
 
     return answer
+
+
+async def classify_file_request_intent(
+    model: str,
+    request_text: str,
+    file_context: dict | None = None,
+    recent_context: list[dict] | None = None,
+) -> str:
+    classifier_input = {
+        "request_text": request_text,
+        "file_context": file_context or {},
+        "recent_context": recent_context or [],
+    }
+
+    response = await openai_client.responses.create(
+        model=model,
+        input=cast(
+            ResponseInputParam,
+            [
+                {
+                    "role": "system",
+                    "content": (
+                        "You classify ambiguous Discord requests for Panam. "
+                        "Return only valid JSON, with no Markdown and no extra text. "
+                        "Never invent file context. If no current attachment and no last file context exist, "
+                        "do not choose a file target. Hard explicit requests must be respected: direct edits are "
+                        "unsupported_direct_edit; Excel/XLSX/CSV/JSON output is structured_data; report/checklist/"
+                        "overview/file/Markdown/TXT output is human_document. Prefer conversation when uncertain."
+                    ),
+                },
+                {
+                    "role": "user",
+                    "content": (
+                        "Allowed JSON shape:\n"
+                        "{"
+                        "\"target\":\"conversation|current_attachment|last_file_context|none\","
+                        "\"mode\":\"chat_answer|human_document|structured_data|unsupported_direct_edit\","
+                        "\"output_format\":null,"
+                        "\"question\":\"string|null\","
+                        "\"instruction\":\"string|null\","
+                        "\"confidence\":0.0,"
+                        "\"reason\":\"short reason\""
+                        "}\n"
+                        "output_format must be one of md, txt, json, csv, xlsx, or JSON null.\n\n"
+                        "Input JSON:\n"
+                        f"{json.dumps(classifier_input, ensure_ascii=False)}"
+                    ),
+                },
+            ],
+        ),
+    )
+
+    return response.output_text.strip()
