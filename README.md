@@ -16,6 +16,8 @@ Projekt je zatim prakticky PoC, ale uz ma oddelenou AI vrstvu, prirozene fraze, 
 - vytvaret lidske vystupni dokumenty jako MD nebo TXT
 - tezit strukturovana data do JSON, CSV, Markdownu nebo XLSX
 - reagovat na prirozene fraze typu `Panam shrn to`
+- navazovat na posledni zpracovany soubor pres bezpecne kratke RAM shrnuti
+- poznat odkaz na posledni soubor podle nazvu nebo casti nazvu, napr. `requirements`
 
 ## Zakladni principy
 
@@ -25,6 +27,7 @@ Projekt je zatim prakticky PoC, ale uz ma oddelenou AI vrstvu, prirozene fraze, 
 - Puvodni Discord priloha se nikdy neupravuje.
 - Prace se soubory probiha v docasnem file jobu: `input/`, `work/`, `output/`, `job.json`.
 - Obsah souboru, cele dotazy a vystupy se neloguji.
+- Kratke file contexty jsou jen v RAM a po restartu zmizi.
 
 ## Konfigurace
 
@@ -63,7 +66,7 @@ Zakladni:
 
 - `/ping` - overi, ze je bot online.
 - `/help` - zobrazi napovedu.
-- `/memory_clear` - vymaze kratkou konverzacni pamet Panam pro aktualni kanal.
+- `/memory_clear` - vymaze kratkou konverzacni pamet, last file context a posledni router decision pro aktualni kanal.
 
 AI a zpravy:
 
@@ -349,6 +352,48 @@ Panam prepis to do cisteho textu
 
 Panam zatim primo neupravuje puvodni Excel ani puvodni Discord prilohu. Kdyz uzivatel napise napr. `Panam uprav ten Excel`, Panam odpovi, ze umi vytvorit novy XLSX, CSV, Markdown nebo TXT vystup.
 
+#### Odkaz na posledni soubor podle nazvu
+
+Kdyz existuje `last_file_context`, Panam umi poznat odkaz na posledni soubor podle celeho nazvu nebo casti nazvu. Match je case-insensitive, bez diakritiky a tolerantni k pripone.
+
+Priklad pro `source_filename=requirements.txt`:
+
+```text
+Panam ten soubor requirements
+Panam vrat se k requirements
+Panam co bylo v requirements?
+Panam jake knihovny byly v requirements?
+Panam udelej z requirements tabulku
+Panam requirements do csv
+Panam ten requirements dej do Excelu
+```
+
+Kratke nebo obecne tokeny se nepouzivaji jako dukaz match, napr. `to`, `tom`, `ten`, `md`, `txt`, `csv`, `pdf`, `xlsx`, `soubor`, `dokument`, `tabulka`.
+
+Pokud dotaz podle nazvu souboru jen navazuje na obsah a existuje bezpecne `file_summary`, Panam odpovi podle nej. Pokud uzivatel zada vystupni soubor nebo format, vyhraje file router:
+
+```text
+Panam co bylo v requirements?
+-> odpoved podle file_summary, pokud existuje
+
+Panam jake knihovny byly v requirements?
+-> odpoved podle file_summary, pokud existuje
+
+Panam udelej z requirements tabulku
+-> structured_data, xlsx
+
+Panam requirements do csv
+-> structured_data, csv
+
+Panam ten requirements dej do Excelu
+-> structured_data, xlsx
+
+Panam udelej z requirements soubor
+-> human_document, md
+```
+
+Meta vety o chovani Panam/routeru stale zustavaji bezna konverzace, i kdyz obsahuji nazev souboru. Napr. `Panam proc jsi hledala requirements soubor?` nebo `Panam nemela jsi hledat requirements` nespousti file router.
+
 ### Last File Context
 
 Panam si v RAM pamatuje posledni souborovy kontext pro kazdy kanal. Uklada se po uspesnem zpracovani souboru pres natural request i pres slash commandy `/analyze`, `/read_file`, `/process_file` a `/extract_data`.
@@ -360,8 +405,48 @@ Ukladaji se jen bezpecna metadata:
 - `last_output_filename`
 - `last_mode`
 - `updated_at`
+- `file_summary` - volitelne kratke bezpecne shrnuti, max 800 znaku
 
-Neuklada se obsah souboru, obsah vystupu ani cely dotaz uzivatele. Context je jen pomocna stopa pro dalsi rozhodovani a po restartu bota zmizi.
+`file_summary` vznikne po uspesnem `chat_answer` nad souborem, napr. pres natural dotaz, `/analyze` nebo `/read_file`. Pouziva se jen pro navazujici dotazy typu:
+
+```text
+Panam co tam bylo?
+Panam co v tom bylo?
+Panam jake knihovny tam byly?
+Panam k cemu ten soubor byl?
+Panam shrn to jeste kratceji
+Panam vysvetli to jednoduseji
+```
+
+Panam u odpovedi podle `file_summary` nepredstira, ze zna cely raw obsah souboru. Pokud ze shrnuti nejde odpovedet, ma si rict o soubor nebo upresneni.
+
+Bezpecnost `file_summary`:
+
+- neuklada se raw extracted text
+- neuklada se cely obsah souboru
+- neukladaji se vystupy file jobu
+- max delka je 800 znaku
+- pokud text obsahuje signaly jako `password`, `token`, `api key`, `secret`, `heslo`, `rodne cislo`, `bankovni ucet` nebo `osobni udaje`, summary se neulozi
+- `file_summary` se neloguje
+
+Po `/process_file` nebo `/extract_data` muze `file_summary` zustat zachovane pro stejny soubor, pokud uz existovalo. Neuklada se obsah souboru, obsah vystupu ani cely dotaz uzivatele. Context je jen pomocna stopa pro dalsi rozhodovani a po restartu bota zmizi.
+
+### Last Router Decision
+
+Panam si v RAM pamatuje i posledni rozhodnuti routeru/classifieru podle kanalu. Je to pouze diagnosticky a kontextovy signal, ne dlouhodoba pamet.
+
+Uklada se:
+
+- `target`
+- `mode`
+- `output_format`
+- `classifier_used`
+- `confidence`
+- `updated_at`
+
+Neuklada se cely dotaz uzivatele, obsah souboru, obsah konverzace ani `reason` z classifieru.
+
+`/memory_clear` maze kratkou konverzacni pamet, `last_file_context` vcetne `file_summary` a `last_router_decision` pro aktualni kanal.
 
 ### AI Intent Classifier
 
@@ -387,7 +472,7 @@ Classifier muze zvolit:
 
 Kdyz confidence vyjde nizko nebo validace selze, Panam spadne zpet na beznou konverzaci. Classifier nesmi vymyslet souborovy kontext, kdyz neni aktualni priloha ani `last_file_context`.
 
-Classifier dostava jen bezpecna metadata: jestli existuje aktualni priloha, jeji nazev a priponu, last file context metadata a kratky sanitizovany konverzacni kontext. Obsah souboru se classifieru neposila.
+Classifier dostava jen bezpecna metadata: jestli existuje aktualni priloha, jeji nazev a priponu, last file context metadata, informaci o bezpecnem `file_summary` a kratky sanitizovany konverzacni kontext. Obsah souboru se classifieru neposila.
 
 Debug log classifieru je omezeny na bezpecna pole:
 
@@ -406,6 +491,9 @@ Priklady pro ladeni routeru jsou v `docs/router_test_cases.md`. Soubor slouzi ja
 
 - `Panam udelej z toho tabulku`
 - `Panam udelej z toho soubor csv`
+- `Panam co bylo v requirements?`
+- `Panam requirements do csv`
+- `Panam ten requirements dej do Excelu`
 - `Panam jen testuju, ze jsi nehledala soubor`
 - `Panam co je na tom spatne?`
 - `Panam co je spatne v tom souboru?`
@@ -445,6 +533,9 @@ Test:
 
 - Panam si v RAM pamatuje poslednich nekolik beznych konverzacnich zprav v kanalu.
 - Pamet se pouziva pro `Panam <dotaz>`.
+- Panam si v RAM pamatuje posledni souborovy kontext v kanalu.
+- Souborovy kontext muze obsahovat kratke bezpecne `file_summary`.
+- Panam si v RAM pamatuje posledni router/classifier rozhodnuti v kanalu.
 - Po restartu bota se smaze.
 - Pamet lze smazat pres `/memory_clear`.
 - Poznamky a todo jsou samostatne funkce a ukladaji se do `notes.json` a `todos.json`.
@@ -456,6 +547,7 @@ Test:
 - Puvodni Discord priloha se nikdy neupravuje.
 - File job pracuje jen s docasnou kopii souboru.
 - Panam neni urcena pro hesla, tokeny, API klice, HR data, zakaznicka data ani jina citliva data.
+- `file_summary` se neuklada, pokud obsahuje podezrele citlive signaly.
 - `.env`, `notes.json`, `todos.json`, `logs/` a `runtime/` nepatri do gitu.
 
 ## Logovani
@@ -477,6 +569,8 @@ Neloguje se:
 - obsah priloh
 - cele uzivatelske dotazy
 - obsah vystupu
+- `file_summary`
+- `reason` z AI classifieru
 
 Log se rotuje pri velikosti 1 MB a uchovava 5 zaloznich souboru.
 
@@ -509,7 +603,7 @@ Soubory:
 - `panam_ai.py` - OpenAI volani, system prompt, analyza, shrnuti, file AI funkce a AI intent classifier.
 - `panam_phrases.py` - prirozene fraze, signaly a intent patterny.
 - `panam_router.py` - ciste router/helper funkce pro natural file rozhodovani.
-- `panam_file_context.py` - RAM last-file context podle kanalu.
+- `panam_file_context.py` - RAM last-file context, file summary a posledni router decision podle kanalu.
 - `panam_files.py` - izolovana file-job pipeline.
 - `panam_excel.py` - tvorba jednoducheho XLSX vystupu ze strukturovanych dat.
 - `panam_memory.py` - kratka RAM konverzacni pamet podle kanalu.

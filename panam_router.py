@@ -1,4 +1,5 @@
 import json
+from pathlib import Path
 import re
 import unicodedata
 
@@ -6,6 +7,20 @@ from panam_phrases import DIRECT_FILE_EDIT_SIGNALS, HUMAN_DOCUMENT_SIGNALS
 
 
 SUPPORTED_IMAGE_EXTENSIONS = (".png", ".jpg", ".jpeg", ".webp", ".gif")
+IGNORED_FILE_REFERENCE_TOKENS = {
+    "to",
+    "tom",
+    "ten",
+    "md",
+    "txt",
+    "csv",
+    "pdf",
+    "xlsx",
+    "json",
+    "soubor",
+    "dokument",
+    "tabulka",
+}
 
 
 def normalize_natural_text(text: str) -> str:
@@ -16,6 +31,51 @@ def normalize_natural_text(text: str) -> str:
         if not unicodedata.combining(character)
     )
     return re.sub(r"\s+", " ", without_diacritics).strip(" \t\n\r,.:;!-?")
+
+
+def normalize_file_reference_text(text: str) -> str:
+    normalized = normalize_natural_text(text)
+    return re.sub(r"[^a-z0-9]+", " ", normalized).strip()
+
+
+def file_reference_tokens(filename: str | None) -> set[str]:
+    if not filename:
+        return set()
+
+    safe_name = Path(str(filename)).name
+    stem = Path(safe_name).stem
+    candidates = {safe_name, stem}
+    candidates.update(re.split(r"[\s._\-()[\]{}]+", safe_name))
+    candidates.update(re.split(r"[\s._\-()[\]{}]+", stem))
+
+    tokens = set()
+    for candidate in candidates:
+        normalized = normalize_file_reference_text(candidate)
+        if len(normalized) < 4 or normalized in IGNORED_FILE_REFERENCE_TOKENS:
+            continue
+        tokens.add(normalized)
+
+    return tokens
+
+
+def matches_last_file_reference(text: str, last_file_context: dict | None) -> bool:
+    if not isinstance(last_file_context, dict):
+        return False
+
+    normalized_text = normalize_file_reference_text(text)
+    if not normalized_text:
+        return False
+
+    tokens = set()
+    tokens.update(file_reference_tokens(last_file_context.get("source_filename")))
+    tokens.update(file_reference_tokens(last_file_context.get("last_output_filename")))
+    if not tokens:
+        return False
+
+    return any(
+        re.search(rf"\b{re.escape(token)}\b", normalized_text) is not None
+        for token in tokens
+    )
 
 
 def contains_natural_signal(text: str, signals: tuple[str, ...]) -> bool:
@@ -97,6 +157,7 @@ def has_explicit_file_output_request(text: str) -> bool:
         r"\bjako\s+soubor\b",
         r"\bvrat\s+json\b",
         r"\budelej(?:\s+z\s+toho)?\s+(?:report|checklist|prehled|soubor)\b",
+        r"\b(?:udelej|vytvor|priprav|preved|dej)\b.*\bsoubor\b",
         r"\bvytvor(?:\s+z\s+toho)?\s+(?:report|checklist|prehled|soubor)\b",
         r"\bpriprav(?:\s+mi)?\s+z\s+toho\s+soubor\b",
         r"\bpreved(?:\s+mi)?\s+to\s+do\s+souboru\b",
@@ -122,6 +183,10 @@ def is_meta_router_or_behavior_discussion(text: str) -> bool:
         "nehledala soubor",
         "nemela hledat soubor",
         "nemel hledat soubor",
+        "nemela jsi hledat",
+        "nemel jsi hledat",
+        "proc jsi hledala",
+        "proc jsi hledal",
         "proc jsi hledala soubor",
         "proc jsi hledal soubor",
         "file hunter",
@@ -266,6 +331,26 @@ def is_ambiguous_context_request(text: str) -> bool:
         r"^prehod(?:\s+mi)?\s+to\s+do\s+lepsi\s+podoby.*$",
         r"^potrebuju\s+z\s+toho\s+neco\s+vytahnout.*$",
         r"^(?:koukni|mrkni)\s+na\s+to\s+a\s+neco\s+s\s+tim\s+udelej.*$",
+    )
+    return any(re.match(pattern, normalized) is not None for pattern in patterns)
+
+
+def is_followup_to_file_summary(text: str) -> bool:
+    if has_explicit_file_output_request(text) or has_explicit_file_action_request(text):
+        return False
+
+    normalized = normalize_natural_text(text)
+    patterns = (
+        r"^co\s+tam\s+bylo\??$",
+        r"^co\s+v\s+tom\s+bylo\??$",
+        r"^co\s+bylo\s+v\s+.+$",
+        r"^co\s+obsahoval(?:o)?(?:\s+(?:to|ten\s+soubor|soubor|dokument))?.*$",
+        r"^jake\s+knihovny\s+(?:tam|v\s+tom)\s+byly.*$",
+        r"^jake\s+knihovny\s+byly\s+v\s+.+$",
+        r"^k\s+cemu\s+(?:ten\s+)?soubor\s+byl.*$",
+        r"^k\s+cemu\s+byl\s+.+$",
+        r"^shrn\s+to\s+jeste\s+kratceji.*$",
+        r"^vysvetli\s+to\s+jednoduseji.*$",
     )
     return any(re.match(pattern, normalized) is not None for pattern in patterns)
 

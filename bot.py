@@ -64,7 +64,9 @@ from panam_router import (
     has_explicit_file_action_request,
     has_explicit_file_output_request,
     is_ambiguous_context_request,
+    is_followup_to_file_summary,
     is_meta_router_or_behavior_discussion,
+    matches_last_file_reference,
     validate_ai_file_intent,
 )
 
@@ -1629,6 +1631,7 @@ async def handle_natural_file_request(
                 Path(file.filename).name,
                 get_file_extension(file.filename),
                 "chat_answer",
+                file_summary=answer,
             )
             remember_router_decision(message, decision)
             log_action(
@@ -1869,6 +1872,42 @@ async def handle_ai_classified_file_request(
     return True
 
 
+async def handle_file_summary_followup(
+    message: discord.Message,
+    request_text: str,
+    file_context: dict,
+) -> bool:
+    file_summary = file_context.get("file_summary")
+    if not isinstance(file_summary, str) or not file_summary.strip():
+        return False
+
+    log_action("natural_message", "file_summary_followup", "started", message)
+    try:
+        prompt = (
+            "Uzivatel navazuje na posledni zpracovany soubor. "
+            "Bezpecne shrnuti souboru: "
+            f"{file_summary.strip()}\n\n"
+            "Odpovez podle tohoto shrnuti. Nepredstirej, ze znas cely obsah souboru. "
+            "Pokud z tohoto shrnuti nejde odpovedet, rekni to kratce a pozadej o soubor nebo upresneni.\n\n"
+            f"Dotaz uzivatele: {request_text.strip()}"
+        )
+        answer = await ask_panam(OPENAI_MODEL, prompt)
+        await message.reply(answer, mention_author=False)
+        panam_memory.add_message(message.channel.id, "user", message.content or request_text)
+        panam_memory.add_message(message.channel.id, "assistant", answer)
+        log_action("natural_message", "file_summary_followup", "success", message)
+        return True
+
+    except Exception:
+        log_action("natural_message", "file_summary_followup", "error", message)
+        logger.exception("Chyba pri odpovedi podle bezpecneho file summary")
+        await message.reply(
+            "Mam ulozene jen kratke shrnuti posledniho souboru, ale ted se mi z nej nepodarilo odpovedet.",
+            mention_author=False,
+        )
+        return True
+
+
 def get_items_for_xlsx(data) -> list[dict]:
     if isinstance(data, dict) and isinstance(data.get("items"), list):
         raw_items = data["items"]
@@ -2007,7 +2046,17 @@ class DiscordAIBot(discord.Client):
         explicit_file_output_request = has_explicit_file_output_request(request_text)
         explicit_file_action_request = has_explicit_file_action_request(request_text)
         meta_router_discussion = is_meta_router_or_behavior_discussion(request_text)
-        file_router_candidate = explicit_file_output_request or explicit_file_action_request
+        last_file_context = get_last_file_context(message.channel.id)
+        last_file_reference = (
+            current_file is None
+            and not meta_router_discussion
+            and matches_last_file_reference(request_text, last_file_context)
+        )
+        file_router_candidate = (
+            explicit_file_output_request
+            or explicit_file_action_request
+            or last_file_reference
+        )
         if file_router_candidate and selected_file is None:
             selected_file = await find_recent_supported_attachment(message.channel)
 
@@ -2016,11 +2065,29 @@ class DiscordAIBot(discord.Client):
             get_file_extension(selected_file.filename) if selected_file is not None else None,
         )
 
+        if (
+            current_file is None
+            and not meta_router_discussion
+            and last_file_context is not None
+            and last_file_context.get("file_summary")
+            and last_file_reference
+            and is_followup_to_file_summary(request_text)
+            and file_decision.get("mode") == "chat_answer"
+        ):
+            handled_by_summary = await handle_file_summary_followup(
+                message,
+                request_text,
+                last_file_context,
+            )
+            if handled_by_summary:
+                return
+
         if file_router_candidate and (
             selected_file is not None
             or file_decision.get("mode") in {"human_document", "structured_data", "unsupported_direct_edit"}
             or explicit_file_output_request
             or explicit_file_action_request
+            or last_file_reference
         ):
             file_decision["target"] = (
                 "current_attachment"
@@ -2031,6 +2098,20 @@ class DiscordAIBot(discord.Client):
             )
             await handle_natural_file_request(message, selected_file, file_decision)
             return
+
+        if (
+            current_file is None
+            and not meta_router_discussion
+            and is_followup_to_file_summary(request_text)
+        ):
+            if last_file_context is not None and last_file_context.get("file_summary"):
+                handled_by_summary = await handle_file_summary_followup(
+                    message,
+                    request_text,
+                    last_file_context,
+                )
+                if handled_by_summary:
+                    return
 
         if is_ambiguous_context_request(request_text) and not meta_router_discussion:
             handled_by_classifier = await handle_ai_classified_file_request(
@@ -2068,6 +2149,13 @@ class DiscordAIBot(discord.Client):
                 question = get_attachment_context_question(request_text, attachment_kind)
                 answer = await analyze_selected_attachment(selected_file, question)
                 await message.reply(answer, mention_author=False)
+                set_last_file_context(
+                    message.channel.id,
+                    Path(selected_file.filename).name,
+                    get_file_extension(selected_file.filename),
+                    "chat_answer",
+                    file_summary=answer,
+                )
                 remember_router_decision(
                     message,
                     {
@@ -2968,6 +3056,7 @@ async def analyze(
             Path(selected_file.filename).name,
             get_file_extension(selected_file.filename),
             "chat_answer",
+            file_summary=answer,
         )
 
     except AttachmentAnalysisUserError as error:
@@ -3063,6 +3152,7 @@ async def read_file(
             Path(file.filename).name,
             extension,
             "chat_answer",
+            file_summary=answer,
         )
 
     except AttachmentAnalysisUserError as error:

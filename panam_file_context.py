@@ -1,9 +1,50 @@
+import re
+import unicodedata
 from datetime import datetime, timezone
 from pathlib import Path
 
 
+MAX_FILE_SUMMARY_MEMORY_CHARS = 800
+
 _last_file_context: dict[int, dict[str, str | None]] = {}
 _last_router_decision: dict[int, dict[str, str | bool | float | None]] = {}
+
+
+def _normalize_for_matching(text: str) -> str:
+    normalized = unicodedata.normalize("NFKD", text.casefold())
+    return "".join(char for char in normalized if not unicodedata.combining(char))
+
+
+def sanitize_file_summary_for_memory(text: str) -> str | None:
+    if not isinstance(text, str):
+        return None
+
+    stripped = text.strip()
+    if not stripped:
+        return None
+
+    normalized = _normalize_for_matching(stripped)
+    sensitive_patterns = (
+        r"\bpassword\b",
+        r"\bpasswd\b",
+        r"\bpwd\b",
+        r"\btoken\b",
+        r"\bapi\s*key\b",
+        r"\bapikey\b",
+        r"\bsecret\b",
+        r"\bheslo\b",
+        r"rodne\s+cislo",
+        r"bankovni\s+ucet",
+        r"osobni\s+udaje",
+    )
+    if any(re.search(pattern, normalized) for pattern in sensitive_patterns):
+        return None
+
+    compact = re.sub(r"\s+", " ", stripped).strip()
+    if not compact:
+        return None
+
+    return compact[:MAX_FILE_SUMMARY_MEMORY_CHARS].rstrip()
 
 
 def normalize_channel_id(channel_id: int | str | None) -> int | None:
@@ -20,16 +61,34 @@ def set_last_file_context(
     source_extension: str,
     last_mode: str,
     last_output_filename: str | None = None,
+    file_summary: str | None = None,
 ) -> None:
     normalized_channel_id = normalize_channel_id(channel_id)
     if normalized_channel_id is None:
         return
 
+    safe_source_filename = Path(source_filename).name
+    previous_context = _last_file_context.get(normalized_channel_id)
+    previous_summary = None
+    if (
+        previous_context is not None
+        and previous_context.get("source_filename") == safe_source_filename
+        and previous_context.get("source_extension") == source_extension
+    ):
+        previous_summary = previous_context.get("file_summary")
+
+    safe_file_summary = (
+        sanitize_file_summary_for_memory(file_summary)
+        if file_summary is not None
+        else previous_summary
+    )
+
     _last_file_context[normalized_channel_id] = {
-        "source_filename": Path(source_filename).name,
+        "source_filename": safe_source_filename,
         "source_extension": source_extension,
         "last_output_filename": last_output_filename,
         "last_mode": last_mode,
+        "file_summary": safe_file_summary,
         "updated_at": datetime.now(timezone.utc).isoformat(),
     }
 
