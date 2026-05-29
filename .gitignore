@@ -4,3 +4,4 @@ __pycache__/
 *.pyc
 .todos.json
 .notes.json
+logs/

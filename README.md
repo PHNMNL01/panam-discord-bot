@@ -249,6 +249,31 @@ Panam analyzuj prilohu
 
 Panam se pokusi pouzit podporovanou prilohu ze stejne zpravy nebo z predchozi vhodne zpravy.
 
+Kdyz je ve zprave, kterou uzivatel posle Panam, podporovana priloha, ma priloha prednost pred beznym chatem. Panam se nejdriv podiva na skutecne nalezeny soubor a az potom resi ostatni prirozene intenty.
+
+Typ zpracovani se urcuje podle pripony prilohy:
+
+- obrazky `.png`, `.jpg`, `.jpeg`, `.webp`, `.gif` se analyzuji jako obrazek
+- dokumenty `.txt`, `.md`, `.csv`, `.pdf`, `.docx`, `.xlsx` se ctou jako dokument
+
+Obecne fraze pro aktualni nebo nejblizsi predchozi prilohu:
+
+```text
+Panam koukni na to
+Panam koukni na to je tam chyba
+Panam podivej se na to
+Panam mrkni na to
+Panam co je na tom spatne?
+Panam co je tam spatne?
+Panam je tam chyba
+Panam najdi chybu
+Panam co vidis?
+Panam co je v tom?
+Panam shrn to
+```
+
+Pravidlo je jednoduche: kdyz ma Panam v ruce podporovanou prilohu, nejdriv pracuje s prilohou. Kdyz zadna aktualni ani predchozi podporovana priloha neni, pokracuje beznym chatem nebo textovym kontextem.
+
 Fraze typu `to`, `toto`, `ten soubor`, `ta priloha`, `ta tabulka` nebo `ten obrazek` se pokusi pouzit aktualni zpravu nebo nejblizsi predchozi vhodnou zpravu/prilohu.
 
 ## Kratka konverzacni pamet
@@ -266,6 +291,17 @@ Fraze typu `to`, `toto`, `ten soubor`, `ta priloha`, `ta tabulka` nebo `ten obra
 - Panam uklada jen kratkou RAM historii beznych konverzacnich dotazu.
 - Do Panam nezadavej hesla, tokeny, API klice, HR data, zakaznicka data ani jina citliva data.
 - `.env`, `notes.json` a `todos.json` nepatri do gitu.
+
+## Logovani
+
+Panam zapisuje zakladni provozni logy do `logs/panam.log` a soucasne ponechava vypis do konzole.
+
+- slozka `logs/` se vytvori automaticky pri startu bota
+- log se rotuje pri velikosti 1 MB
+- uchovava se 5 zaloznich souboru
+- loguji se start bota, `on_ready`, slash commandy a rozpoznane prirozene akce
+- u priloh se loguje jen nazev souboru, pripona, velikost a typ `image`/`document`
+- neloguje se obsah `.env`, tokeny, API klice, obsah priloh ani cele uzivatelske dotazy
 
 ## Spusteni na Windows
 
@@ -290,6 +326,7 @@ panam-discord-bot/
 |-- .gitignore
 |-- README.md
 |-- notes.json
+|-- logs/
 `-- todos.json
 ```
 
@@ -304,6 +341,7 @@ panam-discord-bot/
 - `.env` - lokalni konfigurace s tokeny a klici. Nepatri do gitu.
 - `notes.json` - lokalni poznamky. Nepatri do gitu.
 - `todos.json` - lokalni todo list. Nepatri do gitu.
+- `logs/` - lokalni provozni logy. Nepatri do gitu.
 - `.gitignore` - pravidla pro soubory, ktere Git nema sledovat.
 
 ## Git
@@ -327,3 +365,4 @@ Do gitu nepatri:
 - `__pycache__/`
 - `*.pyc`
 - `*.log`
+- `logs/`

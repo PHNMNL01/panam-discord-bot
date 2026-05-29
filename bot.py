@@ -2,9 +2,11 @@ import os
 import asyncio
 import io
 import logging
+import logging.handlers
 import json
 import re
 import unicodedata
+from functools import wraps
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
@@ -48,6 +50,8 @@ from panam_phrases import (
 
 
 BASE_DIR = Path(__file__).resolve().parent
+LOG_DIR = BASE_DIR / "logs"
+LOG_FILE = LOG_DIR / "panam.log"
 
 load_dotenv(dotenv_path=BASE_DIR / ".env")
 
@@ -70,12 +74,161 @@ SUPPORTED_DOCUMENT_EXTENSIONS = (".txt", ".md", ".csv", ".pdf", ".docx", ".xlsx"
 MAX_IMAGE_SIZE_BYTES = 20 * 1024 * 1024
 MAX_DOCUMENT_SIZE_BYTES = 20 * 1024 * 1024
 MAX_DOCUMENT_TEXT_LENGTH = 20000
+COMMAND_STATUSES: dict[int, str] = {}
 
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
-)
+logger = logging.getLogger("panam")
+
+
+def setup_logging() -> None:
+    LOG_DIR.mkdir(parents=True, exist_ok=True)
+
+    formatter = logging.Formatter("%(asctime)s [%(levelname)s] %(name)s: %(message)s")
+    root_logger = logging.getLogger()
+    root_logger.setLevel(logging.INFO)
+
+    if not any(isinstance(handler, logging.StreamHandler) for handler in root_logger.handlers):
+        console_handler = logging.StreamHandler()
+        console_handler.setFormatter(formatter)
+        root_logger.addHandler(console_handler)
+
+    if not any(
+        isinstance(handler, logging.handlers.RotatingFileHandler)
+        and Path(handler.baseFilename) == LOG_FILE
+        for handler in root_logger.handlers
+    ):
+        file_handler = logging.handlers.RotatingFileHandler(
+            LOG_FILE,
+            maxBytes=1024 * 1024,
+            backupCount=5,
+            encoding="utf-8",
+        )
+        file_handler.setFormatter(formatter)
+        root_logger.addHandler(file_handler)
+
+
+def get_safe_user_name(user) -> str:
+    return str(getattr(user, "display_name", getattr(user, "name", "unknown")))
+
+
+def get_safe_context(source) -> dict[str, str | int | None]:
+    user = getattr(source, "user", None) or getattr(source, "author", None)
+    channel_id = getattr(source, "channel_id", None)
+    if channel_id is None:
+        channel = getattr(source, "channel", None)
+        channel_id = getattr(channel, "id", None)
+
+    guild_id = getattr(source, "guild_id", None)
+    if guild_id is None:
+        guild = getattr(source, "guild", None)
+        guild_id = getattr(guild, "id", None)
+
+    return {
+        "user_id": getattr(user, "id", None),
+        "user_name": get_safe_user_name(user) if user is not None else "unknown",
+        "channel_id": channel_id,
+        "guild_id": guild_id,
+    }
+
+
+def get_safe_attachment_info(file: discord.Attachment | None) -> dict[str, str | int | None]:
+    if file is None:
+        return {}
+
+    extension = get_file_extension(file.filename)
+    return {
+        "filename": Path(file.filename).name,
+        "extension": extension,
+        "size": file.size,
+        "file_type": get_attachment_kind(file),
+    }
+
+
+def log_attachment_info(action_type: str, action_name: str, source, file: discord.Attachment) -> None:
+    context = get_safe_context(source)
+    attachment = get_safe_attachment_info(file)
+    logger.info(
+        "action_type=%s action=%s user_id=%s user_name=%s channel_id=%s guild_id=%s filename=%s extension=%s size=%s file_type=%s",
+        action_type,
+        action_name,
+        context["user_id"],
+        context["user_name"],
+        context["channel_id"],
+        context["guild_id"],
+        attachment.get("filename"),
+        attachment.get("extension"),
+        attachment.get("size"),
+        attachment.get("file_type"),
+    )
+
+
+def log_action(
+    action_type: str,
+    action_name: str,
+    status: str,
+    source,
+    **details,
+) -> None:
+    context = get_safe_context(source)
+    detail_text = " ".join(
+        f"{key}={value}"
+        for key, value in details.items()
+        if value is not None
+    )
+    logger.info(
+        "action_type=%s action=%s status=%s user_id=%s user_name=%s channel_id=%s guild_id=%s%s",
+        action_type,
+        action_name,
+        status,
+        context["user_id"],
+        context["user_name"],
+        context["channel_id"],
+        context["guild_id"],
+        f" {detail_text}" if detail_text else "",
+    )
+
+
+def mark_command_status(interaction: discord.Interaction, status: str) -> None:
+    COMMAND_STATUSES[interaction.id] = status
+
+
+def is_interaction_allowed(interaction: discord.Interaction, command_name: str) -> bool:
+    if ALLOWED_CHANNEL_IDS and str(interaction.channel_id) not in ALLOWED_CHANNEL_IDS:
+        log_action("slash_command", command_name, "denied", interaction)
+        mark_command_status(interaction, "denied")
+        return False
+
+    return True
+
+
+def log_slash_command(command_name: str):
+    def decorator(func):
+        @wraps(func)
+        async def wrapper(interaction: discord.Interaction, *args, **kwargs):
+            log_action("slash_command", command_name, "started", interaction)
+            try:
+                result = await func(interaction, *args, **kwargs)
+            except Exception:
+                COMMAND_STATUSES.pop(interaction.id, None)
+                log_action("slash_command", command_name, "error", interaction)
+                logger.exception("Neosetrena chyba pri zpracovani /%s", command_name)
+                raise
+
+            status = COMMAND_STATUSES.pop(interaction.id, None)
+            if status is None:
+                log_action("slash_command", command_name, "success", interaction)
+            elif status == "error":
+                log_action("slash_command", command_name, "error", interaction)
+
+            return result
+
+        return wrapper
+
+    return decorator
+
+
+setup_logging()
+logger.info("Panam bot startuje.")
 
 
 if not DISCORD_BOT_TOKEN:
@@ -749,6 +902,82 @@ def get_natural_attachment_analyze_question(content: str) -> str:
     return content.strip() or default_question
 
 
+def is_attachment_summary_request(text: str) -> bool:
+    normalized = normalize_natural_text(text)
+    return re.search(r"\b(?:shrn|precti)\b", normalized) is not None
+
+
+def is_attachment_error_request(text: str) -> bool:
+    normalized = normalize_natural_text(text)
+    return any(
+        phrase in normalized
+        for phrase in (
+            "chyba",
+            "spatne",
+            "problem",
+            "najdi chybu",
+            "co je tam spatne",
+            "co je na tom spatne",
+        )
+    )
+
+
+def is_attachment_content_request(text: str) -> bool:
+    normalized = normalize_natural_text(text)
+    return any(
+        re.match(pattern, normalized) is not None
+        for pattern in (
+            r"^co\s+je\s+(?:v|ve|na)\s+(?:tom|toto|tohle).*$",
+            r"^co\s+je\s+(?:v|ve)\s+(?:teto|te|ta)\s+priloze.*$",
+            r"^co\s+tam\s+je.*$",
+            r"^co\s+vidis.*$",
+            r"^co\s+obsahuje(?:\s+(?:to|toto|tohle|tahle\s+priloha|ta\s+priloha))?.*$",
+        )
+    )
+
+
+def is_attachment_look_request(text: str) -> bool:
+    normalized = normalize_natural_text(text)
+    return any(
+        re.match(pattern, normalized) is not None
+        for pattern in (
+            r"^(?:koukni|mrkni)\s+na\s+(?:to|toto|tohle).*$",
+            r"^podivej\s+se\s+na\s+(?:to|toto|tohle).*$",
+            r"^analyzuj\s+(?:to|toto|tohle).*$",
+        )
+    )
+
+
+def is_general_attachment_context_request(text: str) -> bool:
+    return (
+        is_attachment_summary_request(text)
+        or is_attachment_error_request(text)
+        or is_attachment_content_request(text)
+        or is_attachment_look_request(text)
+    )
+
+
+def get_attachment_context_question(text: str, attachment_kind: str) -> str:
+    if attachment_kind == "image" and is_attachment_error_request(text):
+        return "Podívej se na obrázek a řekni, jaká chyba je tam vidět. Navrhni krátce další postup."
+
+    if attachment_kind == "document" and is_attachment_summary_request(text):
+        return "Shrň tuto přílohu."
+
+    if attachment_kind == "document" and is_attachment_error_request(text):
+        return "Najdi v dokumentu možné chyby nebo problémové části a stručně je vysvětli."
+
+    return "Analyzuj tuto přílohu a stručně popiš, co obsahuje."
+
+
+def is_context_attachment_request(text: str) -> bool:
+    return is_general_attachment_context_request(text)
+
+
+def get_context_attachment_question(text: str) -> str:
+    return get_attachment_context_question(text, "document")
+
+
 def parse_natural_intent(text: str) -> Optional[tuple[str, Optional[str]]]:
     for pattern in HELP_PATTERNS:
         if re.match(pattern, text, re.IGNORECASE):
@@ -778,6 +1007,30 @@ def parse_natural_intent(text: str) -> Optional[tuple[str, Optional[str]]]:
     return None
 
 
+def get_natural_action_name(request_text: str, original_content: str) -> str | None:
+    if is_general_attachment_context_request(request_text):
+        return "natural_attachment_context"
+
+    if is_natural_attachment_analyze_request(request_text):
+        return "analyze_attachment"
+
+    intent = parse_natural_intent(request_text)
+    if intent is not None:
+        intent_name, _ = intent
+        if intent_name in ("ask_previous", "ask"):
+            return "ask"
+        if intent_name in ("summary_previous", "summary"):
+            return "summary"
+        if intent_name in ("note_add_previous", "note_add"):
+            return "note_add"
+        return intent_name
+
+    if extract_basic_panam_prompt(original_content) is not None:
+        return "ask"
+
+    return None
+
+
 class DiscordAIBot(discord.Client):
     def __init__(self) -> None:
         intents = discord.Intents.default()
@@ -802,26 +1055,23 @@ class DiscordAIBot(discord.Client):
                 self.tree.copy_global_to(guild=guild)
                 await self.tree.sync(guild=guild)
 
-            logging.info(
+            logger.info(
                 "Slash commandy synchronizovány pro %s serverů.",
                 len(DISCORD_GUILD_IDS),
             )
         else:
             await self.tree.sync()
-            logging.info("Slash commandy synchronizovány globálně.")
+            logger.info("Slash commandy synchronizovány globálně.")
 
     async def on_ready(self) -> None:
         if self.user is None:
-            logging.info("Bot je online, ale user zatím není dostupný.")
+            logger.info("Bot je online, ale user zatím není dostupný.")
             return
 
-        logging.info("Bot je online jako %s | ID: %s", self.user, self.user.id)
+        logger.info("Bot je online jako %s | ID: %s", self.user, self.user.id)
 
     async def on_message(self, message: discord.Message) -> None:
         if message.author.bot:
-            return
-
-        if ALLOWED_CHANNEL_IDS and str(message.channel.id) not in ALLOWED_CHANNEL_IDS:
             return
 
         if self.user is None:
@@ -831,9 +1081,92 @@ class DiscordAIBot(discord.Client):
         if request_text is None:
             return
 
-        if is_natural_attachment_analyze_request(request_text):
+        selected_file = find_supported_attachment_in_message(message)
+        natural_action = get_natural_action_name(request_text, message.content or "")
+        if ALLOWED_CHANNEL_IDS and str(message.channel.id) not in ALLOWED_CHANNEL_IDS:
+            if natural_action is not None:
+                log_action("natural_message", natural_action, "denied", message)
+            return
+
+        context_attachment_request = is_general_attachment_context_request(request_text)
+        if context_attachment_request and selected_file is None:
+            selected_file = await find_recent_supported_attachment(message.channel)
+
+        if context_attachment_request and selected_file is not None:
+            attachment_details = {}
+            if selected_file is not None:
+                attachment_details = get_safe_attachment_info(selected_file)
+                attachment_details["kind"] = attachment_details.pop("file_type", None)
+
+            log_action(
+                "natural_message",
+                "natural_attachment_context",
+                "started",
+                message,
+                **attachment_details,
+            )
             try:
-                selected_file = find_supported_attachment_in_message(message)
+                attachment_kind = get_attachment_kind(selected_file) or "document"
+                question = get_attachment_context_question(request_text, attachment_kind)
+                answer = await analyze_selected_attachment(selected_file, question)
+                await message.reply(answer, mention_author=False)
+                log_action(
+                    "natural_message",
+                    "natural_attachment_context",
+                    "success",
+                    message,
+                    **attachment_details,
+                )
+                return
+
+            except AttachmentAnalysisUserError as error:
+                await message.reply(
+                    str(error),
+                    mention_author=False,
+                )
+                log_action(
+                    "natural_message",
+                    "natural_attachment_context",
+                    "error",
+                    message,
+                    **attachment_details,
+                )
+                return
+
+            except Exception:
+                log_action(
+                    "natural_message",
+                    "natural_attachment_context",
+                    "error",
+                    message,
+                    **attachment_details,
+                )
+                logger.exception("Chyba při zpracování přirozené kontextové přílohy")
+                await message.reply(
+                    "Něco se pokazilo při analýze přílohy. Mrkni do konzole na chybu.",
+                    mention_author=False,
+                )
+                return
+
+        if context_attachment_request and selected_file is None:
+            fallback_intent = parse_natural_intent(request_text)
+            if fallback_intent is None:
+                basic_prompt = extract_basic_panam_prompt(message.content or "")
+                natural_action = "ask" if basic_prompt is not None else None
+            else:
+                fallback_intent_name, _ = fallback_intent
+                if fallback_intent_name in ("ask_previous", "ask"):
+                    natural_action = "ask"
+                elif fallback_intent_name in ("summary_previous", "summary"):
+                    natural_action = "summary"
+                elif fallback_intent_name in ("note_add_previous", "note_add"):
+                    natural_action = "note_add"
+                else:
+                    natural_action = fallback_intent_name
+
+        if is_natural_attachment_analyze_request(request_text):
+            log_action("natural_message", "analyze_attachment", "started", message)
+            try:
                 if selected_file is None:
                     selected_file = await find_recent_supported_attachment(message.channel)
 
@@ -842,11 +1175,19 @@ class DiscordAIBot(discord.Client):
                         "Nevidím žádnou podporovanou přílohu ani v této zprávě, ani v předchozích zprávách.",
                         mention_author=False,
                     )
+                    log_action("natural_message", "analyze_attachment", "success", message)
                     return
 
                 question = get_natural_attachment_analyze_question(request_text)
                 answer = await analyze_selected_attachment(selected_file, question)
                 await message.reply(answer, mention_author=False)
+                log_action(
+                    "natural_message",
+                    "analyze_attachment",
+                    "success",
+                    message,
+                    **get_safe_attachment_info(selected_file),
+                )
                 return
 
             except AttachmentAnalysisUserError as error:
@@ -854,10 +1195,12 @@ class DiscordAIBot(discord.Client):
                     str(error),
                     mention_author=False,
                 )
+                log_action("natural_message", "analyze_attachment", "error", message)
                 return
 
             except Exception:
-                logging.exception("Chyba při zpracování přirozené analýzy přílohy")
+                log_action("natural_message", "analyze_attachment", "error", message)
+                logger.exception("Chyba při zpracování přirozené analýzy přílohy")
                 await message.reply(
                     "Něco se pokazilo při analýze přílohy. Mrkni do konzole na chybu.",
                     mention_author=False,
@@ -868,13 +1211,24 @@ class DiscordAIBot(discord.Client):
         if intent is None:
             basic_prompt = extract_basic_panam_prompt(message.content or "")
             if basic_prompt is not None:
-                await handle_basic_panam_message(message, basic_prompt)
+                log_action("natural_message", "ask", "started", message)
+                try:
+                    await handle_basic_panam_message(message, basic_prompt)
+                except Exception:
+                    log_action("natural_message", "ask", "error", message)
+                    logger.exception("Chyba při zpracování přirozené zprávy")
+                    await message.channel.send("Něco se pokazilo při zpracování akce.")
+                else:
+                    log_action("natural_message", "ask", "success", message)
                 return
 
             await message.channel.send("Tohle zatím neumím převést na akci. Zkus /help.")
             return
 
         intent_name, value = intent
+        natural_action = natural_action or intent_name
+        natural_status = "success"
+        log_action("natural_message", natural_action, "started", message)
 
         try:
             if intent_name == "help":
@@ -1087,8 +1441,11 @@ class DiscordAIBot(discord.Client):
                 return
 
         except Exception:
-            logging.exception("Chyba při zpracování přirozené zprávy")
+            natural_status = "error"
+            logger.exception("Chyba při zpracování přirozené zprávy")
             await message.channel.send("Něco se pokazilo při zpracování akce.")
+        finally:
+            log_action("natural_message", natural_action, natural_status, message)
 
 
 bot = DiscordAIBot()
@@ -1098,8 +1455,9 @@ bot = DiscordAIBot()
     name="ping",
     description="Ověř, že je bot online."
 )
+@log_slash_command("ping")
 async def ping(interaction: discord.Interaction) -> None:
-    if ALLOWED_CHANNEL_IDS and str(interaction.channel_id) not in ALLOWED_CHANNEL_IDS:
+    if not is_interaction_allowed(interaction, "ping"):
         await interaction.response.send_message(
             "Tady nemám povolené odpovídat.",
             ephemeral=True,
@@ -1113,8 +1471,9 @@ async def ping(interaction: discord.Interaction) -> None:
     name="help",
     description="Zobraz dostupné commandy."
 )
+@log_slash_command("help")
 async def help_command(interaction: discord.Interaction) -> None:
-    if ALLOWED_CHANNEL_IDS and str(interaction.channel_id) not in ALLOWED_CHANNEL_IDS:
+    if not is_interaction_allowed(interaction, "help"):
         await interaction.response.send_message(
             "Tady nemám povolené odpovídat.",
             ephemeral=True,
@@ -1128,6 +1487,7 @@ async def help_command(interaction: discord.Interaction) -> None:
     name="memory_clear",
     description="Vymaž krátkou konverzační paměť Panam pro tento kanál."
 )
+@log_slash_command("memory_clear")
 async def memory_clear(interaction: discord.Interaction) -> None:
     channel_id = interaction.channel_id
     if channel_id is None:
@@ -1137,7 +1497,7 @@ async def memory_clear(interaction: discord.Interaction) -> None:
         )
         return
 
-    if ALLOWED_CHANNEL_IDS and str(channel_id) not in ALLOWED_CHANNEL_IDS:
+    if not is_interaction_allowed(interaction, "memory_clear"):
         await interaction.response.send_message(
             "Tady nemám povolené odpovídat.",
             ephemeral=True,
@@ -1155,8 +1515,9 @@ async def memory_clear(interaction: discord.Interaction) -> None:
     description="Ulož krátkou poznámku."
 )
 @app_commands.describe(text="Text poznámky")
+@log_slash_command("note_add")
 async def note_add(interaction: discord.Interaction, text: str) -> None:
-    if ALLOWED_CHANNEL_IDS and str(interaction.channel_id) not in ALLOWED_CHANNEL_IDS:
+    if not is_interaction_allowed(interaction, "note_add"):
         await interaction.response.send_message(
             "Tady nemám povolené odpovídat.",
             ephemeral=True,
@@ -1183,7 +1544,8 @@ async def note_add(interaction: discord.Interaction, text: str) -> None:
         await interaction.response.send_message("Poznámka uložená.")
 
     except Exception:
-        logging.exception("Chyba při zpracování /note_add")
+        mark_command_status(interaction, "error")
+        logger.exception("Chyba při zpracování /note_add")
         await interaction.response.send_message(
             "Něco se pokazilo při ukládání poznámky."
         )
@@ -1193,8 +1555,9 @@ async def note_add(interaction: discord.Interaction, text: str) -> None:
     name="note_list",
     description="Vypiš poslední poznámky."
 )
+@log_slash_command("note_list")
 async def note_list(interaction: discord.Interaction) -> None:
-    if ALLOWED_CHANNEL_IDS and str(interaction.channel_id) not in ALLOWED_CHANNEL_IDS:
+    if not is_interaction_allowed(interaction, "note_list"):
         await interaction.response.send_message(
             "Tady nemám povolené odpovídat.",
             ephemeral=True,
@@ -1221,7 +1584,8 @@ async def note_list(interaction: discord.Interaction) -> None:
         await interaction.response.send_message(answer)
 
     except Exception:
-        logging.exception("Chyba při zpracování /note_list")
+        mark_command_status(interaction, "error")
+        logger.exception("Chyba při zpracování /note_list")
         await interaction.response.send_message(
             "Něco se pokazilo při načítání poznámek."
         )
@@ -1232,8 +1596,9 @@ async def note_list(interaction: discord.Interaction) -> None:
     description="Vyhledej uložené poznámky."
 )
 @app_commands.describe(query="Text k vyhledání")
+@log_slash_command("note_search")
 async def note_search(interaction: discord.Interaction, query: str) -> None:
-    if ALLOWED_CHANNEL_IDS and str(interaction.channel_id) not in ALLOWED_CHANNEL_IDS:
+    if not is_interaction_allowed(interaction, "note_search"):
         await interaction.response.send_message(
             "Tady nemám povolené odpovídat.",
             ephemeral=True,
@@ -1271,7 +1636,8 @@ async def note_search(interaction: discord.Interaction, query: str) -> None:
         await interaction.response.send_message(answer)
 
     except Exception:
-        logging.exception("Chyba při zpracování /note_search")
+        mark_command_status(interaction, "error")
+        logger.exception("Chyba při zpracování /note_search")
         await interaction.response.send_message(
             "Něco se pokazilo při vyhledávání poznámek."
         )
@@ -1282,8 +1648,9 @@ async def note_search(interaction: discord.Interaction, query: str) -> None:
     description="Přidej úkol do todo listu."
 )
 @app_commands.describe(text="Text úkolu")
+@log_slash_command("todo_add")
 async def todo_add(interaction: discord.Interaction, text: str) -> None:
-    if ALLOWED_CHANNEL_IDS and str(interaction.channel_id) not in ALLOWED_CHANNEL_IDS:
+    if not is_interaction_allowed(interaction, "todo_add"):
         await interaction.response.send_message(
             "Tady nemám povolené odpovídat.",
             ephemeral=True,
@@ -1318,7 +1685,8 @@ async def todo_add(interaction: discord.Interaction, text: str) -> None:
         await interaction.response.send_message(f"Úkol #{next_id} uložený.")
 
     except Exception:
-        logging.exception("Chyba při zpracování /todo_add")
+        mark_command_status(interaction, "error")
+        logger.exception("Chyba při zpracování /todo_add")
         await interaction.response.send_message(
             "Něco se pokazilo při ukládání úkolu."
         )
@@ -1328,8 +1696,9 @@ async def todo_add(interaction: discord.Interaction, text: str) -> None:
     name="todo_list",
     description="Vypiš aktivní úkoly."
 )
+@log_slash_command("todo_list")
 async def todo_list(interaction: discord.Interaction) -> None:
-    if ALLOWED_CHANNEL_IDS and str(interaction.channel_id) not in ALLOWED_CHANNEL_IDS:
+    if not is_interaction_allowed(interaction, "todo_list"):
         await interaction.response.send_message(
             "Tady nemám povolené odpovídat.",
             ephemeral=True,
@@ -1357,7 +1726,8 @@ async def todo_list(interaction: discord.Interaction) -> None:
         await interaction.response.send_message(answer)
 
     except Exception:
-        logging.exception("Chyba při zpracování /todo_list")
+        mark_command_status(interaction, "error")
+        logger.exception("Chyba při zpracování /todo_list")
         await interaction.response.send_message(
             "Něco se pokazilo při načítání úkolů."
         )
@@ -1368,8 +1738,9 @@ async def todo_list(interaction: discord.Interaction) -> None:
     description="Označ úkol jako hotový."
 )
 @app_commands.describe(todo_id="ID úkolu")
+@log_slash_command("todo_done")
 async def todo_done(interaction: discord.Interaction, todo_id: int) -> None:
-    if ALLOWED_CHANNEL_IDS and str(interaction.channel_id) not in ALLOWED_CHANNEL_IDS:
+    if not is_interaction_allowed(interaction, "todo_done"):
         await interaction.response.send_message(
             "Tady nemám povolené odpovídat.",
             ephemeral=True,
@@ -1391,7 +1762,8 @@ async def todo_done(interaction: discord.Interaction, todo_id: int) -> None:
         await interaction.response.send_message(f"Úkol #{todo_id} je hotový.")
 
     except Exception:
-        logging.exception("Chyba při zpracování /todo_done")
+        mark_command_status(interaction, "error")
+        logger.exception("Chyba při zpracování /todo_done")
         await interaction.response.send_message(
             "Něco se pokazilo při dokončování úkolu."
         )
@@ -1405,12 +1777,13 @@ async def todo_done(interaction: discord.Interaction, todo_id: int) -> None:
     query="Text k vyhledání",
     limit="Kolik posledních zpráv prohledat, maximálně 300",
 )
+@log_slash_command("search_messages")
 async def search_messages(
     interaction: discord.Interaction,
     query: str,
     limit: int = 100,
 ) -> None:
-    if ALLOWED_CHANNEL_IDS and str(interaction.channel_id) not in ALLOWED_CHANNEL_IDS:
+    if not is_interaction_allowed(interaction, "search_messages"):
         await interaction.response.send_message(
             "Tady nemám povolené odpovídat.",
             ephemeral=True,
@@ -1472,7 +1845,8 @@ async def search_messages(
         await interaction.followup.send(answer)
 
     except Exception:
-        logging.exception("Chyba při zpracování /search_messages")
+        mark_command_status(interaction, "error")
+        logger.exception("Chyba při zpracování /search_messages")
         await interaction.followup.send(
             "Něco se pokazilo při vyhledávání zpráv."
         )
@@ -1483,11 +1857,12 @@ async def search_messages(
     description="Shrň poslední zprávy z aktuálního kanálu."
 )
 @app_commands.describe(limit="Kolik posledních zpráv shrnout, maximálně 200")
+@log_slash_command("channel_summary")
 async def channel_summary(
     interaction: discord.Interaction,
     limit: int = 50,
 ) -> None:
-    if ALLOWED_CHANNEL_IDS and str(interaction.channel_id) not in ALLOWED_CHANNEL_IDS:
+    if not is_interaction_allowed(interaction, "channel_summary"):
         await interaction.response.send_message(
             "Tady nemám povolené odpovídat.",
             ephemeral=True,
@@ -1546,7 +1921,8 @@ async def channel_summary(
         await interaction.followup.send(answer)
 
     except Exception:
-        logging.exception("Chyba při zpracování /channel_summary")
+        mark_command_status(interaction, "error")
+        logger.exception("Chyba při zpracování /channel_summary")
         await interaction.followup.send(
             "Něco se pokazilo při shrnování kanálu."
         )
@@ -1557,8 +1933,9 @@ async def channel_summary(
     description="Stručně shrň delší text."
 )
 @app_commands.describe(text="Text ke shrnutí")
+@log_slash_command("summary")
 async def summary(interaction: discord.Interaction, text: str) -> None:
-    if ALLOWED_CHANNEL_IDS and str(interaction.channel_id) not in ALLOWED_CHANNEL_IDS:
+    if not is_interaction_allowed(interaction, "summary"):
         await interaction.response.send_message(
             "Tady nemám povolené odpovídat.",
             ephemeral=True,
@@ -1572,7 +1949,8 @@ async def summary(interaction: discord.Interaction, text: str) -> None:
         await interaction.followup.send(answer)
 
     except Exception:
-        logging.exception("Chyba při zpracování /summary")
+        mark_command_status(interaction, "error")
+        logger.exception("Chyba při zpracování /summary")
         await interaction.followup.send(
             "Něco se pokazilo při shrnování textu. Mrkni do konzole na chybu."
         )
@@ -1586,12 +1964,13 @@ async def summary(interaction: discord.Interaction, text: str) -> None:
     file="Soubor k analýze",
     question="Co chceš k souboru zjistit",
 )
+@log_slash_command("analyze")
 async def analyze(
     interaction: discord.Interaction,
     file: discord.Attachment | None = None,
     question: str = "Popiš, co je v příloze.",
 ) -> None:
-    if ALLOWED_CHANNEL_IDS and str(interaction.channel_id) not in ALLOWED_CHANNEL_IDS:
+    if not is_interaction_allowed(interaction, "analyze"):
         await interaction.response.send_message(
             "Tady nemám povolené odpovídat.",
             ephemeral=True,
@@ -1610,6 +1989,8 @@ async def analyze(
         )
         return
 
+    log_attachment_info("slash_command", "analyze", interaction, selected_file)
+
     try:
         answer = await analyze_selected_attachment(selected_file, question)
         await interaction.followup.send(answer)
@@ -1618,7 +1999,8 @@ async def analyze(
         await interaction.followup.send(str(error))
 
     except Exception:
-        logging.exception("Chyba při zpracování /analyze")
+        mark_command_status(interaction, "error")
+        logger.exception("Chyba při zpracování /analyze")
         await interaction.followup.send(
             "Něco se pokazilo při analýze přílohy. Mrkni do konzole na chybu."
         )
@@ -1632,12 +2014,13 @@ async def analyze(
     file="Dokument k přečtení",
     question="Co chceš k dokumentu zjistit",
 )
+@log_slash_command("read_file")
 async def read_file(
     interaction: discord.Interaction,
     file: discord.Attachment,
     question: str = "Shrň mi tento dokument.",
 ) -> None:
-    if ALLOWED_CHANNEL_IDS and str(interaction.channel_id) not in ALLOWED_CHANNEL_IDS:
+    if not is_interaction_allowed(interaction, "read_file"):
         await interaction.response.send_message(
             "Tady nemám povolené odpovídat.",
             ephemeral=True,
@@ -1658,6 +2041,8 @@ async def read_file(
             ephemeral=True,
         )
         return
+
+    log_attachment_info("slash_command", "read_file", interaction, file)
 
     await interaction.response.defer(thinking=True)
 
@@ -1694,7 +2079,8 @@ async def read_file(
         await interaction.followup.send(answer)
 
     except Exception:
-        logging.exception("Chyba při zpracování /read_file")
+        mark_command_status(interaction, "error")
+        logger.exception("Chyba při zpracování /read_file")
         await interaction.followup.send(
             "Něco se pokazilo při čtení dokumentu. Mrkni do konzole na chybu."
         )
@@ -1705,8 +2091,9 @@ async def read_file(
     description="Pošli otázku do OpenAI API a vrať odpověď do Discordu."
 )
 @app_commands.describe(question="Tvoje otázka pro AI")
+@log_slash_command("ask")
 async def ask(interaction: discord.Interaction, question: str) -> None:
-    if ALLOWED_CHANNEL_IDS and str(interaction.channel_id) not in ALLOWED_CHANNEL_IDS:
+    if not is_interaction_allowed(interaction, "ask"):
         await interaction.response.send_message(
             "Tady nemám povolené odpovídat.",
             ephemeral=True,
@@ -1720,7 +2107,8 @@ async def ask(interaction: discord.Interaction, question: str) -> None:
         await interaction.followup.send(answer)
 
     except Exception:
-        logging.exception("Chyba při zpracování /ask")
+        mark_command_status(interaction, "error")
+        logger.exception("Chyba při zpracování /ask")
         await interaction.followup.send(
             "Něco se pokazilo při volání AI. Mrkni do konzole na chybu."
         )
@@ -1731,8 +2119,9 @@ async def ask(interaction: discord.Interaction, question: str) -> None:
     description="Promluv si s Panam v osobnějším talk režimu."
 )
 @app_commands.describe(message="Zpráva pro Panam talk režim")
+@log_slash_command("panam_talk")
 async def panam_talk(interaction: discord.Interaction, message: str) -> None:
-    if ALLOWED_CHANNEL_IDS and str(interaction.channel_id) not in ALLOWED_CHANNEL_IDS:
+    if not is_interaction_allowed(interaction, "panam_talk"):
         await interaction.response.send_message(
             "Tady nemám povolené odpovídat.",
             ephemeral=True,
@@ -1746,7 +2135,8 @@ async def panam_talk(interaction: discord.Interaction, message: str) -> None:
         await send_followup_chunks(interaction, answer)
 
     except Exception:
-        logging.exception("Chyba při zpracování /panam_talk")
+        mark_command_status(interaction, "error")
+        logger.exception("Chyba při zpracování /panam_talk")
         await interaction.followup.send(
             "Něco se pokazilo při talk režimu. Mrkni do konzole na chybu."
         )
