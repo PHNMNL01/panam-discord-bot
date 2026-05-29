@@ -419,7 +419,17 @@ Priklady:
 /extract_data file:Ticket-474826.xlsx instruction:Vytahni pole jmeno, email, pozice a datum nastupu output_format:xlsx
 ```
 
-Pro `output_format=xlsx` AI nevytvari Excel primo. AI vrati strukturovana JSON data, Python je zvaliduje a vytvori z nich novy jednoduchy `extracted_data.xlsx`. XLSX vystup zatim neresi formatovani, barvy, styly, vice listu ani upravu puvodniho XLSX.
+Pro `output_format=xlsx` AI nevytvari Excel primo. AI vrati strukturovana JSON data, Python je zvaliduje a vytvori z nich novy jednoduchy `extracted_data.xlsx`.
+
+Zakladni XLSX formatovani v1:
+
+- tucne hlavicky
+- zapnuty autofilter
+- zmrazeny prvni radek
+- automaticky nastavene sirky sloupcu
+- zalamovani dlouheho textu
+
+XLSX vystup zatim neresi barvy, slozite styly, vice listu, grafy, makra, vzorce ani upravu puvodniho XLSX.
 
 Kdyz JSON vystup nejde validovat, Panam vrati srozumitelnou chybu a doporuci presnejsi instrukci nebo jiny format. Command neni urceny pro hesla, tokeny, API klice ani citliva data. Obsah dokumentu, JSONu ani cela instrukce se neloguji, ukladaji se jen bezpecna metadata jobu.
 
