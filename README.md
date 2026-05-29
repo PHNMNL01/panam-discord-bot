@@ -300,6 +300,9 @@ Format se urcuje z textu:
 - `excel`, `xlsx`, `do tabulky` -> `xlsx`
 - `csv` -> `csv`
 - `json` -> `json`
+- obecna `tabulka`, `tabulku`, `tabulkove`, `udelej z toho tabulku` -> typicky `xlsx`
+- `markdown tabulka` -> `md`
+- `soubor csv` -> `csv`
 - jinak default pro strukturovana data je `json`
 
 Priorita routeru:
@@ -317,6 +320,8 @@ Tvrda pravidla maji vzdy prednost pred AI classifierem:
 
 Obecne vety bez jasneho souboroveho subjektu, napr. `Panam co je na tom spatne?`, `Panam co je tam spatne?` nebo `Panam najdi chybu`, se samy od sebe nesnazi brat posledni prilohu. Nejdou automaticky do file routeru, pokud neni priloha primo u aktualni zpravy nebo pokud neni jasny vystupni souborovy pozadavek.
 
+Meta rozhovor o routeru a chovani Panam take nespousti file router jen kvuli slovu `soubor`. Napr. `Panam jen testuju, ze jsi nehledala soubor` nebo `Panam proc jsi hledala soubor?` jde do bezne konverzace.
+
 Priklady rozhodovani:
 
 ```text
@@ -331,6 +336,12 @@ Panam najdi chyby v te tabulce a udelej report
 
 Panam vytahni jmena a emaily do JSONu
 -> structured_data, json
+
+Panam udelej z toho tabulku
+-> structured_data, xlsx
+
+Panam udelej z toho soubor csv
+-> structured_data, csv
 
 Panam prepis to do cisteho textu
 -> human_document, txt
@@ -377,6 +388,27 @@ Classifier muze zvolit:
 Kdyz confidence vyjde nizko nebo validace selze, Panam spadne zpet na beznou konverzaci. Classifier nesmi vymyslet souborovy kontext, kdyz neni aktualni priloha ani `last_file_context`.
 
 Classifier dostava jen bezpecna metadata: jestli existuje aktualni priloha, jeji nazev a priponu, last file context metadata a kratky sanitizovany konverzacni kontext. Obsah souboru se classifieru neposila.
+
+Debug log classifieru je omezeny na bezpecna pole:
+
+- `classifier_used`
+- `target`
+- `mode`
+- `output_format`
+- `confidence`
+- `classifier_status`
+
+Neloguji se cele dotazy, `reason`, obsah souboru ani obsah konverzace.
+
+### Router Test Cases
+
+Priklady pro ladeni routeru jsou v `docs/router_test_cases.md`. Soubor slouzi jako living spec pro typicke a problemove vety, napr.:
+
+- `Panam udelej z toho tabulku`
+- `Panam udelej z toho soubor csv`
+- `Panam jen testuju, ze jsi nehledala soubor`
+- `Panam co je na tom spatne?`
+- `Panam co je spatne v tom souboru?`
 
 ## File Jobs
 
@@ -464,6 +496,7 @@ panam-discord-bot/
 |-- .env.example
 |-- .gitignore
 |-- README.md
+|-- docs/
 |-- notes.json
 |-- todos.json
 |-- logs/
@@ -481,6 +514,7 @@ Soubory:
 - `panam_excel.py` - tvorba jednoducheho XLSX vystupu ze strukturovanych dat.
 - `panam_memory.py` - kratka RAM konverzacni pamet podle kanalu.
 - `requirements.txt` - Python zavislosti.
+- `docs/router_test_cases.md` - testovaci priklady pro natural router a classifier.
 - `.env.example` - sablona konfigurace.
 - `.env` - lokalni konfigurace s tokeny a klici, nepatri do gitu.
 - `notes.json` - lokalni poznamky, nepatri do gitu.
@@ -502,6 +536,7 @@ Do gitu patri hlavne:
 - `panam_router.py`
 - `requirements.txt`
 - `README.md`
+- `docs/router_test_cases.md`
 - `.env.example`
 - `.gitignore`
 
