@@ -15,6 +15,7 @@ import discord
 from discord import app_commands
 from dotenv import load_dotenv
 
+import panam_excel
 import panam_files
 import panam_memory
 from panam_ai import (
@@ -22,6 +23,7 @@ from panam_ai import (
     analyze_document_text,
     ask_panam,
     ask_panam_talk,
+    extract_structured_data,
     process_document_text,
     shorten_for_discord,
     summarize_channel_messages,
@@ -76,6 +78,9 @@ SUPPORTED_DOCUMENT_EXTENSIONS = (".txt", ".md", ".csv", ".pdf", ".docx", ".xlsx"
 MAX_IMAGE_SIZE_BYTES = 20 * 1024 * 1024
 MAX_DOCUMENT_SIZE_BYTES = 20 * 1024 * 1024
 MAX_DOCUMENT_TEXT_LENGTH = 20000
+MAX_XLSX_SHEETS = 10
+MAX_XLSX_ROWS_PER_SHEET = 500
+MAX_XLSX_COLUMNS_PER_SHEET = 50
 COMMAND_STATUSES: dict[int, str] = {}
 
 
@@ -410,38 +415,78 @@ def extract_text_from_docx(data: bytes) -> str:
 def extract_text_from_xlsx(data: bytes) -> str:
     from openpyxl import load_workbook
 
-    workbook = load_workbook(
-        io.BytesIO(data),
-        data_only=True,
-        read_only=True,
-    )
+    try:
+        workbook = load_workbook(
+            io.BytesIO(data),
+            data_only=True,
+            read_only=True,
+        )
+    except Exception as error:
+        logger.info(
+            "xlsx_extraction status=error reason=open_failed size_bytes=%s",
+            len(data),
+        )
+        raise AttachmentAnalysisUserError(
+            "Ten Excel se mi nepodařilo otevřít. Soubor může být poškozený nebo v nepodporovaném formátu."
+        ) from error
+
     lines = []
+    sheet_count = 0
+    used_rows = 0
+    used_cols = 0
 
     try:
-        for worksheet in workbook.worksheets:
+        for worksheet in workbook.worksheets[:MAX_XLSX_SHEETS]:
             sheet_lines = []
+            sheet_used_rows = 0
+            sheet_used_cols = 0
 
-            for row in worksheet.iter_rows(max_row=200, max_col=20, values_only=True):
-                values = []
-                for cell in row:
-                    if cell is None:
-                        continue
+            for row_index, row in enumerate(
+                worksheet.iter_rows(
+                    max_row=MAX_XLSX_ROWS_PER_SHEET,
+                    max_col=MAX_XLSX_COLUMNS_PER_SHEET,
+                    values_only=True,
+                ),
+                start=1,
+            ):
+                row_values = ["" if cell is None else str(cell).strip() for cell in row]
+                non_empty_indexes = [
+                    index
+                    for index, value in enumerate(row_values)
+                    if value
+                ]
+                if not non_empty_indexes:
+                    continue
 
-                    text = str(cell).strip()
-                    if text:
-                        values.append(text)
-
-                if values:
-                    sheet_lines.append(" | ".join(values))
+                last_value_index = max(non_empty_indexes)
+                trimmed_values = row_values[: last_value_index + 1]
+                sheet_lines.append(
+                    f"Row {row_index}: " + " | ".join(trimmed_values)
+                )
+                sheet_used_rows += 1
+                sheet_used_cols = max(sheet_used_cols, last_value_index + 1)
 
             if sheet_lines:
-                lines.append(f"List: {worksheet.title}")
+                sheet_count += 1
+                used_rows += sheet_used_rows
+                used_cols = max(used_cols, sheet_used_cols)
+                if lines:
+                    lines.append("")
+                lines.append(f"Sheet: {worksheet.title}")
                 lines.extend(sheet_lines)
 
     finally:
         workbook.close()
 
-    return "\n".join(lines).strip()
+    extracted_text = "\n".join(lines).strip()
+    logger.info(
+        "xlsx_extraction status=%s sheet_count=%s used_rows=%s used_cols=%s",
+        "success" if extracted_text else "empty",
+        sheet_count,
+        used_rows,
+        used_cols,
+    )
+    return trim_document_text(extracted_text)
 
 
 def trim_document_text(text: str) -> str:
@@ -504,6 +549,11 @@ async def analyze_selected_attachment(file: discord.Attachment, question: str) -
     document_text = extract_text_from_attachment(file.filename, data)
 
     if not document_text.strip():
+        if get_file_extension(file.filename) == ".xlsx":
+            raise AttachmentAnalysisUserError(
+                "Z toho Excelu se mi nepodarilo vytahnout zadna data."
+            )
+
         if get_file_extension(file.filename) == ".pdf":
             raise AttachmentAnalysisUserError(
                 "Z toho PDF se mi nepodařilo vytáhnout žádný text. Možná je to sken nebo obrázkové PDF."
@@ -633,6 +683,7 @@ def get_help_text() -> str:
         "1. Slash commandy\n"
         "/ask, /summary, /channel_summary, /search_messages, /note_add, /note_list, "
         "/note_search, /todo_add, /todo_list, /todo_done, /analyze, /read_file, "
+        "/process_file, /extract_data, /file_job_test, "
         "/memory_clear, /ping, /help, /panam_talk\n\n"
         "2. Panam asistentka\n"
         "Poznámky:\n"
@@ -978,6 +1029,26 @@ def is_context_attachment_request(text: str) -> bool:
 
 def get_context_attachment_question(text: str) -> str:
     return get_attachment_context_question(text, "document")
+
+
+def get_items_for_xlsx(data) -> list[dict]:
+    if isinstance(data, dict) and isinstance(data.get("items"), list):
+        raw_items = data["items"]
+    elif isinstance(data, list):
+        raw_items = data
+    elif isinstance(data, dict):
+        raw_items = [data]
+    else:
+        raw_items = [{"value": data}]
+
+    items = []
+    for item in raw_items:
+        if isinstance(item, dict):
+            items.append(item)
+        else:
+            items.append({"value": item})
+
+    return items
 
 
 def parse_natural_intent(text: str) -> Optional[tuple[str, Optional[str]]]:
@@ -2066,6 +2137,12 @@ async def read_file(
             document_text = extract_text_from_plain_file(data)
 
         if not document_text.strip():
+            if extension == ".xlsx":
+                await interaction.followup.send(
+                    "Z toho Excelu se mi nepodarilo vytahnout zadna data."
+                )
+                return
+
             await interaction.followup.send(
                 "Z toho dokumentu se mi nepodařilo vytáhnout žádný text."
             )
@@ -2079,6 +2156,10 @@ async def read_file(
             file.filename,
         )
         await interaction.followup.send(answer)
+
+    except AttachmentAnalysisUserError as error:
+        mark_command_status(interaction, "error")
+        await interaction.followup.send(str(error))
 
     except Exception:
         mark_command_status(interaction, "error")
@@ -2319,9 +2400,12 @@ async def process_file(
                 size_bytes=input_path.stat().st_size,
                 output_format=normalized_output_format,
             )
-            await interaction.followup.send(
-                "Z toho dokumentu se mi nepodarilo vytahnout zadny text."
+            message_text = (
+                "Z toho Excelu se mi nepodarilo vytahnout zadna data."
+                if extension == ".xlsx"
+                else "Z toho dokumentu se mi nepodarilo vytahnout zadny text."
             )
+            await interaction.followup.send(message_text)
             return
 
         extracted_text = trim_document_text(extracted_text)
@@ -2393,6 +2477,27 @@ async def process_file(
             output_format=normalized_output_format,
         )
 
+
+    except AttachmentAnalysisUserError as error:
+        mark_command_status(interaction, "error")
+        if job is not None:
+            job.status = "error"
+            job.finished_at = datetime.now(timezone.utc).isoformat()
+            panam_files.write_job_metadata(job)
+            log_action(
+                "slash_command",
+                "process_file",
+                "error",
+                interaction,
+                job_id=job.job_id,
+                filename=Path(file.filename).name,
+                extension=extension,
+                size_bytes=file.size,
+                output_format=normalized_output_format,
+            )
+        logger.exception("Chyba pri zpracovani /process_file")
+        await interaction.followup.send(str(error))
+
     except Exception:
         mark_command_status(interaction, "error")
         if job is not None:
@@ -2413,6 +2518,323 @@ async def process_file(
         logger.exception("Chyba pri zpracovani /process_file")
         await interaction.followup.send(
             "Neco se pokazilo pri zpracovani souboru."
+        )
+
+    finally:
+        if job is not None:
+            panam_files.cleanup_job(job)
+
+
+@bot.tree.command(
+    name="extract_data",
+    description="Vytez ze souboru strukturovana data jako JSON, CSV, Markdown nebo XLSX."
+)
+@app_commands.describe(
+    file="Dokument pro tezeni dat",
+    instruction="Jaka data ma Panam vytahnout",
+    output_format="json, csv, md nebo xlsx",
+)
+@log_slash_command("extract_data")
+async def extract_data(
+    interaction: discord.Interaction,
+    file: discord.Attachment,
+    instruction: str,
+    output_format: str = "json",
+) -> None:
+    if not is_interaction_allowed(interaction, "extract_data"):
+        await interaction.response.send_message(
+            "Tady nemam povolene odpovidat.",
+            ephemeral=True,
+        )
+        return
+
+    if file.size > MAX_DOCUMENT_SIZE_BYTES:
+        await interaction.response.send_message(
+            "Ten soubor je moc velky. Zatim beru max 20 MB.",
+            ephemeral=True,
+        )
+        return
+
+    extension = get_file_extension(file.filename)
+    if extension not in SUPPORTED_DOCUMENT_EXTENSIONS:
+        await interaction.response.send_message(
+            "Tenhle command podporuje dokumenty TXT, MD, CSV, PDF, DOCX nebo XLSX.",
+            ephemeral=True,
+        )
+        return
+
+    normalized_output_format = output_format.lower().strip(".")
+    if normalized_output_format not in {"json", "csv", "md", "xlsx"}:
+        await interaction.response.send_message(
+            "Podporovane output_format jsou jen json, csv, md nebo xlsx.",
+            ephemeral=True,
+        )
+        return
+
+    output_extension = f".{normalized_output_format}"
+    job = None
+    await interaction.response.defer(thinking=True)
+
+    try:
+        job = panam_files.create_file_job(
+            user_id=interaction.user.id,
+            channel_id=interaction.channel_id or 0,
+            action="extract_data",
+        )
+        log_action(
+            "slash_command",
+            "extract_data",
+            "started",
+            interaction,
+            job_id=job.job_id,
+            filename=Path(file.filename).name,
+            extension=extension,
+            size_bytes=file.size,
+            output_format=normalized_output_format,
+        )
+
+        input_path = await panam_files.save_attachment_to_job(file, job)
+        log_action(
+            "slash_command",
+            "extract_data",
+            "attachment_saved",
+            interaction,
+            job_id=job.job_id,
+            filename=input_path.name,
+            extension=input_path.suffix.lower(),
+            size_bytes=input_path.stat().st_size,
+            output_format=normalized_output_format,
+        )
+
+        data = input_path.read_bytes()
+        extracted_text = extract_text_from_attachment(input_path.name, data)
+        if not extracted_text.strip():
+            mark_command_status(interaction, "error")
+            job.status = "error"
+            job.finished_at = datetime.now(timezone.utc).isoformat()
+            panam_files.write_job_metadata(job)
+            log_action(
+                "slash_command",
+                "extract_data",
+                "error",
+                interaction,
+                job_id=job.job_id,
+                filename=input_path.name,
+                extension=input_path.suffix.lower(),
+                size_bytes=input_path.stat().st_size,
+                output_format=normalized_output_format,
+            )
+            message_text = (
+                "Z toho Excelu se mi nepodarilo vytahnout zadna data."
+                if extension == ".xlsx"
+                else "Z toho dokumentu se mi nepodarilo vytahnout zadny text."
+            )
+            await interaction.followup.send(message_text)
+            return
+
+        extracted_text = trim_document_text(extracted_text)
+        work_path = panam_files.write_work_text(job, "extracted_text.txt", extracted_text)
+        log_action(
+            "slash_command",
+            "extract_data",
+            "text_extracted",
+            interaction,
+            job_id=job.job_id,
+            filename=work_path.name,
+            extension=work_path.suffix.lower(),
+            size_bytes=work_path.stat().st_size,
+            output_format=normalized_output_format,
+        )
+
+        structured_text = await extract_structured_data(
+            OPENAI_MODEL,
+            extracted_text,
+            instruction,
+            input_path.name,
+            "json" if normalized_output_format == "xlsx" else normalized_output_format,
+        )
+        log_action(
+            "slash_command",
+            "extract_data",
+            "ai_extraction_completed",
+            interaction,
+            job_id=job.job_id,
+            filename=input_path.name,
+            extension=input_path.suffix.lower(),
+            size_bytes=input_path.stat().st_size,
+            output_format=normalized_output_format,
+        )
+
+        json_data = None
+        if normalized_output_format in {"json", "xlsx"}:
+            try:
+                json_data = json.loads(structured_text)
+            except json.JSONDecodeError:
+                mark_command_status(interaction, "error")
+                job.status = "error"
+                job.finished_at = datetime.now(timezone.utc).isoformat()
+                panam_files.write_job_metadata(job)
+                log_action(
+                    "slash_command",
+                    "extract_data",
+                    "error",
+                    interaction,
+                    job_id=job.job_id,
+                    filename=input_path.name,
+                    extension=input_path.suffix.lower(),
+                    size_bytes=input_path.stat().st_size,
+                    output_format=normalized_output_format,
+                )
+                logger.warning(
+                    "extract_data JSON validation failed job_id=%s status=error",
+                    job.job_id,
+                )
+                if normalized_output_format == "xlsx":
+                    await interaction.followup.send(
+                        "Data pro XLSX se nepodarilo validovat. Zkus presnejsi instrukci nebo output_format=json."
+                    )
+                else:
+                    await interaction.followup.send(
+                        "Vystup JSON se nepodarilo validovat. Zkus presnejsi instrukci nebo output_format=md."
+                    )
+                return
+            if normalized_output_format == "xlsx":
+                log_action(
+                    "slash_command",
+                    "extract_data",
+                    "json_validated_for_xlsx",
+                    interaction,
+                    job_id=job.job_id,
+                    filename="extracted_data.xlsx",
+                    extension=".xlsx",
+                    size_bytes=len(structured_text.encode("utf-8")),
+                    output_format=normalized_output_format,
+                )
+        elif normalized_output_format == "csv":
+            if not structured_text.strip() or not structured_text.strip().splitlines():
+                raise ValueError("CSV output is empty.")
+        elif not structured_text.strip():
+            raise ValueError("Markdown output is empty.")
+
+        log_action(
+            "slash_command",
+            "extract_data",
+            "output_validated",
+            interaction,
+            job_id=job.job_id,
+            filename=f"extracted_data{output_extension}",
+            extension=output_extension,
+            size_bytes=len(structured_text.encode("utf-8")),
+            output_format=normalized_output_format,
+        )
+
+        if normalized_output_format == "xlsx":
+            output_path = job.output_dir / "extracted_data.xlsx"
+            panam_excel.create_xlsx_from_items(
+                get_items_for_xlsx(json_data),
+                output_path,
+            )
+            job.output_files.append(
+                {
+                    "filename": output_path.name,
+                    "extension": output_path.suffix.lower(),
+                    "size_bytes": output_path.stat().st_size,
+                }
+            )
+            panam_files.write_job_metadata(job)
+            output_status = "xlsx_output_written"
+        else:
+            output_path = panam_files.write_output_text(
+                job,
+                f"extracted_data{output_extension}",
+                structured_text,
+            )
+            output_status = "output_written"
+
+        log_action(
+            "slash_command",
+            "extract_data",
+            output_status,
+            interaction,
+            job_id=job.job_id,
+            filename=output_path.name,
+            extension=output_path.suffix.lower(),
+            size_bytes=output_path.stat().st_size,
+            output_format=normalized_output_format,
+        )
+
+        job.status = "success"
+        job.finished_at = datetime.now(timezone.utc).isoformat()
+        panam_files.write_job_metadata(job)
+
+        await interaction.followup.send(
+            "Data jsou vytezena.",
+            file=discord.File(output_path),
+        )
+        log_action(
+            "slash_command",
+            "extract_data",
+            "output_sent",
+            interaction,
+            job_id=job.job_id,
+            filename=output_path.name,
+            extension=output_path.suffix.lower(),
+            size_bytes=output_path.stat().st_size,
+            output_format=normalized_output_format,
+        )
+        log_action(
+            "slash_command",
+            "extract_data",
+            "success",
+            interaction,
+            job_id=job.job_id,
+            filename=Path(file.filename).name,
+            extension=extension,
+            size_bytes=file.size,
+            output_format=normalized_output_format,
+        )
+
+
+    except AttachmentAnalysisUserError as error:
+        mark_command_status(interaction, "error")
+        if job is not None:
+            job.status = "error"
+            job.finished_at = datetime.now(timezone.utc).isoformat()
+            panam_files.write_job_metadata(job)
+            log_action(
+                "slash_command",
+                "extract_data",
+                "error",
+                interaction,
+                job_id=job.job_id,
+                filename=Path(file.filename).name,
+                extension=extension,
+                size_bytes=file.size,
+                output_format=normalized_output_format,
+            )
+        logger.exception("Chyba pri zpracovani /extract_data")
+        await interaction.followup.send(str(error))
+
+    except Exception:
+        mark_command_status(interaction, "error")
+        if job is not None:
+            job.status = "error"
+            job.finished_at = datetime.now(timezone.utc).isoformat()
+            panam_files.write_job_metadata(job)
+            log_action(
+                "slash_command",
+                "extract_data",
+                "error",
+                interaction,
+                job_id=job.job_id,
+                filename=Path(file.filename).name,
+                extension=extension,
+                size_bytes=file.size,
+                output_format=normalized_output_format,
+            )
+        logger.exception("Chyba pri zpracovani /extract_data")
+        await interaction.followup.send(
+            "Neco se pokazilo pri tezeni dat ze souboru."
         )
 
     finally:

@@ -341,3 +341,72 @@ async def process_document_text(
         answer = "Nepodarilo se vytvorit vystupni dokument."
 
     return answer
+
+
+async def extract_structured_data(
+    model: str,
+    document_text: str,
+    instruction: str,
+    filename: str,
+    output_format: str,
+) -> str:
+    normalized_format = output_format.lower().strip(".")
+    if normalized_format not in {"json", "csv", "md"}:
+        normalized_format = "json"
+
+    if normalized_format == "json":
+        format_instruction = (
+            "Odpovez pouze validnim JSON. Bez Markdown code blocku. Bez textu pred nebo za JSONem. "
+            "Doporucena obecna struktura je {\"items\": [], \"notes\": \"\"}. "
+            "Pokud data nenajdes, vrat {\"items\": [], \"notes\": \"V dokumentu jsem nenasla pozadovana data.\"}."
+        )
+    elif normalized_format == "csv":
+        format_instruction = (
+            "Odpovez pouze CSV textem. Prvni radek musi byt hlavicka. "
+            "Bez Markdown code blocku a bez komentaru okolo. "
+            "Pokud data nenajdes, vrat presne dva radky: note a V dokumentu jsem nenasla pozadovana data."
+        )
+    else:
+        format_instruction = (
+            "Odpovez validnim Markdownem vhodnym pro tabulky, seznamy a prehledy."
+        )
+
+    response = await openai_client.responses.create(
+        model=model,
+        input=[
+            {
+                "role": "system",
+                "content": (
+                    PANAM_SYSTEM_PROMPT +
+                    "\n\nUkol pro tento command: vytez ze zadaneho dokumentu strukturovana data podle instrukce uzivatele. "
+                    "Odpovez pouze obsahem vystupniho souboru. "
+                    "Nepridavej Discord komentare typu 'Jasne, tady to je'. "
+                    "Nepredstirej data, ktera v dokumentu nejsou. "
+                    "Pokud je instrukce nejasna, vytez obecne uzitecna data z dokumentu. "
+                    "Pokud dokument vypada, ze obsahuje hesla, tokeny, API klice nebo velmi citliva data, "
+                    "nevytahuj je do vystupu zbytecne a oznac je obecne jako citlive udaje. "
+                    f"{format_instruction}"
+                ),
+            },
+            {
+                "role": "user",
+                "content": (
+                    f"Nazev souboru: {filename}\n"
+                    f"Pozadovany format vystupu: {normalized_format}\n"
+                    f"Instrukce uzivatele: {instruction}\n\n"
+                    "Text dokumentu:\n"
+                    f"{document_text}"
+                ),
+            },
+        ],
+    )
+
+    answer = response.output_text.strip()
+    if not answer:
+        if normalized_format == "json":
+            return '{"items": [], "notes": "V dokumentu jsem nenasla pozadovana data."}'
+        if normalized_format == "csv":
+            return "note\nV dokumentu jsem nenasla pozadovana data."
+        return "V dokumentu jsem nenasla pozadovana data."
+
+    return answer

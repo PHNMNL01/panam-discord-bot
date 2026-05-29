@@ -48,6 +48,7 @@ OPENAI_MODEL=gpt-5-mini
 - `/analyze` - analyzuje prilozeny obrazek nebo dokument, pripadne podporovanou prilohu z predchozi zpravy.
 - `/read_file` - precte TXT, MD, CSV, PDF, DOCX nebo XLSX prilohu a odpovi na otazku k dokumentu.
 - `/process_file` - zpracuje dokument podle instrukce a vrati vystup jako MD nebo TXT soubor.
+- `/extract_data` - vytezi ze souboru strukturovana data a vrati JSON, CSV, Markdown nebo XLSX.
 - `/file_job_test` - technicky test docasne file-job pipeline.
 - `/memory_clear` - vymaze kratkou konverzacni pamet Panam pro aktualni kanal.
 - `/ping` - overi, ze je bot online.
@@ -97,7 +98,7 @@ Priklad s obrazkem ve zprave nad commandem:
 
 PDF musi obsahovat extrahovatelny text. Skenovane PDF nebo obrazkove PDF bez OCR zatim nemusi fungovat.
 
-XLSX cte hodnoty bunek z listu, ne makra ani slozite formatovani.
+XLSX cte hodnoty bunek z vice listu. Necte makra, grafy, kontingencni tabulky ani slozite formatovani.
 
 ## Čtení dokumentů
 
@@ -120,7 +121,15 @@ PDF musi obsahovat extrahovatelny text. Skenovane PDF nebo obrazkove PDF bez OCR
 
 DOCX cte bezny text a tabulky.
 
-XLSX cte hodnoty z listu, ne makra ani slozite formatovani.
+XLSX cte hodnoty bunek z vice listu a zapisuje je jako citelny tabulkovy text se sekcemi `Sheet:` a radky `Row N:`. Necte makra, grafy, kontingencni tabulky ani nezachovava formatovani. U vzorcu cte vypoctene hodnoty, pokud jsou v souboru ulozene.
+
+Limity pro XLSX:
+
+- maximalne 10 listu
+- maximalne 500 radku na list
+- maximalne 50 sloupcu na list
+
+Pokud je Excel prazdny nebo neobsahuje zadne hodnoty, Panam vrati srozumitelnou chybu. Pokud soubor nejde otevrit jako XLSX, muze byt poskozeny nebo v nepodporovanem formatu.
 
 ## Prirozene ovladani Panam
 
@@ -366,6 +375,53 @@ Priklady:
 ```
 
 `/process_file` neloguje obsah dokumentu ani celou instrukci. Loguje jen bezpecna metadata jako `job_id`, akci, uzivatele, kanal, nazev souboru, priponu, velikost, format vystupu a stav.
+
+### /extract_data
+
+`/extract_data` vytezi ze souboru strukturovana data a vrati je jako novou prilohu.
+
+Co dela:
+
+- vezme dokumentovou prilohu
+- ulozi jeji docasnou kopii do `runtime/jobs/<job_id>/input/`
+- extrahuje text do `runtime/jobs/<job_id>/work/extracted_text.txt`
+- posle extrahovany text a instrukci do AI
+- validuje vystup podle zvoleneho formatu
+- ulozi vysledek do `runtime/jobs/<job_id>/output/extracted_data.json`, `.csv`, `.md` nebo `.xlsx`
+- posle vysledek zpet do Discordu jako prilohu
+- po odeslani smaze cely job folder
+
+Podporovane vstupy:
+
+- TXT
+- MD
+- CSV
+- PDF s extrahovatelnym textem
+- DOCX
+- XLSX
+
+Podporovane vystupy:
+
+- `json` - validuje se pres JSON parser
+- `csv` - musi byt neprazdne CSV s hlavickou
+- `md` - validni Markdown pro tabulky, seznamy a prehledy
+- `xlsx` - novy jednoduchy Excel soubor pro dalsi zpracovani
+
+Priklady:
+
+```text
+/extract_data file:requirements.txt instruction:Vytahni knihovny a verze output_format:json
+/extract_data file:requirements.txt instruction:Vytahni knihovny a verze output_format:csv
+/extract_data file:requirements.txt instruction:Vytahni knihovny a verze output_format:xlsx
+/extract_data file:dokument.pdf instruction:Vytahni jmeno, datum, cislo ticketu a pozadavek output_format:json
+/extract_data file:export.xlsx instruction:Vytahni radky, kde je stav Chyba output_format:csv
+/extract_data file:export.csv instruction:Vytahni radky, kde je stav Chyba output_format:xlsx
+/extract_data file:Ticket-474826.xlsx instruction:Vytahni pole jmeno, email, pozice a datum nastupu output_format:xlsx
+```
+
+Pro `output_format=xlsx` AI nevytvari Excel primo. AI vrati strukturovana JSON data, Python je zvaliduje a vytvori z nich novy jednoduchy `extracted_data.xlsx`. XLSX vystup zatim neresi formatovani, barvy, styly, vice listu ani upravu puvodniho XLSX.
+
+Kdyz JSON vystup nejde validovat, Panam vrati srozumitelnou chybu a doporuci presnejsi instrukci nebo jiny format. Command neni urceny pro hesla, tokeny, API klice ani citliva data. Obsah dokumentu, JSONu ani cela instrukce se neloguji, ukladaji se jen bezpecna metadata jobu.
 
 ## Spusteni na Windows
 
