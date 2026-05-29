@@ -49,7 +49,6 @@ from panam_phrases import (
     PANAM_OPINION_MENTION_PATTERN,
     PANAM_PREFIX_PATTERN,
     PANAM_STRIP_PREFIX_PATTERN,
-    STRUCTURED_DATA_SIGNALS,
     SUMMARY_CONTEXT_PATTERN,
     SUMMARY_TRIGGERS,
     TODO_LIST_PATTERN,
@@ -139,6 +138,15 @@ def get_safe_context(source) -> dict[str, str | int | None]:
         "channel_id": channel_id,
         "guild_id": guild_id,
     }
+
+
+def get_context_int(context: dict[str, str | int | None], key: str) -> int:
+    value = context.get(key)
+    if isinstance(value, int):
+        return value
+    if isinstance(value, str) and value.isdecimal():
+        return int(value)
+    return 0
 
 
 def get_safe_attachment_info(file: discord.Attachment | None) -> dict[str, str | int | None]:
@@ -1067,17 +1075,106 @@ def detect_output_format(text: str, default: str = "md") -> str:
     return default.lower().strip(".")
 
 
+def has_explicit_file_subject(text: str) -> bool:
+    normalized = normalize_natural_text(text)
+    subjects = (
+        "soubor",
+        "souboru",
+        "priloha",
+        "prilohu",
+        "priloze",
+        "dokument",
+        "dokumentu",
+        "tabulka",
+        "tabulce",
+        "tabulku",
+        "excel",
+        "excelu",
+        "xlsx",
+        "csv",
+        "pdf",
+        "word",
+        "wordu",
+        "docx",
+        "obrazek",
+        "obrazku",
+        "screenshot",
+        "screenshotu",
+        "screen",
+        "screenu",
+    )
+    return any(
+        re.search(rf"\b{re.escape(subject)}\b", normalized) is not None
+        for subject in subjects
+    )
+
+
+def has_explicit_file_output_request(text: str) -> bool:
+    normalized = normalize_natural_text(text)
+    patterns = (
+        r"\bdo\s+(?:souboru|excelu|xlsx|csv|jsonu?|markdownu|txt)\b",
+        r"\bjako\s+soubor\b",
+        r"\bvrat\s+json\b",
+        r"\budelej(?:\s+z\s+toho)?\s+(?:report|checklist|prehled|soubor)\b",
+        r"\bvytvor(?:\s+z\s+toho)?\s+(?:report|checklist|prehled|soubor)\b",
+        r"\bpriprav(?:\s+mi)?\s+z\s+toho\s+soubor\b",
+        r"\bpreved(?:\s+mi)?\s+to\s+do\s+souboru\b",
+        r"\buloz\s+to\s+jako\s+soubor\b",
+    )
+    return any(re.search(pattern, normalized) is not None for pattern in patterns)
+
+
+def has_structured_data_request(text: str) -> bool:
+    normalized = normalize_natural_text(text)
+    structured_output_patterns = (
+        r"\bdo\s+(?:excelu|xlsx|csv|jsonu?)\b",
+        r"\bvrat\s+json\b",
+        r"\bdej(?:\s+\w+){0,4}\s+do\s+(?:excelu|xlsx|csv|jsonu?)\b",
+    )
+    if any(re.search(pattern, normalized) is not None for pattern in structured_output_patterns):
+        return True
+
+    return contains_natural_signal(
+        normalized,
+        (
+            "vytahni radky",
+            "vyber sloupce",
+            "vytahni hodnoty",
+            "strukturovana data",
+            "dej to do tabulky",
+            "vytez data",
+            "vytez z toho data",
+            "vytahni data",
+            "vytahni z toho data",
+            "vytahni jmena",
+            "vytahni emaily",
+            "jmena a emaily",
+        ),
+    )
+
+
 def decide_file_response_mode(text: str, extension: str | None = None) -> dict:
     normalized = normalize_natural_text(text)
 
     if contains_natural_signal(normalized, DIRECT_FILE_EDIT_SIGNALS):
         return {"mode": "unsupported_direct_edit"}
 
-    if contains_natural_signal(normalized, STRUCTURED_DATA_SIGNALS):
+    if has_structured_data_request(normalized):
         return {
             "mode": "structured_data",
             "instruction": text.strip() or "Vytez ze souboru strukturovana data.",
             "output_format": detect_output_format(text, default="json"),
+        }
+
+    if has_explicit_file_output_request(normalized):
+        output_format = detect_output_format(text, default="md")
+        if output_format not in {"md", "txt"}:
+            output_format = "md"
+
+        return {
+            "mode": "human_document",
+            "instruction": text.strip() or "Vytvor z dokumentu prehledny Markdown vystup.",
+            "output_format": output_format,
         }
 
     if contains_natural_signal(normalized, HUMAN_DOCUMENT_SIGNALS):
@@ -1098,58 +1195,8 @@ def decide_file_response_mode(text: str, extension: str | None = None) -> dict:
     }
 
 
-def has_file_operation_signal(text: str) -> bool:
-    normalized = normalize_natural_text(text)
-    return any(
-        signal in normalized
-        for signal in (
-            "z toho",
-            "toho souboru",
-            "ten soubor",
-            "tom souboru",
-            "ten dokument",
-            "te priloze",
-            "tu prilohu",
-            "ta tabulka",
-            "te tabulce",
-            "vytahni",
-            "vytez",
-            "vyber",
-            "dej",
-            "vrat",
-            "udelej",
-            "priprav",
-            "zpracuj",
-            "prepis",
-            "uprav",
-            "zmen",
-            "najdi",
-            "shrn",
-            "precti",
-            "vysvetli",
-            "analyzuj",
-            "koukni",
-            "podivej",
-            "report",
-            "checklist",
-            "navod",
-            "prehled",
-        )
-    )
-
-
 def is_file_router_candidate(text: str) -> bool:
-    decision = decide_file_response_mode(text)
-    if decision["mode"] != "chat_answer":
-        return has_file_operation_signal(text)
-
-    if is_general_attachment_context_request(text) or is_natural_attachment_analyze_request(text):
-        return True
-
-    normalized = normalize_natural_text(text)
-    return has_file_operation_signal(normalized) and any(
-        subject in normalized for subject in ATTACHMENT_SUBJECTS
-    )
+    return has_explicit_file_subject(text) or has_explicit_file_output_request(text)
 
 
 def get_natural_file_action_name(decision: dict) -> str:
@@ -1196,9 +1243,10 @@ async def run_human_document_file_job(
     job = None
 
     try:
+        context = get_safe_context(source)
         job = panam_files.create_file_job(
-            user_id=get_safe_context(source)["user_id"] or 0,
-            channel_id=get_safe_context(source)["channel_id"] or 0,
+            user_id=get_context_int(context, "user_id"),
+            channel_id=get_context_int(context, "channel_id"),
             action=action_name,
         )
         log_action(
@@ -1366,9 +1414,10 @@ async def run_structured_data_file_job(
     job = None
 
     try:
+        context = get_safe_context(source)
         job = panam_files.create_file_job(
-            user_id=get_safe_context(source)["user_id"] or 0,
-            channel_id=get_safe_context(source)["channel_id"] or 0,
+            user_id=get_context_int(context, "user_id"),
+            channel_id=get_context_int(context, "channel_id"),
             action=action_name,
         )
         log_action(
@@ -1775,10 +1824,16 @@ def get_natural_action_name(request_text: str, original_content: str) -> str | N
     if is_file_router_candidate(request_text):
         return get_natural_file_action_name(file_decision)
 
-    if is_general_attachment_context_request(request_text):
+    if (
+        is_general_attachment_context_request(request_text)
+        and has_explicit_file_subject(request_text)
+    ):
         return "natural_attachment_context"
 
-    if is_natural_attachment_analyze_request(request_text):
+    if (
+        is_natural_attachment_analyze_request(request_text)
+        and has_explicit_file_subject(request_text)
+    ):
         return "analyze_attachment"
 
     intent = parse_natural_intent(request_text)
@@ -1855,33 +1910,34 @@ class DiscordAIBot(discord.Client):
                 log_action("natural_message", natural_action, "denied", message)
             return
 
+        explicit_file_subject = has_explicit_file_subject(request_text)
+        explicit_file_output_request = has_explicit_file_output_request(request_text)
+        file_router_candidate = (
+            selected_file is not None
+            or explicit_file_subject
+            or explicit_file_output_request
+        )
+        if file_router_candidate and selected_file is None:
+            selected_file = await find_recent_supported_attachment(message.channel)
+
         file_decision = decide_file_response_mode(
             request_text,
             get_file_extension(selected_file.filename) if selected_file is not None else None,
         )
-        file_router_candidate = selected_file is not None or is_file_router_candidate(request_text)
-        if (
-            file_router_candidate
-            and selected_file is None
-            and file_decision.get("mode") != "unsupported_direct_edit"
-        ):
-            selected_file = await find_recent_supported_attachment(message.channel)
-            if selected_file is not None:
-                file_decision = decide_file_response_mode(
-                    request_text,
-                    get_file_extension(selected_file.filename),
-                )
 
         if file_router_candidate and (
             selected_file is not None
             or file_decision.get("mode") in {"human_document", "structured_data", "unsupported_direct_edit"}
-            or is_general_attachment_context_request(request_text)
-            or is_natural_attachment_analyze_request(request_text)
+            or explicit_file_subject
+            or explicit_file_output_request
         ):
             await handle_natural_file_request(message, selected_file, file_decision)
             return
 
-        context_attachment_request = is_general_attachment_context_request(request_text)
+        context_attachment_request = (
+            selected_file is not None
+            and is_general_attachment_context_request(request_text)
+        )
         if context_attachment_request and selected_file is None:
             selected_file = await find_recent_supported_attachment(message.channel)
 
@@ -1957,7 +2013,9 @@ class DiscordAIBot(discord.Client):
                 else:
                     natural_action = fallback_intent_name
 
-        if is_natural_attachment_analyze_request(request_text):
+        if is_natural_attachment_analyze_request(request_text) and (
+            selected_file is not None or explicit_file_subject
+        ):
             log_action("natural_message", "analyze_attachment", "started", message)
             try:
                 if selected_file is None:
