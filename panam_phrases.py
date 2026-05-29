@@ -166,6 +166,60 @@ TEXT_FILE_ANALYZE_TRIGGERS = (
     "markdown",
 )
 
+STRUCTURED_DATA_SIGNALS = (
+    "do excelu",
+    "excel",
+    "xlsx",
+    "csv",
+    "json",
+    "vytahni radky",
+    "vyber sloupce",
+    "vytahni hodnoty",
+    "strukturovana data",
+    "dej to do tabulky",
+    "vytez data",
+    "vytez z toho data",
+    "vytahni data",
+    "vytahni z toho data",
+    "vytahni jmena",
+    "vytahni emaily",
+    "jmena a emaily",
+)
+
+HUMAN_DOCUMENT_SIGNALS = (
+    "report",
+    "checklist",
+    "navod",
+    "prehled",
+    "markdown",
+    "md",
+    "txt",
+    "cisty text",
+    "vytvor soubor",
+    "udelej z toho",
+    "priprav z toho",
+    "prepis to",
+    "prepis z toho",
+    "zpracuj to do markdownu",
+)
+
+DIRECT_FILE_EDIT_SIGNALS = (
+    "uprav ten excel",
+    "uprav tento excel",
+    "uprav ten soubor",
+    "uprav tu tabulku",
+    "zmen ten excel",
+    "zmen tento excel",
+    "zmen ten soubor",
+    "zmen tu tabulku",
+    "prepis puvodni soubor",
+    "prepis puvodni excel",
+    "uprav puvodni soubor",
+    "uprav puvodni excel",
+    "zmen puvodni soubor",
+    "zmen puvodni excel",
+)
+
 ATTACHMENT_ANALYZE_SUBJECTS = (
     ATTACHMENT_ANALYZE_TRIGGERS
     + DOCUMENT_ANALYZE_TRIGGERS

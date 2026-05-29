@@ -1,11 +1,12 @@
 import json
 import re
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 from openpyxl import Workbook
 from openpyxl.styles import Alignment, Font
 from openpyxl.utils import get_column_letter
+from openpyxl.worksheet.worksheet import Worksheet
 
 
 MIN_COLUMN_WIDTH = 10
@@ -49,7 +50,7 @@ def collect_headers(items: list[dict]) -> list[str]:
     return headers
 
 
-def format_worksheet(worksheet) -> None:
+def format_worksheet(worksheet: Worksheet) -> None:
     header_font = Font(bold=True)
     top_alignment = Alignment(vertical="top", wrap_text=True)
 
@@ -93,7 +94,7 @@ def create_xlsx_from_items(
     sheet_name: str = "Data",
 ) -> Path:
     workbook = Workbook()
-    worksheet = workbook.active
+    worksheet = cast(Worksheet, workbook.active)
     worksheet.title = safe_sheet_name(sheet_name)
 
     if not items:

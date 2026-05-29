@@ -34,8 +34,10 @@ from panam_phrases import (
     ATTACHMENT_SUBJECTS,
     BASIC_PANAM_EMPTY_RESPONSE,
     CONTEXT_REFERENCES,
+    DIRECT_FILE_EDIT_SIGNALS,
     GENERIC_ATTACHMENT_PATTERNS,
     GENERIC_IMAGE_PHRASES,
+    HUMAN_DOCUMENT_SIGNALS,
     HELP_PATTERNS,
     IMAGE_ANALYZE_TRIGGERS,
     NATURAL_INTENT_PATTERNS,
@@ -47,6 +49,7 @@ from panam_phrases import (
     PANAM_OPINION_MENTION_PATTERN,
     PANAM_PREFIX_PATTERN,
     PANAM_STRIP_PREFIX_PATTERN,
+    STRUCTURED_DATA_SIGNALS,
     SUMMARY_CONTEXT_PATTERN,
     SUMMARY_TRIGGERS,
     TODO_LIST_PATTERN,
@@ -1031,6 +1034,693 @@ def get_context_attachment_question(text: str) -> str:
     return get_attachment_context_question(text, "document")
 
 
+def contains_natural_signal(text: str, signals: tuple[str, ...]) -> bool:
+    normalized = normalize_natural_text(text)
+    for signal in signals:
+        if re.fullmatch(r"[a-z0-9]{1,3}", signal):
+            if re.search(rf"\b{re.escape(signal)}\b", normalized) is not None:
+                return True
+            continue
+
+        if signal in normalized:
+            return True
+
+    return False
+
+
+def detect_output_format(text: str, default: str = "md") -> str:
+    normalized = normalize_natural_text(text)
+
+    if any(signal in normalized for signal in ("xlsx", "excel", "do excelu", "do tabulky")):
+        return "xlsx"
+    if re.search(r"\bcsv\b", normalized) is not None:
+        return "csv"
+    if re.search(r"\bjson(?:u|em)?\b", normalized) is not None:
+        return "json"
+    if any(signal in normalized for signal in ("markdown", "markdownu")):
+        return "md"
+    if re.search(r"\bmd\b", normalized) is not None:
+        return "md"
+    if any(signal in normalized for signal in ("txt", "cisty text", "cisteho textu")):
+        return "txt"
+
+    return default.lower().strip(".")
+
+
+def decide_file_response_mode(text: str, extension: str | None = None) -> dict:
+    normalized = normalize_natural_text(text)
+
+    if contains_natural_signal(normalized, DIRECT_FILE_EDIT_SIGNALS):
+        return {"mode": "unsupported_direct_edit"}
+
+    if contains_natural_signal(normalized, STRUCTURED_DATA_SIGNALS):
+        return {
+            "mode": "structured_data",
+            "instruction": text.strip() or "Vytez ze souboru strukturovana data.",
+            "output_format": detect_output_format(text, default="json"),
+        }
+
+    if contains_natural_signal(normalized, HUMAN_DOCUMENT_SIGNALS):
+        output_format = detect_output_format(text, default="md")
+        if output_format not in {"md", "txt"}:
+            output_format = "md"
+
+        return {
+            "mode": "human_document",
+            "instruction": text.strip() or "Zpracuj soubor do prehledneho dokumentu.",
+            "output_format": output_format,
+        }
+
+    attachment_kind = "image" if extension in SUPPORTED_IMAGE_EXTENSIONS else "document"
+    return {
+        "mode": "chat_answer",
+        "question": get_attachment_context_question(text, attachment_kind),
+    }
+
+
+def has_file_operation_signal(text: str) -> bool:
+    normalized = normalize_natural_text(text)
+    return any(
+        signal in normalized
+        for signal in (
+            "z toho",
+            "toho souboru",
+            "ten soubor",
+            "tom souboru",
+            "ten dokument",
+            "te priloze",
+            "tu prilohu",
+            "ta tabulka",
+            "te tabulce",
+            "vytahni",
+            "vytez",
+            "vyber",
+            "dej",
+            "vrat",
+            "udelej",
+            "priprav",
+            "zpracuj",
+            "prepis",
+            "uprav",
+            "zmen",
+            "najdi",
+            "shrn",
+            "precti",
+            "vysvetli",
+            "analyzuj",
+            "koukni",
+            "podivej",
+            "report",
+            "checklist",
+            "navod",
+            "prehled",
+        )
+    )
+
+
+def is_file_router_candidate(text: str) -> bool:
+    decision = decide_file_response_mode(text)
+    if decision["mode"] != "chat_answer":
+        return has_file_operation_signal(text)
+
+    if is_general_attachment_context_request(text) or is_natural_attachment_analyze_request(text):
+        return True
+
+    normalized = normalize_natural_text(text)
+    return has_file_operation_signal(normalized) and any(
+        subject in normalized for subject in ATTACHMENT_SUBJECTS
+    )
+
+
+def get_natural_file_action_name(decision: dict) -> str:
+    mode = decision.get("mode")
+    if mode == "human_document":
+        return "process_file"
+    if mode == "structured_data":
+        return "extract_data"
+    if mode == "unsupported_direct_edit":
+        return "unsupported_direct_edit"
+    return "chat_answer"
+
+
+async def send_source_message(source, text: str, file_path: Path | None = None) -> None:
+    if isinstance(source, discord.Interaction):
+        if file_path is None:
+            await source.followup.send(text)
+        else:
+            await source.followup.send(text, file=discord.File(file_path))
+        return
+
+    if file_path is None:
+        await source.reply(text, mention_author=False)
+    else:
+        await source.reply(text, file=discord.File(file_path), mention_author=False)
+
+
+def mark_source_error(source) -> None:
+    if isinstance(source, discord.Interaction):
+        mark_command_status(source, "error")
+
+
+async def run_human_document_file_job(
+    source,
+    file: discord.Attachment,
+    instruction: str,
+    output_format: str,
+    action_type: str,
+    action_name: str = "process_file",
+) -> None:
+    extension = get_file_extension(file.filename)
+    normalized_output_format = output_format.lower().strip(".")
+    output_extension = f".{normalized_output_format}"
+    job = None
+
+    try:
+        job = panam_files.create_file_job(
+            user_id=get_safe_context(source)["user_id"] or 0,
+            channel_id=get_safe_context(source)["channel_id"] or 0,
+            action=action_name,
+        )
+        log_action(
+            action_type,
+            action_name,
+            "started",
+            source,
+            job_id=job.job_id,
+            filename=Path(file.filename).name,
+            extension=extension,
+            size_bytes=file.size,
+            output_format=normalized_output_format,
+        )
+
+        input_path = await panam_files.save_attachment_to_job(file, job)
+        log_action(
+            action_type,
+            action_name,
+            "attachment_saved",
+            source,
+            job_id=job.job_id,
+            filename=input_path.name,
+            extension=input_path.suffix.lower(),
+            size_bytes=input_path.stat().st_size,
+            output_format=normalized_output_format,
+        )
+
+        data = input_path.read_bytes()
+        extracted_text = extract_text_from_attachment(input_path.name, data)
+        if not extracted_text.strip():
+            mark_source_error(source)
+            job.status = "error"
+            job.finished_at = datetime.now(timezone.utc).isoformat()
+            panam_files.write_job_metadata(job)
+            log_action(
+                action_type,
+                action_name,
+                "error",
+                source,
+                job_id=job.job_id,
+                filename=input_path.name,
+                extension=input_path.suffix.lower(),
+                size_bytes=input_path.stat().st_size,
+                output_format=normalized_output_format,
+            )
+            message_text = (
+                "Z toho Excelu se mi nepodarilo vytahnout zadna data."
+                if extension == ".xlsx"
+                else "Z toho dokumentu se mi nepodarilo vytahnout zadny text."
+            )
+            await send_source_message(source, message_text)
+            return
+
+        extracted_text = trim_document_text(extracted_text)
+        work_path = panam_files.write_work_text(job, "extracted_text.txt", extracted_text)
+        log_action(
+            action_type,
+            action_name,
+            "text_extracted",
+            source,
+            job_id=job.job_id,
+            filename=work_path.name,
+            extension=work_path.suffix.lower(),
+            size_bytes=work_path.stat().st_size,
+            output_format=normalized_output_format,
+        )
+
+        processed_text = await process_document_text(
+            OPENAI_MODEL,
+            extracted_text,
+            instruction,
+            input_path.name,
+            normalized_output_format,
+        )
+        output_path = panam_files.write_output_text(
+            job,
+            f"process_file_output{output_extension}",
+            processed_text,
+        )
+        log_action(
+            action_type,
+            action_name,
+            "output_written",
+            source,
+            job_id=job.job_id,
+            filename=output_path.name,
+            extension=output_path.suffix.lower(),
+            size_bytes=output_path.stat().st_size,
+            output_format=normalized_output_format,
+        )
+
+        job.status = "success"
+        job.finished_at = datetime.now(timezone.utc).isoformat()
+        panam_files.write_job_metadata(job)
+
+        await send_source_message(source, "Soubor je zpracovany.", output_path)
+        log_action(
+            action_type,
+            action_name,
+            "success",
+            source,
+            job_id=job.job_id,
+            filename=Path(file.filename).name,
+            extension=extension,
+            size_bytes=file.size,
+            output_format=normalized_output_format,
+        )
+
+    except AttachmentAnalysisUserError as error:
+        mark_source_error(source)
+        if job is not None:
+            job.status = "error"
+            job.finished_at = datetime.now(timezone.utc).isoformat()
+            panam_files.write_job_metadata(job)
+            log_action(
+                action_type,
+                action_name,
+                "error",
+                source,
+                job_id=job.job_id,
+                filename=Path(file.filename).name,
+                extension=extension,
+                size_bytes=file.size,
+                output_format=normalized_output_format,
+            )
+        logger.exception("Chyba pri zpracovani file-job pipeline")
+        await send_source_message(source, str(error))
+
+    except Exception:
+        mark_source_error(source)
+        if job is not None:
+            job.status = "error"
+            job.finished_at = datetime.now(timezone.utc).isoformat()
+            panam_files.write_job_metadata(job)
+            log_action(
+                action_type,
+                action_name,
+                "error",
+                source,
+                job_id=job.job_id,
+                filename=Path(file.filename).name,
+                extension=extension,
+                size_bytes=file.size,
+                output_format=normalized_output_format,
+            )
+        logger.exception("Chyba pri zpracovani file-job pipeline")
+        await send_source_message(source, "Neco se pokazilo pri zpracovani souboru.")
+
+    finally:
+        if job is not None:
+            panam_files.cleanup_job(job)
+
+
+async def run_structured_data_file_job(
+    source,
+    file: discord.Attachment,
+    instruction: str,
+    output_format: str,
+    action_type: str,
+    action_name: str = "extract_data",
+) -> None:
+    extension = get_file_extension(file.filename)
+    normalized_output_format = output_format.lower().strip(".")
+    output_extension = f".{normalized_output_format}"
+    job = None
+
+    try:
+        job = panam_files.create_file_job(
+            user_id=get_safe_context(source)["user_id"] or 0,
+            channel_id=get_safe_context(source)["channel_id"] or 0,
+            action=action_name,
+        )
+        log_action(
+            action_type,
+            action_name,
+            "started",
+            source,
+            job_id=job.job_id,
+            filename=Path(file.filename).name,
+            extension=extension,
+            size_bytes=file.size,
+            output_format=normalized_output_format,
+        )
+
+        input_path = await panam_files.save_attachment_to_job(file, job)
+        log_action(
+            action_type,
+            action_name,
+            "attachment_saved",
+            source,
+            job_id=job.job_id,
+            filename=input_path.name,
+            extension=input_path.suffix.lower(),
+            size_bytes=input_path.stat().st_size,
+            output_format=normalized_output_format,
+        )
+
+        data = input_path.read_bytes()
+        extracted_text = extract_text_from_attachment(input_path.name, data)
+        if not extracted_text.strip():
+            mark_source_error(source)
+            job.status = "error"
+            job.finished_at = datetime.now(timezone.utc).isoformat()
+            panam_files.write_job_metadata(job)
+            log_action(
+                action_type,
+                action_name,
+                "error",
+                source,
+                job_id=job.job_id,
+                filename=input_path.name,
+                extension=input_path.suffix.lower(),
+                size_bytes=input_path.stat().st_size,
+                output_format=normalized_output_format,
+            )
+            message_text = (
+                "Z toho Excelu se mi nepodarilo vytahnout zadna data."
+                if extension == ".xlsx"
+                else "Z toho dokumentu se mi nepodarilo vytahnout zadny text."
+            )
+            await send_source_message(source, message_text)
+            return
+
+        extracted_text = trim_document_text(extracted_text)
+        work_path = panam_files.write_work_text(job, "extracted_text.txt", extracted_text)
+        log_action(
+            action_type,
+            action_name,
+            "text_extracted",
+            source,
+            job_id=job.job_id,
+            filename=work_path.name,
+            extension=work_path.suffix.lower(),
+            size_bytes=work_path.stat().st_size,
+            output_format=normalized_output_format,
+        )
+
+        structured_text = await extract_structured_data(
+            OPENAI_MODEL,
+            extracted_text,
+            instruction,
+            input_path.name,
+            "json" if normalized_output_format == "xlsx" else normalized_output_format,
+        )
+        log_action(
+            action_type,
+            action_name,
+            "ai_extraction_completed",
+            source,
+            job_id=job.job_id,
+            filename=input_path.name,
+            extension=input_path.suffix.lower(),
+            size_bytes=input_path.stat().st_size,
+            output_format=normalized_output_format,
+        )
+
+        json_data = None
+        if normalized_output_format in {"json", "xlsx"}:
+            try:
+                json_data = json.loads(structured_text)
+            except json.JSONDecodeError:
+                mark_source_error(source)
+                job.status = "error"
+                job.finished_at = datetime.now(timezone.utc).isoformat()
+                panam_files.write_job_metadata(job)
+                log_action(
+                    action_type,
+                    action_name,
+                    "error",
+                    source,
+                    job_id=job.job_id,
+                    filename=input_path.name,
+                    extension=input_path.suffix.lower(),
+                    size_bytes=input_path.stat().st_size,
+                    output_format=normalized_output_format,
+                )
+                logger.warning(
+                    "extract_data JSON validation failed job_id=%s status=error",
+                    job.job_id,
+                )
+                message_text = (
+                    "Data pro XLSX se nepodarilo validovat. Zkus presnejsi instrukci nebo output_format=json."
+                    if normalized_output_format == "xlsx"
+                    else "Vystup JSON se nepodarilo validovat. Zkus presnejsi instrukci nebo output_format=md."
+                )
+                await send_source_message(source, message_text)
+                return
+        elif normalized_output_format == "csv":
+            if not structured_text.strip() or not structured_text.strip().splitlines():
+                raise ValueError("CSV output is empty.")
+        elif not structured_text.strip():
+            raise ValueError("Markdown output is empty.")
+
+        if normalized_output_format == "xlsx":
+            output_path = job.output_dir / "extracted_data.xlsx"
+            panam_excel.create_xlsx_from_items(
+                get_items_for_xlsx(json_data),
+                output_path,
+            )
+            job.output_files.append(
+                {
+                    "filename": output_path.name,
+                    "extension": output_path.suffix.lower(),
+                    "size_bytes": output_path.stat().st_size,
+                }
+            )
+            panam_files.write_job_metadata(job)
+            output_status = "xlsx_output_written"
+        else:
+            output_path = panam_files.write_output_text(
+                job,
+                f"extracted_data{output_extension}",
+                structured_text,
+            )
+            output_status = "output_written"
+
+        log_action(
+            action_type,
+            action_name,
+            output_status,
+            source,
+            job_id=job.job_id,
+            filename=output_path.name,
+            extension=output_path.suffix.lower(),
+            size_bytes=output_path.stat().st_size,
+            output_format=normalized_output_format,
+        )
+
+        job.status = "success"
+        job.finished_at = datetime.now(timezone.utc).isoformat()
+        panam_files.write_job_metadata(job)
+
+        await send_source_message(source, "Data jsou vytezena.", output_path)
+        log_action(
+            action_type,
+            action_name,
+            "success",
+            source,
+            job_id=job.job_id,
+            filename=Path(file.filename).name,
+            extension=extension,
+            size_bytes=file.size,
+            output_format=normalized_output_format,
+        )
+
+    except AttachmentAnalysisUserError as error:
+        mark_source_error(source)
+        if job is not None:
+            job.status = "error"
+            job.finished_at = datetime.now(timezone.utc).isoformat()
+            panam_files.write_job_metadata(job)
+            log_action(
+                action_type,
+                action_name,
+                "error",
+                source,
+                job_id=job.job_id,
+                filename=Path(file.filename).name,
+                extension=extension,
+                size_bytes=file.size,
+                output_format=normalized_output_format,
+            )
+        logger.exception("Chyba pri tezeni dat ze souboru")
+        await send_source_message(source, str(error))
+
+    except Exception:
+        mark_source_error(source)
+        if job is not None:
+            job.status = "error"
+            job.finished_at = datetime.now(timezone.utc).isoformat()
+            panam_files.write_job_metadata(job)
+            log_action(
+                action_type,
+                action_name,
+                "error",
+                source,
+                job_id=job.job_id,
+                filename=Path(file.filename).name,
+                extension=extension,
+                size_bytes=file.size,
+                output_format=normalized_output_format,
+            )
+        logger.exception("Chyba pri tezeni dat ze souboru")
+        await send_source_message(source, "Neco se pokazilo pri tezeni dat ze souboru.")
+
+    finally:
+        if job is not None:
+            panam_files.cleanup_job(job)
+
+
+async def handle_natural_file_request(
+    message: discord.Message,
+    file: discord.Attachment | None,
+    decision: dict,
+) -> None:
+    mode = decision.get("mode")
+    action_name = get_natural_file_action_name(decision)
+
+    if mode == "unsupported_direct_edit":
+        log_action("natural_message", action_name, "started", message)
+        await message.reply(
+            "Puvodni Excel ani puvodni prilohu zatim primo neupravuju. "
+            "Muzu ale vytvorit novy XLSX, CSV, Markdown nebo TXT vystup.",
+            mention_author=False,
+        )
+        log_action("natural_message", action_name, "success", message)
+        return
+
+    if file is None:
+        await message.reply(
+            "Nevidim zadnou podporovanou prilohu ani v teto zprave, ani v predchozich zpravach.",
+            mention_author=False,
+        )
+        return
+
+    attachment_details = get_safe_attachment_info(file)
+    attachment_details["kind"] = attachment_details.pop("file_type", None)
+
+    if mode == "chat_answer":
+        log_action(
+            "natural_message",
+            action_name,
+            "started",
+            message,
+            **attachment_details,
+        )
+        try:
+            question = decision.get("question") or get_attachment_context_question(
+                message.content or "",
+                get_attachment_kind(file) or "document",
+            )
+            answer = await analyze_selected_attachment(file, question)
+            await message.reply(answer, mention_author=False)
+            log_action(
+                "natural_message",
+                action_name,
+                "success",
+                message,
+                **attachment_details,
+            )
+            return
+
+        except AttachmentAnalysisUserError as error:
+            await message.reply(str(error), mention_author=False)
+            log_action(
+                "natural_message",
+                action_name,
+                "error",
+                message,
+                **attachment_details,
+            )
+            return
+
+        except Exception:
+            log_action(
+                "natural_message",
+                action_name,
+                "error",
+                message,
+                **attachment_details,
+            )
+            logger.exception("Chyba pri zpracovani natural file chat odpovedi")
+            await message.reply(
+                "Neco se pokazilo pri analyze prilohy. Mrkni do konzole na chybu.",
+                mention_author=False,
+            )
+            return
+
+    if get_attachment_kind(file) != "document":
+        await message.reply(
+            "Vystupni soubory zatim umim tvorit jen z dokumentu TXT, MD, CSV, PDF, DOCX nebo XLSX.",
+            mention_author=False,
+        )
+        return
+
+    extension = get_file_extension(file.filename)
+    if file.size > MAX_DOCUMENT_SIZE_BYTES:
+        await message.reply("Ten soubor je moc velky. Zatim beru max 20 MB.", mention_author=False)
+        return
+
+    if extension not in SUPPORTED_DOCUMENT_EXTENSIONS:
+        await message.reply(
+            "Tenhle rezim podporuje dokumenty TXT, MD, CSV, PDF, DOCX nebo XLSX.",
+            mention_author=False,
+        )
+        return
+
+    async with message.channel.typing():
+        if mode == "human_document":
+            output_format = decision.get("output_format", "md")
+            if output_format not in {"md", "txt"}:
+                output_format = "md"
+
+            await run_human_document_file_job(
+                message,
+                file,
+                decision.get("instruction", message.content or ""),
+                output_format,
+                "natural_message",
+            )
+            return
+
+        if mode == "structured_data":
+            output_format = decision.get("output_format", "json")
+            if output_format not in {"json", "csv", "md", "xlsx"}:
+                output_format = "json"
+
+            await run_structured_data_file_job(
+                message,
+                file,
+                decision.get("instruction", message.content or ""),
+                output_format,
+                "natural_message",
+            )
+            return
+
+    await message.reply(
+        "Tohle jsem u prilohy nepoznala, tak volim bezpecnou odpoved do chatu.",
+        mention_author=False,
+    )
+
+
 def get_items_for_xlsx(data) -> list[dict]:
     if isinstance(data, dict) and isinstance(data.get("items"), list):
         raw_items = data["items"]
@@ -1081,6 +1771,10 @@ def parse_natural_intent(text: str) -> Optional[tuple[str, Optional[str]]]:
 
 
 def get_natural_action_name(request_text: str, original_content: str) -> str | None:
+    file_decision = decide_file_response_mode(request_text)
+    if is_file_router_candidate(request_text):
+        return get_natural_file_action_name(file_decision)
+
     if is_general_attachment_context_request(request_text):
         return "natural_attachment_context"
 
@@ -1159,6 +1853,32 @@ class DiscordAIBot(discord.Client):
         if ALLOWED_CHANNEL_IDS and str(message.channel.id) not in ALLOWED_CHANNEL_IDS:
             if natural_action is not None:
                 log_action("natural_message", natural_action, "denied", message)
+            return
+
+        file_decision = decide_file_response_mode(
+            request_text,
+            get_file_extension(selected_file.filename) if selected_file is not None else None,
+        )
+        file_router_candidate = selected_file is not None or is_file_router_candidate(request_text)
+        if (
+            file_router_candidate
+            and selected_file is None
+            and file_decision.get("mode") != "unsupported_direct_edit"
+        ):
+            selected_file = await find_recent_supported_attachment(message.channel)
+            if selected_file is not None:
+                file_decision = decide_file_response_mode(
+                    request_text,
+                    get_file_extension(selected_file.filename),
+                )
+
+        if file_router_candidate and (
+            selected_file is not None
+            or file_decision.get("mode") in {"human_document", "structured_data", "unsupported_direct_edit"}
+            or is_general_attachment_context_request(request_text)
+            or is_natural_attachment_analyze_request(request_text)
+        ):
+            await handle_natural_file_request(message, selected_file, file_decision)
             return
 
         context_attachment_request = is_general_attachment_context_request(request_text)

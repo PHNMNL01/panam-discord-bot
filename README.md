@@ -1,18 +1,30 @@
-# Discord AI Bot PoC
+# Panam Discord Bot
 
-Jednoduchy Discord AI bot v Pythonu.
+Panam je osobni Discord AI asistentka v Pythonu. Umi odpovidat na dotazy, shrnovat texty a zpravy v kanalu, vest jednoduche poznamky a todo listy, analyzovat obrazky a pracovat s dokumentovymi prilohami.
 
-Panam je osobni Discord AI asistentka pro zabavu, poznamky, todo list, shrnuti textu, praci se zpravami v kanalu a analyzu obrazku.
+Projekt je zatim prakticky PoC, ale uz ma oddelenou AI vrstvu, prirozene fraze, kratkou pamet a izolovanou file-job pipeline pro docasne zpracovani souboru.
 
-## Cil prvni verze
+## Co Panam umi
 
-- bot se pripoji na Discord server
-- ma slash command `/ask`
-- dotaz posle do OpenAI API
-- odpoved vrati zpet do Discord kanalu
-- tokeny a API klice jsou pouze v `.env`
-- bot umi pracovat jen v povolenych kanalech, pokud jsou nastavene
-- OpenAI logika je oddelena do `panam_ai.py`
+- odpovidat pres OpenAI API
+- shrnovat vlozeny text nebo posledni zpravy v kanalu
+- hledat v poslednich zpravach kanalu
+- ukladat a hledat lokalni poznamky
+- spravovat jednoduchy todo list
+- analyzovat obrazky a dokumenty
+- cist TXT, MD, CSV, PDF, DOCX a XLSX
+- vytvaret lidske vystupni dokumenty jako MD nebo TXT
+- tezit strukturovana data do JSON, CSV, Markdownu nebo XLSX
+- reagovat na prirozene fraze typu `Panam shrn to`
+
+## Zakladni principy
+
+- Slash commandy jsou presne nastroje.
+- Prirozene fraze jsou jen router, ktery vybere existujici nastroj.
+- Natural parser sam neupravuje soubory.
+- Puvodni Discord priloha se nikdy neupravuje.
+- Prace se soubory probiha v docasnem file jobu: `input/`, `work/`, `output/`, `job.json`.
+- Obsah souboru, cele dotazy a vystupy se neloguji.
 
 ## Konfigurace
 
@@ -23,88 +35,71 @@ DISCORD_BOT_TOKEN=your_discord_bot_token_here
 OPENAI_API_KEY=your_openai_api_key_here
 DISCORD_GUILD_IDS=
 ALLOWED_CHANNEL_IDS=
-OPENAI_MODEL=gpt-5-mini
+OPENAI_MODEL=gpt-5.4-mini
 ```
 
-- `DISCORD_GUILD_IDS`: volitelny seznam ID Discord serveru oddelenych carkou. Kdyz je prazdny, slash commandy se synchronizuji globalne.
-- `ALLOWED_CHANNEL_IDS`: volitelny seznam ID kanalu oddelenych carkou. Kdyz je prazdny, bot muze odpovidat ve vsech kanalech.
-- `OPENAI_MODEL`: model pouzivany pro odpovedi pres OpenAI API.
-- `.env` nikdy nedavej do gitu ani do chatu. Obsahuje tokeny a API klice.
+Promenne:
 
-## Panam commandy
+- `DISCORD_BOT_TOKEN` - token Discord bota.
+- `OPENAI_API_KEY` - OpenAI API klic.
+- `DISCORD_GUILD_IDS` - volitelny seznam ID serveru oddelenych carkou. Kdyz je prazdny, slash commandy se synchronizuji globalne.
+- `ALLOWED_CHANNEL_IDS` - volitelny seznam ID kanalu oddelenych carkou. Kdyz je prazdny, bot muze odpovidat ve vsech kanalech.
+- `OPENAI_MODEL` - model pouzivany pro OpenAI volani.
 
-### Slash commandy
+`.env` nikdy nedavej do gitu ani do chatu.
+
+## Spusteni na Windows
+
+```powershell
+python -m venv .venv
+.\.venv\Scripts\Activate.ps1
+pip install -r requirements.txt
+python bot.py
+```
+
+## Slash Commandy
+
+Zakladni:
+
+- `/ping` - overi, ze je bot online.
+- `/help` - zobrazi napovedu.
+- `/memory_clear` - vymaze kratkou konverzacni pamet Panam pro aktualni kanal.
+
+AI a zpravy:
 
 - `/ask` - polozi otazku AI.
+- `/panam_talk` - osobnejsi talk rezim Panam.
 - `/summary` - shrne vlozeny text.
 - `/channel_summary` - shrne posledni zpravy aktualniho kanalu.
 - `/search_messages` - vyhleda text v poslednich zpravach aktualniho kanalu.
+
+Poznamky a todo:
+
 - `/note_add` - ulozi poznamku.
 - `/note_list` - zobrazi posledni poznamky.
 - `/note_search` - vyhleda v poznamkach.
 - `/todo_add` - prida ukol.
 - `/todo_list` - zobrazi aktivni ukoly.
 - `/todo_done` - oznaci ukol jako hotovy.
-- `/analyze` - analyzuje prilozeny obrazek nebo dokument, pripadne podporovanou prilohu z predchozi zpravy.
-- `/read_file` - precte TXT, MD, CSV, PDF, DOCX nebo XLSX prilohu a odpovi na otazku k dokumentu.
-- `/process_file` - zpracuje dokument podle instrukce a vrati vystup jako MD nebo TXT soubor.
-- `/extract_data` - vytezi ze souboru strukturovana data a vrati JSON, CSV, Markdown nebo XLSX.
-- `/file_job_test` - technicky test docasne file-job pipeline.
-- `/memory_clear` - vymaze kratkou konverzacni pamet Panam pro aktualni kanal.
-- `/ping` - overi, ze je bot online.
-- `/help` - zobrazi napovedu.
 
-## Analyze priloh
+Soubory:
 
-Command `/analyze` slouzi k analyze obrazku a dokumentu.
+- `/analyze` - analyzuje obrazek nebo dokument a odpovi do Discord chatu.
+- `/read_file` - precte dokument a odpovi na otazku k obsahu.
+- `/process_file` - vytvori novy lidsky citelny MD nebo TXT vystup.
+- `/extract_data` - vytvori strukturovana data jako JSON, CSV, Markdown nebo XLSX.
+- `/file_job_test` - technicky test file-job pipeline.
 
-Umi:
+## Podporovane Prilohy
 
-- analyzovat obrazek prilozeny primo v commandu
-- analyzovat dokument prilozeny primo v commandu
-- pokud soubor neni prilozeny primo v commandu, pokusi se najit podporovanou prilohu v predchozi vhodne zprave v aktualnim kanalu
-- odpovedet na otazku k obrazku nebo dokumentu
-- popsat screenshot, meme, fotku nebo vizualni obsah
-
-Podporovane formaty:
+Obrazky:
 
 - PNG
-- JPG
-- JPEG
+- JPG / JPEG
 - WEBP
 - GIF
-- TXT
-- MD
-- CSV
-- PDF
-- DOCX
-- XLSX
 
-Limit velikosti prilohy:
-
-- maximalne 20 MB
-
-Priklad s obrazkem primo v commandu:
-
-```text
-/analyze file: screenshot.png question: Co je tady za chybu?
-```
-
-Priklad s obrazkem ve zprave nad commandem:
-
-```text
-/analyze question: Co je na obrazku?
-```
-
-PDF musi obsahovat extrahovatelny text. Skenovane PDF nebo obrazkove PDF bez OCR zatim nemusi fungovat.
-
-XLSX cte hodnoty bunek z vice listu. Necte makra, grafy, kontingencni tabulky ani slozite formatovani.
-
-## Čtení dokumentů
-
-Command `/read_file` slouzi ke cteni zakladnich dokumentovych priloh.
-
-Podporovane formaty:
+Dokumenty:
 
 - TXT
 - MD
@@ -113,27 +108,114 @@ Podporovane formaty:
 - DOCX
 - XLSX
 
-Limit velikosti dokumentu:
+Limit velikosti prilohy je 20 MB.
 
-- maximalne 20 MB
+Poznamky k formatum:
 
-PDF musi obsahovat extrahovatelny text. Skenovane PDF nebo obrazkove PDF bez OCR zatim nemusi fungovat.
+- PDF musi obsahovat extrahovatelny text. Skenovane PDF bez OCR zatim nemusi fungovat.
+- DOCX cte bezny text a tabulky.
+- XLSX cte hodnoty bunek z vice listu. Necte makra, grafy, kontingencni tabulky ani slozite formatovani.
+- U XLSX vzorcu se ctou vypoctene hodnoty, pokud jsou v souboru ulozene.
 
-DOCX cte bezny text a tabulky.
-
-XLSX cte hodnoty bunek z vice listu a zapisuje je jako citelny tabulkovy text se sekcemi `Sheet:` a radky `Row N:`. Necte makra, grafy, kontingencni tabulky ani nezachovava formatovani. U vzorcu cte vypoctene hodnoty, pokud jsou v souboru ulozene.
-
-Limity pro XLSX:
+Limity pro XLSX vstup:
 
 - maximalne 10 listu
 - maximalne 500 radku na list
 - maximalne 50 sloupcu na list
 
-Pokud je Excel prazdny nebo neobsahuje zadne hodnoty, Panam vrati srozumitelnou chybu. Pokud soubor nejde otevrit jako XLSX, muze byt poskozeny nebo v nepodporovanem formatu.
+## Prace Se Soubory
 
-## Prirozene ovladani Panam
+### Rychla odpoved do chatu
 
-Panam reaguje jen v povolenych kanalech a jen kdyz je oslovena.
+Pouzij `/analyze` nebo `/read_file`, kdyz chces odpoved primo do Discord zpravy.
+
+Priklady:
+
+```text
+/analyze file:screenshot.png question:Co je tady za chybu?
+/analyze file:report.pdf question:Shrn mi hlavni body.
+/read_file file:export.xlsx question:Najdi mozne chyby v tabulce.
+```
+
+`/analyze` umi pouzit i posledni podporovanou prilohu v aktualnim kanalu, pokud neni soubor prilozeny primo v commandu.
+
+### Lidsky vystupni dokument
+
+Pouzij `/process_file`, kdyz chces z dokumentu vytvorit novy citelny soubor pro cloveka.
+
+Vystupy:
+
+- `md`
+- `txt`
+
+Priklady:
+
+```text
+/process_file file:requirements.txt instruction:Vysvetli knihovny lidsky output_format:md
+/process_file file:sample.pdf instruction:Udelej z toho kratky checklist output_format:md
+/process_file file:notes.docx instruction:Prepis to do cisteho textu output_format:txt
+```
+
+### Strukturovana data
+
+Pouzij `/extract_data`, kdyz chces vytahnout data do strojove nebo tabulkove podoby.
+
+Vystupy:
+
+- `json` - validuje se pres JSON parser
+- `csv` - musi byt neprazdne CSV s hlavickou
+- `md` - Markdown vhodny pro tabulky, seznamy a prehledy
+- `xlsx` - novy jednoduchy Excel soubor
+
+Priklady:
+
+```text
+/extract_data file:requirements.txt instruction:Vytahni knihovny a verze output_format:json
+/extract_data file:export.xlsx instruction:Vytahni radky, kde je stav Chyba output_format:csv
+/extract_data file:export.csv instruction:Vytahni jmeno, email a datum output_format:xlsx
+```
+
+Pro `output_format=xlsx` AI nevytvari Excel primo. AI vrati strukturovana JSON data, Python je zvaliduje a vytvori z nich `extracted_data.xlsx`.
+
+Zakladni XLSX vystup v1:
+
+- tucne hlavicky
+- autofilter
+- zmrazeny prvni radek
+- automaticke sirky sloupcu
+- zalamovani dlouheho textu
+
+XLSX vystup zatim neresi barvy, slozite styly, vice listu, grafy, makra, vzorce ani upravu puvodniho XLSX.
+
+## Prirozene Ovladani
+
+Panam reaguje na prirozene fraze jen kdyz je oslovena, typicky `Panam ...` nebo mentionem bota.
+
+### Bezne dotazy
+
+```text
+Panam <dotaz>
+Panam rekni mi <dotaz>
+Panam rekni <dotaz>
+Panam odpovez <dotaz>
+Panam co si myslis o <text>
+Co si mysli Panam o <text>
+Panam co si o tom myslis?
+```
+
+Dotazy typu `co si o tom myslis?` pouziji predchozi vhodnou zpravu jako kontext.
+
+### Shrnuti textu
+
+```text
+Panam shrn <text>
+Panam shrn mi <text>
+Panam udelej summary <text>
+Panam shrn to
+Panam shrn toto
+```
+
+Kdyz je k dispozici priloha, `shrn to` se vztahuje k prilohovemu kontextu. Jinak se pouzije predchozi vhodna textova zprava.
 
 ### Poznamky
 
@@ -159,332 +241,209 @@ Panam ukaz todo
 Panam ukaz ukoly
 ```
 
-### AI otazky
+### Natural File Router
 
-```text
-Panam <dotaz>
-Panam rekni mi <dotaz>
-Panam řekni mi <dotaz>
-Panam rekni <dotaz>
-Panam řekni <dotaz>
-Panam odpovez <dotaz>
-Panam odpověz <dotaz>
-Panam co si myslis o <text>
-Panam co si myslíš o <text>
-Co si mysli Panam o <text>
-Co si myslí Panam o <text>
-Panam co si o tom myslis?
-Panam co si o tom myslíš?
-Co si o tom mysli Panam?
-Co si o tom myslí Panam?
-```
+Kdyz uzivatel oslovi Panam a prilozi podporovany soubor, nebo odkazuje na posledni podporovanou prilohu, Panam rozhodne jeden ze tri rezimu.
 
-Dotazy typu `Panam co si o tom myslis?` pouziji predchozi vhodnou zpravu jako kontext.
+#### 1. chat_answer
 
-### Shrnuti
-
-```text
-Panam shrn <text>
-Panam shrň <text>
-Panam shrn mi <text>
-Panam shrň mi <text>
-Panam udelej summary <text>
-Panam udělej summary <text>
-Panam shrn toto
-Panam shrň toto
-Panam shrn to
-Panam shrň to
-```
-
-Dotazy typu `Panam shrn toto` nebo `Panam shrn to` pouziji predchozi vhodnou zpravu jako kontext.
-
-### Analyze pres prirozenou frazi
-
-Pokud je tato funkce v botovi zapnuta, Panam umi reagovat i na prirozene fraze pro analyzu obrazku a podporovanych priloh.
+Bezpecny default. Vysledek je normalni odpoved do Discord chatu.
 
 Priklady:
 
 ```text
-Panam analyzuj obrazek
-Panam analyzuj obrázek
-Panam analyzuj ten obrazek
-Panam analyzuj ten obrázek
-Panam koukni na obrazek
-Panam koukni na obrázek
-Panam koukni na tohle
-Panam podivej se na obrazek
-Panam podívej se na obrázek
-Panam podivej se na tohle
-Panam podívej se na tohle
-Panam co je na obrazku?
-Panam co je na obrázku?
-Panam co je na tom obrazku?
-Panam co je na tom obrázku?
-Panam co vidis?
-Panam co vidíš?
-Panam co tam vidis?
-Panam co tam vidíš?
-Panam popis obrazek
-Panam popiš obrázek
-Panam popis ten obrazek
-Panam popiš ten obrázek
-Panam vysvetli obrazek
-Panam vysvětli obrázek
-Panam vysvetli ten screenshot
-Panam vysvětli ten screenshot
-Panam co je na screenshotu?
-Panam co je na screenu?
-Panam co je tady za chybu?
-Panam co je tam za chybu?
-Panam analyzuj soubor
-Panam co je v souboru?
-Panam co obsahuje ten soubor?
-Panam precti soubor
-Panam shrn ten soubor
-Panam analyzuj dokument
-Panam co je v dokumentu?
-Panam precti PDF
-Panam shrn PDF
-Panam analyzuj Word
-Panam co je ve Wordu?
-Panam analyzuj DOCX
-Panam analyzuj Excel
-Panam co je v Excelu?
-Panam analyzuj tabulku
-Panam co je v tabulce?
-Panam shrn CSV
-Panam analyzuj markdown
-Panam co je v priloze?
-Panam analyzuj prilohu
+Panam co je v tom souboru?
+Panam shrn to
+Panam najdi chyby v te tabulce
+Panam vysvetli mi ten dokument
+Panam co obsahuje to PDF?
+Panam zpracuj ten soubor
 ```
 
-Panam se pokusi pouzit podporovanou prilohu ze stejne zpravy nebo z predchozi vhodne zpravy.
+#### 2. human_document
 
-Kdyz je ve zprave, kterou uzivatel posle Panam, podporovana priloha, ma priloha prednost pred beznym chatem. Panam se nejdriv podiva na skutecne nalezeny soubor a az potom resi ostatni prirozene intenty.
+Panam pouzije stejnou pipeline jako `/process_file` a vytvori novy MD nebo TXT soubor.
 
-Typ zpracovani se urcuje podle pripony prilohy:
-
-- obrazky `.png`, `.jpg`, `.jpeg`, `.webp`, `.gif` se analyzuji jako obrazek
-- dokumenty `.txt`, `.md`, `.csv`, `.pdf`, `.docx`, `.xlsx` se ctou jako dokument
-
-Obecne fraze pro aktualni nebo nejblizsi predchozi prilohu:
+Priklady:
 
 ```text
-Panam koukni na to
-Panam koukni na to je tam chyba
-Panam podivej se na to
-Panam mrkni na to
-Panam co je na tom spatne?
-Panam co je tam spatne?
-Panam je tam chyba
-Panam najdi chybu
-Panam co vidis?
-Panam co je v tom?
-Panam shrn to
+Panam udelej z toho report
+Panam udelej z toho checklist
+Panam vytvor z toho prehled
+Panam zpracuj to do markdownu
+Panam prepis to do cisteho textu
+Panam priprav z toho navod
 ```
 
-Pravidlo je jednoduche: kdyz ma Panam v ruce podporovanou prilohu, nejdriv pracuje s prilohou. Kdyz zadna aktualni ani predchozi podporovana priloha neni, pokracuje beznym chatem nebo textovym kontextem.
+Format se urcuje z textu:
 
-Fraze typu `to`, `toto`, `ten soubor`, `ta priloha`, `ta tabulka` nebo `ten obrazek` se pokusi pouzit aktualni zpravu nebo nejblizsi predchozi vhodnou zpravu/prilohu.
+- `markdown`, `md`, `report`, `checklist`, `prehled`, `navod` -> typicky `md`
+- `txt`, `cisty text` -> `txt`
 
-## Kratka konverzacni pamet
+#### 3. structured_data
 
-- Panam si v RAM pamatuje poslednich nekolik beznych konverzacnich zprav v kanalu.
-- Pamet se pouziva pro bezne dotazy typu `Panam <dotaz>`.
-- Po restartu bota se smaze.
-- Pamet lze smazat pres `/memory_clear`.
-- Poznamky a todo jsou samostatne funkce a ukladaji se do `notes.json`/`todos.json`.
+Panam pouzije stejnou pipeline jako `/extract_data` a vytvori JSON, CSV, Markdown nebo XLSX.
 
-## Bezpecnost
+Priklady:
 
-- Panam funguje jen v kanalech uvedenych v `ALLOWED_CHANNEL_IDS`, pokud jsou nastavene.
-- Panam cte historii kanalu jen pri explicitnim commandu nebo pri osloveni podporovanou frazi.
-- Panam uklada jen kratkou RAM historii beznych konverzacnich dotazu.
-- Do Panam nezadavej hesla, tokeny, API klice, HR data, zakaznicka data ani jina citliva data.
-- `.env`, `notes.json` a `todos.json` nepatri do gitu.
+```text
+Panam vytahni z toho data do Excelu
+Panam vytahni radky, kde je stav chyba
+Panam dej to do CSV
+Panam vrat JSON
+Panam vytahni jmena a emaily
+Panam vyber sloupce jmeno, email a datum
+```
 
-## Logovani
+Format se urcuje z textu:
 
-Panam zapisuje zakladni provozni logy do `logs/panam.log` a soucasne ponechava vypis do konzole.
+- `excel`, `xlsx`, `do tabulky` -> `xlsx`
+- `csv` -> `csv`
+- `json` -> `json`
+- jinak default pro strukturovana data je `json`
 
-- slozka `logs/` se vytvori automaticky pri startu bota
-- log se rotuje pri velikosti 1 MB
-- uchovava se 5 zaloznich souboru
-- loguji se start bota, `on_ready`, slash commandy a rozpoznane prirozene akce
-- u priloh se loguje jen nazev souboru, pripona, velikost a typ `image`/`document`
-- neloguje se obsah `.env`, tokeny, API klice, obsah priloh ani cele uzivatelske dotazy
+Priorita routeru:
 
-## File jobs / docasne zpracovani souboru
+1. Explicitni datovy format nebo data -> `structured_data`.
+2. Report, checklist, navod, prehled nebo novy textovy soubor -> `human_document`.
+3. Jinak odpoved do chatu -> `chat_answer`.
 
-Panam ma zakladni file-job pipeline pro budouci praci se soubory.
+Priklady rozhodovani:
 
-- natural language parser jen rozhoduje intent
-- slash commandy jen predaji pozadavek dal
-- samotne stazeni, kopirovani, extrakce, vystupy a uklid resi file pipeline v `panam_files.py`
-- runtime joby se ukladaji do izolovanych slozek `runtime/jobs/<job_id>/`
-- kazdy job ma `input/`, `work/`, `output/` a `job.json`
-- originalni Discord priloha se nikdy neupravuje
-- Panam pracuje s docasnou kopii souboru
-- po uspesnem dokonceni se job folder smaze
-- pri chybe se job folder smaze taky a chyba se zaloguje
-- `job.json` uklada jen metadata, nikdy obsah souboru
-- `runtime/` nepatri do gitu
+```text
+Panam najdi chyby v te tabulce
+-> chat_answer
 
-Testovaci command:
+Panam najdi chyby v te tabulce a dej je do Excelu
+-> structured_data, xlsx
+
+Panam najdi chyby v te tabulce a udelej report
+-> human_document, md
+
+Panam vytahni jmena a emaily do JSONu
+-> structured_data, json
+
+Panam prepis to do cisteho textu
+-> human_document, txt
+```
+
+Panam zatim primo neupravuje puvodni Excel ani puvodni Discord prilohu. Kdyz uzivatel napise napr. `Panam uprav ten Excel`, Panam odpovi, ze umi vytvorit novy XLSX, CSV, Markdown nebo TXT vystup.
+
+## File Jobs
+
+File-job pipeline je izolovane docasne zpracovani souboru v `panam_files.py`.
+
+Kazdy job ma strukturu:
+
+```text
+runtime/jobs/<job_id>/
+|-- input/
+|-- work/
+|-- output/
+`-- job.json
+```
+
+Co pipeline dela:
+
+- ulozi docasnou kopii Discord prilohy do `input/`
+- extrahuje text do `work/`
+- vytvori novy vystup v `output/`
+- odesle vystup zpet do Discordu
+- zapise metadata jobu do `job.json`
+- po dokonceni smaze cely job folder
+
+`job.json` obsahuje jen metadata, napr. job id, stav, akci, nazvy souboru, pripony a velikosti. Neobsahuje text dokumentu ani vystup.
+
+Test:
 
 ```text
 /file_job_test file:<dokument> output_format:md
 ```
 
-Command vytvori docasny file job, ulozi kopii dokumentu do `input/`, extrahuje text do `work/extracted_text.txt`, vytvori `output.md` nebo `output.txt`, posle vystup zpet do Discordu a job smaze.
+## Kratka Pamet
 
-### /process_file
+- Panam si v RAM pamatuje poslednich nekolik beznych konverzacnich zprav v kanalu.
+- Pamet se pouziva pro `Panam <dotaz>`.
+- Po restartu bota se smaze.
+- Pamet lze smazat pres `/memory_clear`.
+- Poznamky a todo jsou samostatne funkce a ukladaji se do `notes.json` a `todos.json`.
 
-`/process_file` je prvni realny pracovni command nad file-job pipeline.
+## Bezpecnost
 
-Co dela:
+- Panam funguje jen v kanalech uvedenych v `ALLOWED_CHANNEL_IDS`, pokud jsou nastavene.
+- Historii kanalu cte jen pri explicitnim commandu nebo pri osloveni podporovanou frazi.
+- Puvodni Discord priloha se nikdy neupravuje.
+- File job pracuje jen s docasnou kopii souboru.
+- Panam neni urcena pro hesla, tokeny, API klice, HR data, zakaznicka data ani jina citliva data.
+- `.env`, `notes.json`, `todos.json`, `logs/` a `runtime/` nepatri do gitu.
 
-- vezme dokumentovou prilohu
-- ulozi jeji docasnou kopii do `runtime/jobs/<job_id>/input/`
-- extrahuje text do `runtime/jobs/<job_id>/work/extracted_text.txt`
-- posle extrahovany text a instrukci do AI
-- ulozi vysledek do `runtime/jobs/<job_id>/output/process_file_output.md` nebo `.txt`
-- posle vysledek zpet do Discordu jako prilohu
-- po odeslani smaze cely job folder
+## Logovani
 
-Podporovane vstupy:
+Panam zapisuje provozni logy do `logs/panam.log` a soucasne vypisuje do konzole.
 
-- TXT
-- MD
-- CSV
-- PDF s extrahovatelnym textem
-- DOCX
-- XLSX
+Loguje se:
 
-Podporovane vystupy:
+- start bota a `on_ready`
+- slash commandy a rozpoznane natural akce
+- stav akce: started, success, error, denied
+- u priloh jen bezpecna metadata: nazev souboru, pripona, velikost a typ
+- u file jobu metadata jako `job_id`, format vystupu a stav
 
-- `md`
-- `txt`
+Neloguje se:
 
-Priklady:
+- obsah `.env`
+- tokeny a API klice
+- obsah priloh
+- cele uzivatelske dotazy
+- obsah vystupu
 
-```text
-/process_file file:requirements.txt instruction:Vysvetli knihovny lidsky output_format:md
-/process_file file:requirements.txt instruction:Udelej z toho kratky checklist output_format:txt
-/process_file file:sample.pdf instruction:Shrn dokument output_format:md
-```
+Log se rotuje pri velikosti 1 MB a uchovava 5 zaloznich souboru.
 
-`/process_file` neloguje obsah dokumentu ani celou instrukci. Loguje jen bezpecna metadata jako `job_id`, akci, uzivatele, kanal, nazev souboru, priponu, velikost, format vystupu a stav.
-
-### /extract_data
-
-`/extract_data` vytezi ze souboru strukturovana data a vrati je jako novou prilohu.
-
-Co dela:
-
-- vezme dokumentovou prilohu
-- ulozi jeji docasnou kopii do `runtime/jobs/<job_id>/input/`
-- extrahuje text do `runtime/jobs/<job_id>/work/extracted_text.txt`
-- posle extrahovany text a instrukci do AI
-- validuje vystup podle zvoleneho formatu
-- ulozi vysledek do `runtime/jobs/<job_id>/output/extracted_data.json`, `.csv`, `.md` nebo `.xlsx`
-- posle vysledek zpet do Discordu jako prilohu
-- po odeslani smaze cely job folder
-
-Podporovane vstupy:
-
-- TXT
-- MD
-- CSV
-- PDF s extrahovatelnym textem
-- DOCX
-- XLSX
-
-Podporovane vystupy:
-
-- `json` - validuje se pres JSON parser
-- `csv` - musi byt neprazdne CSV s hlavickou
-- `md` - validni Markdown pro tabulky, seznamy a prehledy
-- `xlsx` - novy jednoduchy Excel soubor pro dalsi zpracovani
-
-Priklady:
-
-```text
-/extract_data file:requirements.txt instruction:Vytahni knihovny a verze output_format:json
-/extract_data file:requirements.txt instruction:Vytahni knihovny a verze output_format:csv
-/extract_data file:requirements.txt instruction:Vytahni knihovny a verze output_format:xlsx
-/extract_data file:dokument.pdf instruction:Vytahni jmeno, datum, cislo ticketu a pozadavek output_format:json
-/extract_data file:export.xlsx instruction:Vytahni radky, kde je stav Chyba output_format:csv
-/extract_data file:export.csv instruction:Vytahni radky, kde je stav Chyba output_format:xlsx
-/extract_data file:Ticket-474826.xlsx instruction:Vytahni pole jmeno, email, pozice a datum nastupu output_format:xlsx
-```
-
-Pro `output_format=xlsx` AI nevytvari Excel primo. AI vrati strukturovana JSON data, Python je zvaliduje a vytvori z nich novy jednoduchy `extracted_data.xlsx`.
-
-Zakladni XLSX formatovani v1:
-
-- tucne hlavicky
-- zapnuty autofilter
-- zmrazeny prvni radek
-- automaticky nastavene sirky sloupcu
-- zalamovani dlouheho textu
-
-XLSX vystup zatim neresi barvy, slozite styly, vice listu, grafy, makra, vzorce ani upravu puvodniho XLSX.
-
-Kdyz JSON vystup nejde validovat, Panam vrati srozumitelnou chybu a doporuci presnejsi instrukci nebo jiny format. Command neni urceny pro hesla, tokeny, API klice ani citliva data. Obsah dokumentu, JSONu ani cela instrukce se neloguji, ukladaji se jen bezpecna metadata jobu.
-
-## Spusteni na Windows
-
-```powershell
-python -m venv .venv
-.\.venv\Scripts\Activate.ps1
-pip install -r requirements.txt
-python bot.py
-```
-
-## Struktura
+## Struktura Projektu
 
 ```text
 panam-discord-bot/
 |-- bot.py
 |-- panam_ai.py
+|-- panam_excel.py
 |-- panam_files.py
 |-- panam_memory.py
 |-- panam_phrases.py
 |-- requirements.txt
-|-- .env
 |-- .env.example
 |-- .gitignore
 |-- README.md
 |-- notes.json
+|-- todos.json
 |-- logs/
-|-- runtime/
-`-- todos.json
+`-- runtime/
 ```
 
-### Soubory
+Soubory:
 
-- `bot.py` - Discord cast bota, commandy, prace s kanaly a zpravami.
-- `panam_ai.py` - OpenAI cast, systemovy prompt Panam, AI odpovedi, shrnuti a analyza obrazku.
-- `panam_files.py` - docasna file-job pipeline pro izolovane zpracovani souboru.
-- `panam_memory.py` - kratka RAM konverzacni pamet oddelena podle kanalu.
-- `panam_phrases.py` - seznamy prirozenych frazi a kontextovych vyrazu Panam.
+- `bot.py` - Discord logika, slash commandy, natural message handling a router pro soubory.
+- `panam_ai.py` - OpenAI volani, system prompt, analyza, shrnuti a file AI funkce.
+- `panam_phrases.py` - prirozene fraze, signaly a intent patterny.
+- `panam_files.py` - izolovana file-job pipeline.
+- `panam_excel.py` - tvorba jednoducheho XLSX vystupu ze strukturovanych dat.
+- `panam_memory.py` - kratka RAM konverzacni pamet podle kanalu.
 - `requirements.txt` - Python zavislosti.
 - `.env.example` - sablona konfigurace.
-- `.env` - lokalni konfigurace s tokeny a klici. Nepatri do gitu.
-- `notes.json` - lokalni poznamky. Nepatri do gitu.
-- `todos.json` - lokalni todo list. Nepatri do gitu.
-- `logs/` - lokalni provozni logy. Nepatri do gitu.
-- `runtime/` - lokalni docasne file joby. Nepatri do gitu.
-- `.gitignore` - pravidla pro soubory, ktere Git nema sledovat.
+- `.env` - lokalni konfigurace s tokeny a klici, nepatri do gitu.
+- `notes.json` - lokalni poznamky, nepatri do gitu.
+- `todos.json` - lokalni todo list, nepatri do gitu.
+- `logs/` - lokalni provozni logy, nepatri do gitu.
+- `runtime/` - docasne file joby, nepatri do gitu.
 
 ## Git
 
-Do gitu patri:
+Do gitu patri hlavne:
 
 - `bot.py`
 - `panam_ai.py`
+- `panam_excel.py`
 - `panam_files.py`
+- `panam_memory.py`
 - `panam_phrases.py`
 - `requirements.txt`
 - `README.md`
