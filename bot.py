@@ -22,6 +22,7 @@ from panam_ai import (
     analyze_document_text,
     ask_panam,
     ask_panam_talk,
+    process_document_text,
     shorten_for_discord,
     summarize_channel_messages,
     summarize_text,
@@ -2212,6 +2213,206 @@ async def file_job_test(
         logger.exception("Chyba pri zpracovani /file_job_test")
         await interaction.followup.send(
             "Neco se pokazilo pri testu file-job pipeline."
+        )
+
+    finally:
+        if job is not None:
+            panam_files.cleanup_job(job)
+
+
+@bot.tree.command(
+    name="process_file",
+    description="Zpracuj dokument podle instrukce a vrat vystup jako soubor."
+)
+@app_commands.describe(
+    file="Dokument ke zpracovani",
+    instruction="Co ma Panam s dokumentem udelat",
+    output_format="md nebo txt",
+)
+@log_slash_command("process_file")
+async def process_file(
+    interaction: discord.Interaction,
+    file: discord.Attachment,
+    instruction: str,
+    output_format: str = "md",
+) -> None:
+    if not is_interaction_allowed(interaction, "process_file"):
+        await interaction.response.send_message(
+            "Tady nemam povolene odpovidat.",
+            ephemeral=True,
+        )
+        return
+
+    if file.size > MAX_DOCUMENT_SIZE_BYTES:
+        await interaction.response.send_message(
+            "Ten soubor je moc velky. Zatim beru max 20 MB.",
+            ephemeral=True,
+        )
+        return
+
+    extension = get_file_extension(file.filename)
+    if extension not in SUPPORTED_DOCUMENT_EXTENSIONS:
+        await interaction.response.send_message(
+            "Tenhle command podporuje dokumenty TXT, MD, CSV, PDF, DOCX nebo XLSX.",
+            ephemeral=True,
+        )
+        return
+
+    normalized_output_format = output_format.lower().strip(".")
+    if normalized_output_format not in {"md", "txt"}:
+        await interaction.response.send_message(
+            "Podporovane output_format jsou jen md nebo txt.",
+            ephemeral=True,
+        )
+        return
+
+    output_extension = f".{normalized_output_format}"
+    job = None
+    await interaction.response.defer(thinking=True)
+
+    try:
+        job = panam_files.create_file_job(
+            user_id=interaction.user.id,
+            channel_id=interaction.channel_id or 0,
+            action="process_file",
+        )
+        log_action(
+            "slash_command",
+            "process_file",
+            "started",
+            interaction,
+            job_id=job.job_id,
+            filename=Path(file.filename).name,
+            extension=extension,
+            size_bytes=file.size,
+            output_format=normalized_output_format,
+        )
+
+        input_path = await panam_files.save_attachment_to_job(file, job)
+        log_action(
+            "slash_command",
+            "process_file",
+            "attachment_saved",
+            interaction,
+            job_id=job.job_id,
+            filename=input_path.name,
+            extension=input_path.suffix.lower(),
+            size_bytes=input_path.stat().st_size,
+            output_format=normalized_output_format,
+        )
+
+        data = input_path.read_bytes()
+        extracted_text = extract_text_from_attachment(input_path.name, data)
+        if not extracted_text.strip():
+            mark_command_status(interaction, "error")
+            job.status = "error"
+            job.finished_at = datetime.now(timezone.utc).isoformat()
+            panam_files.write_job_metadata(job)
+            log_action(
+                "slash_command",
+                "process_file",
+                "error",
+                interaction,
+                job_id=job.job_id,
+                filename=input_path.name,
+                extension=input_path.suffix.lower(),
+                size_bytes=input_path.stat().st_size,
+                output_format=normalized_output_format,
+            )
+            await interaction.followup.send(
+                "Z toho dokumentu se mi nepodarilo vytahnout zadny text."
+            )
+            return
+
+        extracted_text = trim_document_text(extracted_text)
+        work_path = panam_files.write_work_text(job, "extracted_text.txt", extracted_text)
+        log_action(
+            "slash_command",
+            "process_file",
+            "text_extracted",
+            interaction,
+            job_id=job.job_id,
+            filename=work_path.name,
+            extension=work_path.suffix.lower(),
+            size_bytes=work_path.stat().st_size,
+            output_format=normalized_output_format,
+        )
+
+        processed_text = await process_document_text(
+            OPENAI_MODEL,
+            extracted_text,
+            instruction,
+            input_path.name,
+            normalized_output_format,
+        )
+        output_path = panam_files.write_output_text(
+            job,
+            f"process_file_output{output_extension}",
+            processed_text,
+        )
+        log_action(
+            "slash_command",
+            "process_file",
+            "output_written",
+            interaction,
+            job_id=job.job_id,
+            filename=output_path.name,
+            extension=output_path.suffix.lower(),
+            size_bytes=output_path.stat().st_size,
+            output_format=normalized_output_format,
+        )
+
+        job.status = "success"
+        job.finished_at = datetime.now(timezone.utc).isoformat()
+        panam_files.write_job_metadata(job)
+
+        await interaction.followup.send(
+            "Soubor je zpracovany.",
+            file=discord.File(output_path),
+        )
+        log_action(
+            "slash_command",
+            "process_file",
+            "output_sent",
+            interaction,
+            job_id=job.job_id,
+            filename=output_path.name,
+            extension=output_path.suffix.lower(),
+            size_bytes=output_path.stat().st_size,
+            output_format=normalized_output_format,
+        )
+        log_action(
+            "slash_command",
+            "process_file",
+            "success",
+            interaction,
+            job_id=job.job_id,
+            filename=Path(file.filename).name,
+            extension=extension,
+            size_bytes=file.size,
+            output_format=normalized_output_format,
+        )
+
+    except Exception:
+        mark_command_status(interaction, "error")
+        if job is not None:
+            job.status = "error"
+            job.finished_at = datetime.now(timezone.utc).isoformat()
+            panam_files.write_job_metadata(job)
+            log_action(
+                "slash_command",
+                "process_file",
+                "error",
+                interaction,
+                job_id=job.job_id,
+                filename=Path(file.filename).name,
+                extension=extension,
+                size_bytes=file.size,
+                output_format=normalized_output_format,
+            )
+        logger.exception("Chyba pri zpracovani /process_file")
+        await interaction.followup.send(
+            "Neco se pokazilo pri zpracovani souboru."
         )
 
     finally:

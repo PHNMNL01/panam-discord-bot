@@ -290,3 +290,54 @@ async def analyze_document_text(
         answer = "Nedostala jsem žádnou analýzu dokumentu z OpenAI API."
 
     return shorten_for_discord(answer)
+
+
+async def process_document_text(
+    model: str,
+    document_text: str,
+    instruction: str,
+    filename: str,
+    output_format: str,
+) -> str:
+    normalized_format = "md" if output_format.lower().strip(".") == "md" else "txt"
+    format_instruction = (
+        "Vystup musi byt validni Markdown bez uvodniho komentare."
+        if normalized_format == "md"
+        else "Vystup musi byt cisty text bez Markdown formatu a bez uvodniho komentare."
+    )
+
+    response = await openai_client.responses.create(
+        model=model,
+        input=[
+            {
+                "role": "system",
+                "content": (
+                    PANAM_SYSTEM_PROMPT +
+                    "\n\nUkol pro tento command: zpracuj text dokumentu podle instrukce uzivatele. "
+                    "Odpovez pouze obsahem vystupniho dokumentu. "
+                    "Nepridavej Discord komentare typu 'Jasne, tady to je'. "
+                    "Pokud je instrukce nejasna, udelej obecne uzitecne shrnuti dokumentu. "
+                    "Nepredstirej informace, ktere v dokumentu nejsou. "
+                    "Pokud dokument vypada, ze obsahuje hesla, tokeny, API klice nebo velmi citliva data, "
+                    "neopisuj je zbytecne do vystupu a radeji je obecne oznac jako citlive udaje. "
+                    f"{format_instruction}"
+                ),
+            },
+            {
+                "role": "user",
+                "content": (
+                    f"Nazev souboru: {filename}\n"
+                    f"Pozadovany format vystupu: {normalized_format}\n"
+                    f"Instrukce uzivatele: {instruction}\n\n"
+                    "Text dokumentu:\n"
+                    f"{document_text}"
+                ),
+            },
+        ],
+    )
+
+    answer = response.output_text.strip()
+    if not answer:
+        answer = "Nepodarilo se vytvorit vystupni dokument."
+
+    return answer

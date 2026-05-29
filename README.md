@@ -47,6 +47,8 @@ OPENAI_MODEL=gpt-5-mini
 - `/todo_done` - oznaci ukol jako hotovy.
 - `/analyze` - analyzuje prilozeny obrazek nebo dokument, pripadne podporovanou prilohu z predchozi zpravy.
 - `/read_file` - precte TXT, MD, CSV, PDF, DOCX nebo XLSX prilohu a odpovi na otazku k dokumentu.
+- `/process_file` - zpracuje dokument podle instrukce a vrati vystup jako MD nebo TXT soubor.
+- `/file_job_test` - technicky test docasne file-job pipeline.
 - `/memory_clear` - vymaze kratkou konverzacni pamet Panam pro aktualni kanal.
 - `/ping` - overi, ze je bot online.
 - `/help` - zobrazi napovedu.
@@ -326,6 +328,44 @@ Testovaci command:
 ```
 
 Command vytvori docasny file job, ulozi kopii dokumentu do `input/`, extrahuje text do `work/extracted_text.txt`, vytvori `output.md` nebo `output.txt`, posle vystup zpet do Discordu a job smaze.
+
+### /process_file
+
+`/process_file` je prvni realny pracovni command nad file-job pipeline.
+
+Co dela:
+
+- vezme dokumentovou prilohu
+- ulozi jeji docasnou kopii do `runtime/jobs/<job_id>/input/`
+- extrahuje text do `runtime/jobs/<job_id>/work/extracted_text.txt`
+- posle extrahovany text a instrukci do AI
+- ulozi vysledek do `runtime/jobs/<job_id>/output/process_file_output.md` nebo `.txt`
+- posle vysledek zpet do Discordu jako prilohu
+- po odeslani smaze cely job folder
+
+Podporovane vstupy:
+
+- TXT
+- MD
+- CSV
+- PDF s extrahovatelnym textem
+- DOCX
+- XLSX
+
+Podporovane vystupy:
+
+- `md`
+- `txt`
+
+Priklady:
+
+```text
+/process_file file:requirements.txt instruction:Vysvetli knihovny lidsky output_format:md
+/process_file file:requirements.txt instruction:Udelej z toho kratky checklist output_format:txt
+/process_file file:sample.pdf instruction:Shrn dokument output_format:md
+```
+
+`/process_file` neloguje obsah dokumentu ani celou instrukci. Loguje jen bezpecna metadata jako `job_id`, akci, uzivatele, kanal, nazev souboru, priponu, velikost, format vystupu a stav.
 
 ## Spusteni na Windows
 
