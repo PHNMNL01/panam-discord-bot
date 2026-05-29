@@ -15,6 +15,7 @@ import discord
 from discord import app_commands
 from dotenv import load_dotenv
 
+import panam_files
 import panam_memory
 from panam_ai import (
     analyze_image,
@@ -2084,6 +2085,138 @@ async def read_file(
         await interaction.followup.send(
             "Něco se pokazilo při čtení dokumentu. Mrkni do konzole na chybu."
         )
+
+
+@bot.tree.command(
+    name="file_job_test",
+    description="Otestuj docasnou file-job pipeline na dokumentove priloze."
+)
+@app_commands.describe(
+    file="Dokument k otestovani pipeline",
+    output_format="md nebo txt",
+)
+@log_slash_command("file_job_test")
+async def file_job_test(
+    interaction: discord.Interaction,
+    file: discord.Attachment,
+    output_format: str = "md",
+) -> None:
+    if not is_interaction_allowed(interaction, "file_job_test"):
+        await interaction.response.send_message(
+            "Tady nemam povolene odpovidat.",
+            ephemeral=True,
+        )
+        return
+
+    if file.size > MAX_DOCUMENT_SIZE_BYTES:
+        await interaction.response.send_message(
+            "Ten soubor je moc velky. Zatim beru max 20 MB.",
+            ephemeral=True,
+        )
+        return
+
+    extension = get_file_extension(file.filename)
+    if extension not in SUPPORTED_DOCUMENT_EXTENSIONS:
+        await interaction.response.send_message(
+            "File job test zatim podporuje dokumenty TXT, MD, CSV, PDF, DOCX nebo XLSX.",
+            ephemeral=True,
+        )
+        return
+
+    output_extension = ".md" if output_format.lower().strip(".") == "md" else ".txt"
+    job = None
+    await interaction.response.defer(thinking=True)
+
+    try:
+        job = panam_files.create_file_job(
+            user_id=interaction.user.id,
+            channel_id=interaction.channel_id or 0,
+            action="file_job_test",
+        )
+        log_action(
+            "slash_command",
+            "file_job_test",
+            "started",
+            interaction,
+            job_id=job.job_id,
+            filename=Path(file.filename).name,
+            extension=extension,
+            size=file.size,
+        )
+
+        input_path = await panam_files.save_attachment_to_job(file, job)
+        data = input_path.read_bytes()
+        extracted_text = extract_text_from_attachment(input_path.name, data)
+        if not extracted_text.strip():
+            extracted_text = "Z dokumentu se nepodarilo vytahnout zadny text."
+        else:
+            extracted_text = trim_document_text(extracted_text)
+        panam_files.write_work_text(job, "extracted_text.txt", extracted_text)
+
+        output_content = (
+            "# Panam file job test\n\n"
+            f"- job_id: `{job.job_id}`\n"
+            f"- input: `{input_path.name}`\n\n"
+            "## Extracted text\n\n"
+            f"{extracted_text}\n"
+        )
+        if output_extension == ".txt":
+            output_content = (
+                "Panam file job test\n\n"
+                f"job_id: {job.job_id}\n"
+                f"input: {input_path.name}\n\n"
+                "Extracted text\n\n"
+                f"{extracted_text}\n"
+            )
+
+        output_path = panam_files.write_output_text(
+            job,
+            f"file_job_test_output{output_extension}",
+            output_content,
+        )
+        job.status = "success"
+        job.finished_at = datetime.now(timezone.utc).isoformat()
+        panam_files.write_job_metadata(job)
+
+        await interaction.followup.send(
+            "File job hotovy.",
+            file=discord.File(output_path),
+        )
+        log_action(
+            "slash_command",
+            "file_job_test",
+            "success",
+            interaction,
+            job_id=job.job_id,
+            filename=Path(file.filename).name,
+            extension=extension,
+            size=file.size,
+        )
+
+    except Exception:
+        mark_command_status(interaction, "error")
+        if job is not None:
+            job.status = "error"
+            job.finished_at = datetime.now(timezone.utc).isoformat()
+            panam_files.write_job_metadata(job)
+            log_action(
+                "slash_command",
+                "file_job_test",
+                "error",
+                interaction,
+                job_id=job.job_id,
+                filename=Path(file.filename).name,
+                extension=extension,
+                size=file.size,
+            )
+        logger.exception("Chyba pri zpracovani /file_job_test")
+        await interaction.followup.send(
+            "Neco se pokazilo pri testu file-job pipeline."
+        )
+
+    finally:
+        if job is not None:
+            panam_files.cleanup_job(job)
 
 
 @bot.tree.command(

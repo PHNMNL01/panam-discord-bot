@@ -303,6 +303,30 @@ Panam zapisuje zakladni provozni logy do `logs/panam.log` a soucasne ponechava v
 - u priloh se loguje jen nazev souboru, pripona, velikost a typ `image`/`document`
 - neloguje se obsah `.env`, tokeny, API klice, obsah priloh ani cele uzivatelske dotazy
 
+## File jobs / docasne zpracovani souboru
+
+Panam ma zakladni file-job pipeline pro budouci praci se soubory.
+
+- natural language parser jen rozhoduje intent
+- slash commandy jen predaji pozadavek dal
+- samotne stazeni, kopirovani, extrakce, vystupy a uklid resi file pipeline v `panam_files.py`
+- runtime joby se ukladaji do izolovanych slozek `runtime/jobs/<job_id>/`
+- kazdy job ma `input/`, `work/`, `output/` a `job.json`
+- originalni Discord priloha se nikdy neupravuje
+- Panam pracuje s docasnou kopii souboru
+- po uspesnem dokonceni se job folder smaze
+- pri chybe se job folder smaze taky a chyba se zaloguje
+- `job.json` uklada jen metadata, nikdy obsah souboru
+- `runtime/` nepatri do gitu
+
+Testovaci command:
+
+```text
+/file_job_test file:<dokument> output_format:md
+```
+
+Command vytvori docasny file job, ulozi kopii dokumentu do `input/`, extrahuje text do `work/extracted_text.txt`, vytvori `output.md` nebo `output.txt`, posle vystup zpet do Discordu a job smaze.
+
 ## Spusteni na Windows
 
 ```powershell
@@ -318,6 +342,7 @@ python bot.py
 panam-discord-bot/
 |-- bot.py
 |-- panam_ai.py
+|-- panam_files.py
 |-- panam_memory.py
 |-- panam_phrases.py
 |-- requirements.txt
@@ -327,6 +352,7 @@ panam-discord-bot/
 |-- README.md
 |-- notes.json
 |-- logs/
+|-- runtime/
 `-- todos.json
 ```
 
@@ -334,6 +360,7 @@ panam-discord-bot/
 
 - `bot.py` - Discord cast bota, commandy, prace s kanaly a zpravami.
 - `panam_ai.py` - OpenAI cast, systemovy prompt Panam, AI odpovedi, shrnuti a analyza obrazku.
+- `panam_files.py` - docasna file-job pipeline pro izolovane zpracovani souboru.
 - `panam_memory.py` - kratka RAM konverzacni pamet oddelena podle kanalu.
 - `panam_phrases.py` - seznamy prirozenych frazi a kontextovych vyrazu Panam.
 - `requirements.txt` - Python zavislosti.
@@ -342,6 +369,7 @@ panam-discord-bot/
 - `notes.json` - lokalni poznamky. Nepatri do gitu.
 - `todos.json` - lokalni todo list. Nepatri do gitu.
 - `logs/` - lokalni provozni logy. Nepatri do gitu.
+- `runtime/` - lokalni docasne file joby. Nepatri do gitu.
 - `.gitignore` - pravidla pro soubory, ktere Git nema sledovat.
 
 ## Git
@@ -350,6 +378,7 @@ Do gitu patri:
 
 - `bot.py`
 - `panam_ai.py`
+- `panam_files.py`
 - `panam_phrases.py`
 - `requirements.txt`
 - `README.md`
@@ -366,3 +395,4 @@ Do gitu nepatri:
 - `*.pyc`
 - `*.log`
 - `logs/`
+- `runtime/`
