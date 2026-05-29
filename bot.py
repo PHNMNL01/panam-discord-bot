@@ -19,8 +19,11 @@ import panam_excel
 import panam_files
 import panam_memory
 from panam_file_context import (
+    clear_last_file_context,
+    clear_last_router_decision,
     get_last_file_context,
     set_last_file_context,
+    set_last_router_decision,
 )
 from panam_ai import (
     analyze_image,
@@ -1547,6 +1550,31 @@ async def run_structured_data_file_job(
             panam_files.cleanup_job(job)
 
 
+def remember_router_decision(
+    message: discord.Message,
+    decision: dict,
+    default_target: str = "current_attachment",
+) -> None:
+    mode = str(decision.get("mode") or "chat_answer")
+    target = str(decision.get("target") or default_target)
+    output_format = decision.get("output_format")
+    if not isinstance(output_format, str):
+        output_format = None
+
+    confidence = decision.get("confidence")
+    if not isinstance(confidence, (int, float)):
+        confidence = None
+
+    set_last_router_decision(
+        message.channel.id,
+        target,
+        mode,
+        output_format=output_format,
+        classifier_used=bool(decision.get("classifier_used", False)),
+        confidence=confidence,
+    )
+
+
 async def handle_natural_file_request(
     message: discord.Message,
     file: discord.Attachment | None,
@@ -1556,6 +1584,11 @@ async def handle_natural_file_request(
     action_name = get_natural_file_action_name(decision)
 
     if mode == "unsupported_direct_edit":
+        remember_router_decision(
+            message,
+            decision,
+            "current_attachment" if file is not None else "none",
+        )
         log_action("natural_message", action_name, "started", message)
         await message.reply(
             "Puvodni Excel ani puvodni prilohu zatim primo neupravuju. "
@@ -1566,6 +1599,7 @@ async def handle_natural_file_request(
         return
 
     if file is None:
+        remember_router_decision(message, decision, "none")
         await message.reply(
             "Nevidim zadnou podporovanou prilohu ani v teto zprave, ani v predchozich zpravach.",
             mention_author=False,
@@ -1596,6 +1630,7 @@ async def handle_natural_file_request(
                 get_file_extension(file.filename),
                 "chat_answer",
             )
+            remember_router_decision(message, decision)
             log_action(
                 "natural_message",
                 action_name,
@@ -1656,6 +1691,8 @@ async def handle_natural_file_request(
             if output_format not in {"md", "txt"}:
                 output_format = "md"
 
+            decision["output_format"] = output_format
+            remember_router_decision(message, decision)
             await run_human_document_file_job(
                 message,
                 file,
@@ -1670,6 +1707,8 @@ async def handle_natural_file_request(
             if output_format not in {"json", "csv", "md", "xlsx"}:
                 output_format = "json"
 
+            decision["output_format"] = output_format
+            remember_router_decision(message, decision)
             await run_structured_data_file_job(
                 message,
                 file,
@@ -1768,6 +1807,14 @@ async def handle_ai_classified_file_request(
         confidence=round(float(intent.get("confidence", 0.0)), 2),
         classifier_status=classifier_status,
     )
+    set_last_router_decision(
+        message.channel.id,
+        str(intent.get("target") or "none"),
+        str(intent.get("mode") or "chat_answer"),
+        output_format=intent.get("output_format") if isinstance(intent.get("output_format"), str) else None,
+        classifier_used=True,
+        confidence=float(intent.get("confidence", 0.0)),
+    )
 
     target = intent.get("target")
     mode = intent.get("mode")
@@ -1790,23 +1837,32 @@ async def handle_ai_classified_file_request(
 
     if mode == "human_document":
         decision = {
+            "target": target,
             "mode": "human_document",
             "instruction": intent.get("instruction") or request_text,
             "output_format": intent.get("output_format") or "md",
+            "classifier_used": True,
+            "confidence": intent.get("confidence"),
         }
     elif mode == "structured_data":
         decision = {
+            "target": target,
             "mode": "structured_data",
             "instruction": intent.get("instruction") or request_text,
             "output_format": intent.get("output_format") or "json",
+            "classifier_used": True,
+            "confidence": intent.get("confidence"),
         }
     else:
         decision = {
+            "target": target,
             "mode": "chat_answer",
             "question": intent.get("question") or get_attachment_context_question(
                 request_text,
                 get_attachment_kind(selected_file) or "document",
             ),
+            "classifier_used": True,
+            "confidence": intent.get("confidence"),
         }
 
     await handle_natural_file_request(message, selected_file, decision)
@@ -1966,6 +2022,13 @@ class DiscordAIBot(discord.Client):
             or explicit_file_output_request
             or explicit_file_action_request
         ):
+            file_decision["target"] = (
+                "current_attachment"
+                if current_file is not None
+                else "last_file_context"
+                if selected_file is not None
+                else "none"
+            )
             await handle_natural_file_request(message, selected_file, file_decision)
             return
 
@@ -2005,6 +2068,13 @@ class DiscordAIBot(discord.Client):
                 question = get_attachment_context_question(request_text, attachment_kind)
                 answer = await analyze_selected_attachment(selected_file, question)
                 await message.reply(answer, mention_author=False)
+                remember_router_decision(
+                    message,
+                    {
+                        "target": "current_attachment" if current_file is not None else "last_file_context",
+                        "mode": "chat_answer",
+                    },
+                )
                 log_action(
                     "natural_message",
                     "natural_attachment_context",
@@ -2402,6 +2472,8 @@ async def memory_clear(interaction: discord.Interaction) -> None:
         return
 
     panam_memory.clear_channel_memory(channel_id)
+    clear_last_file_context(channel_id)
+    clear_last_router_decision(channel_id)
     await interaction.response.send_message(
         "Krátká paměť pro tento kanál je vymazaná."
     )
