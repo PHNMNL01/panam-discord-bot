@@ -13,6 +13,8 @@ BASE_DIR = Path(__file__).resolve().parent
 load_dotenv(dotenv_path=BASE_DIR / ".env")
 
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+OPENAI_PROMPT_ID = (os.getenv("OPENAI_PROMPT_ID") or "").strip()
+OPENAI_PROMPT_VERSION = (os.getenv("OPENAI_PROMPT_VERSION") or "").strip()
 
 if not OPENAI_API_KEY:
     raise RuntimeError("Chybí OPENAI_API_KEY v .env souboru.")
@@ -92,17 +94,31 @@ def shorten_for_discord(text: str, limit: int = 1900) -> str:
     return answer[: max(limit - len(suffix), 0)] + suffix
 
 
+def build_prompt_args(local_system_prompt: str) -> dict:
+    if not OPENAI_PROMPT_ID:
+        return {}
+
+    prompt: dict[str, str] = {"id": OPENAI_PROMPT_ID}
+    if OPENAI_PROMPT_VERSION:
+        prompt["version"] = OPENAI_PROMPT_VERSION
+
+    return {"prompt": prompt}
+
+
 async def ask_panam(
     model: str,
     question: str,
     history: list[dict] | None = None,
 ) -> str:
-    response_input = [
-        {
-            "role": "system",
-            "content": PANAM_SYSTEM_PROMPT,
-        },
-    ]
+    prompt_args = build_prompt_args(PANAM_SYSTEM_PROMPT)
+    response_input = []
+    if not prompt_args:
+        response_input.append(
+            {
+                "role": "system",
+                "content": PANAM_SYSTEM_PROMPT,
+            }
+        )
 
     if history:
         for message in history:
@@ -128,6 +144,7 @@ async def ask_panam(
     response = await openai_client.responses.create(
         model=model,
         input=cast(ResponseInputParam, response_input),
+        **prompt_args,
     )
 
     answer = response.output_text.strip()

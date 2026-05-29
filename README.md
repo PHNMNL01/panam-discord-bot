@@ -39,6 +39,8 @@ OPENAI_API_KEY=your_openai_api_key_here
 DISCORD_GUILD_IDS=
 ALLOWED_CHANNEL_IDS=
 OPENAI_MODEL=gpt-5.4-mini
+OPENAI_PROMPT_ID=
+OPENAI_PROMPT_VERSION=
 ```
 
 Promenne:
@@ -48,8 +50,29 @@ Promenne:
 - `DISCORD_GUILD_IDS` - volitelny seznam ID serveru oddelenych carkou. Kdyz je prazdny, slash commandy se synchronizuji globalne.
 - `ALLOWED_CHANNEL_IDS` - volitelny seznam ID kanalu oddelenych carkou. Kdyz je prazdny, bot muze odpovidat ve vsech kanalech.
 - `OPENAI_MODEL` - model pouzivany pro OpenAI volani.
+- `OPENAI_PROMPT_ID` - volitelny OpenAI Prompt Management prompt pro beznou osobnost Panam v `ask_panam`.
+- `OPENAI_PROMPT_VERSION` - volitelna verze promptu z OpenAI Prompt Managementu.
 
 `.env` nikdy nedavej do gitu ani do chatu.
+
+### OpenAI Prompt Management
+
+Bezny chat Panam muze pouzivat ulozeny prompt z OpenAI Prompt Managementu.
+
+Kdyz je v `.env` nastavene `OPENAI_PROMPT_ID`, funkce `ask_panam` pouzije tento ulozeny prompt a nepridava duplicitne lokalni `PANAM_SYSTEM_PROMPT`. Historie konverzace a aktualni dotaz uzivatele zustavaji v `input`.
+
+Kdyz `OPENAI_PROMPT_ID` nastavene neni, Panam pouzije lokalni `PANAM_SYSTEM_PROMPT` jako fallback.
+
+Priklad:
+
+```env
+OPENAI_PROMPT_ID=pmpt_6a15c43bf29c8195a98170b28e5b645404f3503dee0cb7be
+OPENAI_PROMPT_VERSION=3
+```
+
+Prompt Management se zatim pouziva primarne pro default chat osobnost Panam. Rezim `/panam_talk`, sumarizace, analyza souboru, file processing, extrakce dat a AI classifier maji dal vlastni lokalni task-specific instrukce, aby se nerozbilo jejich presne chovani.
+
+Slozka `panam_prompts/` slouzi jen jako verzovana dokumentacni zaloha promptu z Prompt Managementu. Runtime zdroj pravdy je stale `.env`.
 
 ## Spusteni na Windows
 
@@ -586,6 +609,7 @@ panam-discord-bot/
 |-- panam_memory.py
 |-- panam_phrases.py
 |-- panam_router.py
+|-- panam_prompts/
 |-- requirements.txt
 |-- .env.example
 |-- .gitignore
@@ -603,6 +627,9 @@ Soubory:
 - `panam_ai.py` - OpenAI volani, system prompt, analyza, shrnuti, file AI funkce a AI intent classifier.
 - `panam_phrases.py` - prirozene fraze, signaly a intent patterny.
 - `panam_router.py` - ciste router/helper funkce pro natural file rozhodovani.
+- `panam_prompts/` - verzovana dokumentacni zaloha promptu z OpenAI Prompt Managementu.
+- `panam_prompts/readme_panam_promts.md` - poznamky ke slozce s prompt zalohami.
+- `panam_prompts/panam_personality_v3.md` - sablona/zaloha promptu Panam Personality v3.
 - `panam_file_context.py` - RAM last-file context, file summary a posledni router decision podle kanalu.
 - `panam_files.py` - izolovana file-job pipeline.
 - `panam_excel.py` - tvorba jednoducheho XLSX vystupu ze strukturovanych dat.
@@ -628,6 +655,8 @@ Do gitu patri hlavne:
 - `panam_memory.py`
 - `panam_phrases.py`
 - `panam_router.py`
+- `panam_prompts/readme_panam_promts.md`
+- `panam_prompts/panam_personality_v3.md`
 - `requirements.txt`
 - `README.md`
 - `docs/router_test_cases.md`
@@ -645,3 +674,5 @@ Do gitu nepatri:
 - `*.log`
 - `logs/`
 - `runtime/`
+
+Do `panam_prompts/` patri jen prompt texty, metadata a poznamky. Nepatri tam tokeny, API klice, hesla ani citliva data.
