@@ -308,6 +308,15 @@ Priorita routeru:
 2. Report, checklist, navod, prehled nebo novy textovy soubor -> `human_document`.
 3. Jinak odpoved do chatu -> `chat_answer`.
 
+Tvrda pravidla maji vzdy prednost pred AI classifierem:
+
+- primy pozadavek na upravu puvodniho souboru -> `unsupported_direct_edit`
+- `do Excelu`, `xlsx`, `csv`, `json` -> `structured_data`
+- `report`, `checklist`, `prehled`, `do souboru`, `markdown`, `txt` -> `human_document`
+- explicitni souborovy subjekt jako `soubor`, `priloha`, `dokument`, `tabulka`, `PDF`, `Excel`, `DOCX` -> file router
+
+Obecne vety bez jasneho souboroveho subjektu, napr. `Panam co je na tom spatne?`, `Panam co je tam spatne?` nebo `Panam najdi chybu`, se samy od sebe nesnazi brat posledni prilohu. Nejdou automaticky do file routeru, pokud neni priloha primo u aktualni zpravy nebo pokud neni jasny vystupni souborovy pozadavek.
+
 Priklady rozhodovani:
 
 ```text
@@ -328,6 +337,46 @@ Panam prepis to do cisteho textu
 ```
 
 Panam zatim primo neupravuje puvodni Excel ani puvodni Discord prilohu. Kdyz uzivatel napise napr. `Panam uprav ten Excel`, Panam odpovi, ze umi vytvorit novy XLSX, CSV, Markdown nebo TXT vystup.
+
+### Last File Context
+
+Panam si v RAM pamatuje posledni souborovy kontext pro kazdy kanal. Uklada se po uspesnem zpracovani souboru pres natural request i pres slash commandy `/analyze`, `/read_file`, `/process_file` a `/extract_data`.
+
+Ukladaji se jen bezpecna metadata:
+
+- `source_filename`
+- `source_extension`
+- `last_output_filename`
+- `last_mode`
+- `updated_at`
+
+Neuklada se obsah souboru, obsah vystupu ani cely dotaz uzivatele. Context je jen pomocna stopa pro dalsi rozhodovani a po restartu bota zmizi.
+
+### AI Intent Classifier
+
+Pro nejasne natural dotazy ma Panam maly AI classifier. Pouziva se jen jako fallback, kdyz tvrda pravidla nerozhodla.
+
+Typicke dotazy:
+
+```text
+Panam shrn to
+Panam vysvetli to
+Panam co je na tom spatne?
+Panam co dal?
+Panam udelej s tim neco pouzitelneho
+Panam priprav mi to nejak rozumne
+```
+
+Classifier muze zvolit:
+
+- `conversation` - navazuje na beznou konverzaci nebo predchozi odpoved Panam
+- `current_attachment` - pouzit aktualne prilozeny soubor
+- `last_file_context` - pouzit posledni znamy file context v kanalu
+- `none` - neni jasne
+
+Kdyz confidence vyjde nizko nebo validace selze, Panam spadne zpet na beznou konverzaci. Classifier nesmi vymyslet souborovy kontext, kdyz neni aktualni priloha ani `last_file_context`.
+
+Classifier dostava jen bezpecna metadata: jestli existuje aktualni priloha, jeji nazev a priponu, last file context metadata a kratky sanitizovany konverzacni kontext. Obsah souboru se classifieru neposila.
 
 ## File Jobs
 
@@ -406,9 +455,11 @@ panam-discord-bot/
 |-- bot.py
 |-- panam_ai.py
 |-- panam_excel.py
+|-- panam_file_context.py
 |-- panam_files.py
 |-- panam_memory.py
 |-- panam_phrases.py
+|-- panam_router.py
 |-- requirements.txt
 |-- .env.example
 |-- .gitignore
@@ -421,9 +472,11 @@ panam-discord-bot/
 
 Soubory:
 
-- `bot.py` - Discord logika, slash commandy, natural message handling a router pro soubory.
-- `panam_ai.py` - OpenAI volani, system prompt, analyza, shrnuti a file AI funkce.
+- `bot.py` - Discord logika, slash commandy, natural message handling a napojeni pipeline.
+- `panam_ai.py` - OpenAI volani, system prompt, analyza, shrnuti, file AI funkce a AI intent classifier.
 - `panam_phrases.py` - prirozene fraze, signaly a intent patterny.
+- `panam_router.py` - ciste router/helper funkce pro natural file rozhodovani.
+- `panam_file_context.py` - RAM last-file context podle kanalu.
 - `panam_files.py` - izolovana file-job pipeline.
 - `panam_excel.py` - tvorba jednoducheho XLSX vystupu ze strukturovanych dat.
 - `panam_memory.py` - kratka RAM konverzacni pamet podle kanalu.
@@ -442,9 +495,11 @@ Do gitu patri hlavne:
 - `bot.py`
 - `panam_ai.py`
 - `panam_excel.py`
+- `panam_file_context.py`
 - `panam_files.py`
 - `panam_memory.py`
 - `panam_phrases.py`
+- `panam_router.py`
 - `requirements.txt`
 - `README.md`
 - `.env.example`

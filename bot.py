@@ -18,6 +18,10 @@ from dotenv import load_dotenv
 import panam_excel
 import panam_files
 import panam_memory
+from panam_file_context import (
+    get_last_file_context,
+    set_last_file_context,
+)
 from panam_ai import (
     analyze_image,
     analyze_document_text,
@@ -35,10 +39,8 @@ from panam_phrases import (
     ATTACHMENT_SUBJECTS,
     BASIC_PANAM_EMPTY_RESPONSE,
     CONTEXT_REFERENCES,
-    DIRECT_FILE_EDIT_SIGNALS,
     GENERIC_ATTACHMENT_PATTERNS,
     GENERIC_IMAGE_PHRASES,
-    HUMAN_DOCUMENT_SIGNALS,
     HELP_PATTERNS,
     IMAGE_ANALYZE_TRIGGERS,
     NATURAL_INTENT_PATTERNS,
@@ -53,6 +55,14 @@ from panam_phrases import (
     SUMMARY_CONTEXT_PATTERN,
     SUMMARY_TRIGGERS,
     TODO_LIST_PATTERN,
+)
+from panam_router import (
+    decide_file_response_mode,
+    has_explicit_file_action_request,
+    has_explicit_file_output_request,
+    is_ambiguous_context_request,
+    is_meta_router_or_behavior_discussion,
+    validate_ai_file_intent,
 )
 
 
@@ -85,7 +95,6 @@ MAX_XLSX_SHEETS = 10
 MAX_XLSX_ROWS_PER_SHEET = 500
 MAX_XLSX_COLUMNS_PER_SHEET = 50
 COMMAND_STATUSES: dict[int, str] = {}
-_last_file_context: dict[int, dict[str, str | None]] = {}
 
 
 logger = logging.getLogger("panam")
@@ -149,53 +158,6 @@ def get_context_int(context: dict[str, str | int | None], key: str) -> int:
     if isinstance(value, str) and value.isdecimal():
         return int(value)
     return 0
-
-
-def normalize_channel_id(channel_id: int | str | None) -> int | None:
-    if isinstance(channel_id, int):
-        return channel_id
-    if isinstance(channel_id, str) and channel_id.isdecimal():
-        return int(channel_id)
-    return None
-
-
-def set_last_file_context(
-    channel_id: int | str | None,
-    source_filename: str,
-    source_extension: str,
-    last_mode: str,
-    last_output_filename: str | None = None,
-) -> None:
-    normalized_channel_id = normalize_channel_id(channel_id)
-    if normalized_channel_id is None:
-        return
-
-    _last_file_context[normalized_channel_id] = {
-        "source_filename": Path(source_filename).name,
-        "source_extension": source_extension,
-        "last_output_filename": last_output_filename,
-        "last_mode": last_mode,
-        "updated_at": datetime.now(timezone.utc).isoformat(),
-    }
-
-
-def get_last_file_context(channel_id: int | str | None) -> dict[str, str | None] | None:
-    normalized_channel_id = normalize_channel_id(channel_id)
-    if normalized_channel_id is None:
-        return None
-
-    context = _last_file_context.get(normalized_channel_id)
-    if context is None:
-        return None
-    return dict(context)
-
-
-def clear_last_file_context(channel_id: int | str | None) -> None:
-    normalized_channel_id = normalize_channel_id(channel_id)
-    if normalized_channel_id is None:
-        return
-
-    _last_file_context.pop(normalized_channel_id, None)
 
 
 def get_safe_attachment_info(file: discord.Attachment | None) -> dict[str, str | int | None]:
@@ -1091,181 +1053,8 @@ def get_context_attachment_question(text: str) -> str:
     return get_attachment_context_question(text, "document")
 
 
-def contains_natural_signal(text: str, signals: tuple[str, ...]) -> bool:
-    normalized = normalize_natural_text(text)
-    for signal in signals:
-        if re.fullmatch(r"[a-z0-9]{1,3}", signal):
-            if re.search(rf"\b{re.escape(signal)}\b", normalized) is not None:
-                return True
-            continue
-
-        if signal in normalized:
-            return True
-
-    return False
-
-
-def detect_output_format(text: str, default: str = "md") -> str:
-    normalized = normalize_natural_text(text)
-
-    if any(signal in normalized for signal in ("xlsx", "excel", "do excelu", "do tabulky")):
-        return "xlsx"
-    if re.search(r"\bcsv\b", normalized) is not None:
-        return "csv"
-    if re.search(r"\bjson(?:u|em)?\b", normalized) is not None:
-        return "json"
-    if any(signal in normalized for signal in ("markdown", "markdownu")):
-        return "md"
-    if re.search(r"\bmd\b", normalized) is not None:
-        return "md"
-    if any(signal in normalized for signal in ("txt", "cisty text", "cisteho textu")):
-        return "txt"
-
-    return default.lower().strip(".")
-
-
-def has_explicit_file_subject(text: str) -> bool:
-    normalized = normalize_natural_text(text)
-    subjects = (
-        "soubor",
-        "souboru",
-        "priloha",
-        "prilohu",
-        "priloze",
-        "dokument",
-        "dokumentu",
-        "tabulka",
-        "tabulce",
-        "tabulku",
-        "excel",
-        "excelu",
-        "xlsx",
-        "csv",
-        "pdf",
-        "word",
-        "wordu",
-        "docx",
-        "obrazek",
-        "obrazku",
-        "screenshot",
-        "screenshotu",
-        "screen",
-        "screenu",
-    )
-    return any(
-        re.search(rf"\b{re.escape(subject)}\b", normalized) is not None
-        for subject in subjects
-    )
-
-
-def has_explicit_file_output_request(text: str) -> bool:
-    normalized = normalize_natural_text(text)
-    patterns = (
-        r"\bdo\s+(?:souboru|excelu|xlsx|csv|jsonu?|markdownu|txt)\b",
-        r"\bjako\s+soubor\b",
-        r"\bvrat\s+json\b",
-        r"\budelej(?:\s+z\s+toho)?\s+(?:report|checklist|prehled|soubor)\b",
-        r"\bvytvor(?:\s+z\s+toho)?\s+(?:report|checklist|prehled|soubor)\b",
-        r"\bpriprav(?:\s+mi)?\s+z\s+toho\s+soubor\b",
-        r"\bpreved(?:\s+mi)?\s+to\s+do\s+souboru\b",
-        r"\buloz\s+to\s+jako\s+soubor\b",
-    )
-    return any(re.search(pattern, normalized) is not None for pattern in patterns)
-
-
-def has_structured_data_request(text: str) -> bool:
-    normalized = normalize_natural_text(text)
-    structured_output_patterns = (
-        r"\bdo\s+(?:excelu|xlsx|csv|jsonu?)\b",
-        r"\bvrat\s+json\b",
-        r"\bdej(?:\s+\w+){0,4}\s+do\s+(?:excelu|xlsx|csv|jsonu?)\b",
-    )
-    if any(re.search(pattern, normalized) is not None for pattern in structured_output_patterns):
-        return True
-
-    return contains_natural_signal(
-        normalized,
-        (
-            "vytahni radky",
-            "vyber sloupce",
-            "vytahni hodnoty",
-            "strukturovana data",
-            "dej to do tabulky",
-            "vytez data",
-            "vytez z toho data",
-            "vytahni data",
-            "vytahni z toho data",
-            "vytahni jmena",
-            "vytahni emaily",
-            "jmena a emaily",
-        ),
-    )
-
-
-def decide_file_response_mode(text: str, extension: str | None = None) -> dict:
-    normalized = normalize_natural_text(text)
-
-    if contains_natural_signal(normalized, DIRECT_FILE_EDIT_SIGNALS):
-        return {"mode": "unsupported_direct_edit"}
-
-    if has_structured_data_request(normalized):
-        return {
-            "mode": "structured_data",
-            "instruction": text.strip() or "Vytez ze souboru strukturovana data.",
-            "output_format": detect_output_format(text, default="json"),
-        }
-
-    if has_explicit_file_output_request(normalized):
-        output_format = detect_output_format(text, default="md")
-        if output_format not in {"md", "txt"}:
-            output_format = "md"
-
-        return {
-            "mode": "human_document",
-            "instruction": text.strip() or "Vytvor z dokumentu prehledny Markdown vystup.",
-            "output_format": output_format,
-        }
-
-    if contains_natural_signal(normalized, HUMAN_DOCUMENT_SIGNALS):
-        output_format = detect_output_format(text, default="md")
-        if output_format not in {"md", "txt"}:
-            output_format = "md"
-
-        return {
-            "mode": "human_document",
-            "instruction": text.strip() or "Zpracuj soubor do prehledneho dokumentu.",
-            "output_format": output_format,
-        }
-
-    attachment_kind = "image" if extension in SUPPORTED_IMAGE_EXTENSIONS else "document"
-    return {
-        "mode": "chat_answer",
-        "question": get_attachment_context_question(text, attachment_kind),
-    }
-
-
 def is_file_router_candidate(text: str) -> bool:
-    return has_explicit_file_subject(text) or has_explicit_file_output_request(text)
-
-
-def is_ambiguous_context_request(text: str) -> bool:
-    if has_explicit_file_subject(text) or has_explicit_file_output_request(text):
-        return False
-
-    normalized = normalize_natural_text(text)
-    patterns = (
-        r"^shrn\s+(?:to|toto|tomuhle|tohle)$",
-        r"^vysvetli\s+(?:to|toto|tohle)$",
-        r"^co\s+je\s+na\s+tom\s+spatne\??$",
-        r"^co\s+je\s+tam\s+spatne\??$",
-        r"^co\s+dal\??$",
-        r"^udelej\s+s\s+tim\s+neco.*$",
-        r"^priprav(?:\s+mi)?\s+to\s+nejak.*$",
-        r"^prehod(?:\s+mi)?\s+to\s+do\s+lepsi\s+podoby.*$",
-        r"^potrebuju\s+z\s+toho\s+neco\s+vytahnout.*$",
-        r"^(?:koukni|mrkni)\s+na\s+to\s+a\s+neco\s+s\s+tim\s+udelej.*$",
-    )
-    return any(re.match(pattern, normalized) is not None for pattern in patterns)
+    return has_explicit_file_output_request(text) or has_explicit_file_action_request(text)
 
 
 def sanitize_classifier_context_text(text: str) -> str:
@@ -1303,88 +1092,6 @@ def get_recent_classifier_context(channel_id: int, limit: int = 4) -> list[dict]
         )
 
     return context
-
-
-def fallback_ai_file_intent() -> dict:
-    return {
-        "target": "conversation",
-        "mode": "chat_answer",
-        "output_format": None,
-        "question": None,
-        "instruction": None,
-        "confidence": 0.0,
-        "reason": "fallback",
-    }
-
-
-def validate_ai_file_intent(
-    raw_intent,
-    has_current_attachment: bool,
-    has_last_file_context: bool,
-) -> dict:
-    if isinstance(raw_intent, str):
-        try:
-            intent = json.loads(raw_intent)
-        except json.JSONDecodeError:
-            return fallback_ai_file_intent()
-    elif isinstance(raw_intent, dict):
-        intent = raw_intent
-    else:
-        return fallback_ai_file_intent()
-
-    allowed_targets = {"conversation", "current_attachment", "last_file_context", "none"}
-    allowed_modes = {"chat_answer", "human_document", "structured_data", "unsupported_direct_edit"}
-    allowed_formats = {"md", "txt", "json", "csv", "xlsx", None}
-
-    target = intent.get("target")
-    mode = intent.get("mode")
-    output_format = intent.get("output_format")
-    if output_format == "null":
-        output_format = None
-    confidence = intent.get("confidence")
-
-    if target not in allowed_targets or mode not in allowed_modes:
-        return fallback_ai_file_intent()
-    if output_format not in allowed_formats:
-        return fallback_ai_file_intent()
-    if not isinstance(confidence, (int, float)):
-        return fallback_ai_file_intent()
-
-    confidence = max(0.0, min(float(confidence), 1.0))
-    if confidence < 0.65:
-        return fallback_ai_file_intent()
-
-    if target == "current_attachment" and not has_current_attachment:
-        return fallback_ai_file_intent()
-    if target == "last_file_context" and not has_last_file_context:
-        return fallback_ai_file_intent()
-
-    if mode == "human_document":
-        if output_format not in {"md", "txt", None}:
-            return fallback_ai_file_intent()
-        output_format = output_format or "md"
-    elif mode == "structured_data":
-        if output_format not in {"json", "csv", "md", "xlsx", None}:
-            return fallback_ai_file_intent()
-        output_format = output_format or "json"
-    elif mode == "chat_answer":
-        output_format = None
-    elif mode == "unsupported_direct_edit":
-        output_format = None
-
-    question = intent.get("question")
-    instruction = intent.get("instruction")
-    reason = intent.get("reason")
-
-    return {
-        "target": target,
-        "mode": mode,
-        "output_format": output_format,
-        "question": question if isinstance(question, str) and question.strip() else None,
-        "instruction": instruction if isinstance(instruction, str) and instruction.strip() else None,
-        "confidence": confidence,
-        "reason": reason if isinstance(reason, str) else "",
-    }
 
 
 def get_natural_file_action_name(decision: dict) -> str:
@@ -2137,16 +1844,10 @@ def get_natural_action_name(request_text: str, original_content: str) -> str | N
     if is_file_router_candidate(request_text):
         return get_natural_file_action_name(file_decision)
 
-    if (
-        is_general_attachment_context_request(request_text)
-        and has_explicit_file_subject(request_text)
-    ):
+    if is_general_attachment_context_request(request_text) and has_explicit_file_action_request(request_text):
         return "natural_attachment_context"
 
-    if (
-        is_natural_attachment_analyze_request(request_text)
-        and has_explicit_file_subject(request_text)
-    ):
+    if is_natural_attachment_analyze_request(request_text) and has_explicit_file_action_request(request_text):
         return "analyze_attachment"
 
     intent = parse_natural_intent(request_text)
@@ -2224,9 +1925,10 @@ class DiscordAIBot(discord.Client):
                 log_action("natural_message", natural_action, "denied", message)
             return
 
-        explicit_file_subject = has_explicit_file_subject(request_text)
         explicit_file_output_request = has_explicit_file_output_request(request_text)
-        file_router_candidate = explicit_file_subject or explicit_file_output_request
+        explicit_file_action_request = has_explicit_file_action_request(request_text)
+        meta_router_discussion = is_meta_router_or_behavior_discussion(request_text)
+        file_router_candidate = explicit_file_output_request or explicit_file_action_request
         if file_router_candidate and selected_file is None:
             selected_file = await find_recent_supported_attachment(message.channel)
 
@@ -2238,13 +1940,13 @@ class DiscordAIBot(discord.Client):
         if file_router_candidate and (
             selected_file is not None
             or file_decision.get("mode") in {"human_document", "structured_data", "unsupported_direct_edit"}
-            or explicit_file_subject
             or explicit_file_output_request
+            or explicit_file_action_request
         ):
             await handle_natural_file_request(message, selected_file, file_decision)
             return
 
-        if is_ambiguous_context_request(request_text):
+        if is_ambiguous_context_request(request_text) and not meta_router_discussion:
             handled_by_classifier = await handle_ai_classified_file_request(
                 message,
                 request_text,
@@ -2256,6 +1958,7 @@ class DiscordAIBot(discord.Client):
         context_attachment_request = (
             selected_file is not None
             and not is_ambiguous_context_request(request_text)
+            and not meta_router_discussion
             and is_general_attachment_context_request(request_text)
         )
         if context_attachment_request and selected_file is None:
@@ -2334,7 +2037,7 @@ class DiscordAIBot(discord.Client):
                     natural_action = fallback_intent_name
 
         if is_natural_attachment_analyze_request(request_text) and (
-            selected_file is not None or explicit_file_subject
+            selected_file is not None or explicit_file_action_request
         ):
             log_action("natural_message", "analyze_attachment", "started", message)
             try:
