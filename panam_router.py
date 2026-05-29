@@ -35,8 +35,6 @@ def contains_natural_signal(text: str, signals: tuple[str, ...]) -> bool:
 def detect_output_format(text: str, default: str = "md") -> str:
     normalized = normalize_natural_text(text)
 
-    if any(signal in normalized for signal in ("xlsx", "excel", "do excelu", "do tabulky")):
-        return "xlsx"
     if re.search(r"\bcsv\b", normalized) is not None:
         return "csv"
     if re.search(r"\bjson(?:u|em)?\b", normalized) is not None:
@@ -47,6 +45,11 @@ def detect_output_format(text: str, default: str = "md") -> str:
         return "md"
     if any(signal in normalized for signal in ("txt", "cisty text", "cisteho textu")):
         return "txt"
+    if any(
+        signal in normalized
+        for signal in ("xlsx", "excel", "do excelu", "do tabulky", "tabulku", "tabulkove")
+    ):
+        return "xlsx"
 
     return default.lower().strip(".")
 
@@ -89,6 +92,8 @@ def has_explicit_file_output_request(text: str) -> bool:
     normalized = normalize_natural_text(text)
     patterns = (
         r"\bdo\s+(?:souboru|excelu|xlsx|csv|jsonu?|markdownu|txt)\b",
+        r"\bdo\s+tabulky\b",
+        r"\b(?:udelej|vytvor|priprav|preved|dej)\b.*\b(?:tabulku|tabulkove)\b",
         r"\bjako\s+soubor\b",
         r"\bvrat\s+json\b",
         r"\budelej(?:\s+z\s+toho)?\s+(?:report|checklist|prehled|soubor)\b",
@@ -141,9 +146,12 @@ def has_explicit_file_action_request(text: str) -> bool:
 def has_structured_data_request(text: str) -> bool:
     normalized = normalize_natural_text(text)
     structured_output_patterns = (
-        r"\bdo\s+(?:excelu|xlsx|csv|jsonu?)\b",
+        r"\bdo\s+(?:excelu|xlsx|csv|jsonu?|tabulky)\b",
         r"\bvrat\s+json\b",
         r"\bdej(?:\s+\w+){0,4}\s+do\s+(?:excelu|xlsx|csv|jsonu?)\b",
+        r"\b(?:udelej|vytvor|priprav|preved|dej|uloz)\b.*\b(?:tabulku|tabulkove|xlsx|excelu|csv|jsonu?)\b",
+        r"\b(?:soubor|vystup)\s+(?:xlsx|excel|csv|jsonu?)\b",
+        r"\b(?:xlsx|excel|csv|jsonu?)\s+(?:soubor|vystup)\b",
     )
     if any(re.search(pattern, normalized) is not None for pattern in structured_output_patterns):
         return True

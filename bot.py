@@ -1694,6 +1694,18 @@ async def handle_ai_classified_file_request(
     recent_context = get_recent_classifier_context(message.channel.id)
 
     if not (current_file is not None or last_file_context is not None or recent_context):
+        log_action(
+            "natural_message",
+            "ai_file_intent_classifier",
+            "skipped",
+            message,
+            classifier_used=False,
+            target=None,
+            mode=None,
+            output_format=None,
+            confidence=None,
+            classifier_status="no_context",
+        )
         return False
 
     current_attachment_context = {}
@@ -1730,10 +1742,20 @@ async def handle_ai_classified_file_request(
             "error",
             message,
             classifier_used=True,
+            target=None,
+            mode=None,
+            output_format=None,
+            confidence=None,
+            classifier_status="error",
         )
         logger.exception("Chyba pri AI klasifikaci nejasneho file/context dotazu")
         return False
 
+    classifier_status = (
+        "fallback"
+        if intent.get("target") in {"conversation", "none"} or float(intent.get("confidence", 0.0)) < 0.65
+        else "selected"
+    )
     log_action(
         "natural_message",
         "ai_file_intent_classifier",
@@ -1744,6 +1766,7 @@ async def handle_ai_classified_file_request(
         mode=intent.get("mode"),
         output_format=intent.get("output_format"),
         confidence=round(float(intent.get("confidence", 0.0)), 2),
+        classifier_status=classifier_status,
     )
 
     target = intent.get("target")

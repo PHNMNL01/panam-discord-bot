@@ -438,7 +438,10 @@ async def classify_file_request_intent(
                         "Never invent file context. If no current attachment and no last file context exist, "
                         "do not choose a file target. Hard explicit requests must be respected: direct edits are "
                         "unsupported_direct_edit; Excel/XLSX/CSV/JSON output is structured_data; report/checklist/"
-                        "overview/file/Markdown/TXT output is human_document. Prefer conversation when uncertain."
+                        "overview/file/Markdown/TXT output is human_document. If file context exists and the user "
+                        "asks for 'tabulku', 'do tabulky', 'tabulkove', or 'udelej z toho tabulku', this is probably "
+                        "structured_data. Default a generic table request to output_format xlsx. If the user explicitly "
+                        "asks for a Markdown table, use md. If the user says csv, use csv. Prefer conversation when uncertain."
                     ),
                 },
                 {
