@@ -13,7 +13,7 @@ Projekt je zatim prakticky PoC, ale uz ma oddelenou AI vrstvu, prirozene fraze, 
 - spravovat jednoduchy todo list
 - analyzovat obrazky a dokumenty
 - cist TXT, MD, CSV, PDF, DOCX a XLSX
-- vytvaret lidske vystupni dokumenty jako MD nebo TXT
+- vytvaret lidske vystupni dokumenty jako MD, TXT nebo DOCX
 - tezit strukturovana data do JSON, CSV, Markdownu nebo XLSX
 - reagovat na prirozene fraze typu `Panam shrn to`
 - navazovat na posledni zpracovany soubor pres bezpecne kratke RAM shrnuti
@@ -112,7 +112,7 @@ Soubory:
 
 - `/analyze` - analyzuje obrazek nebo dokument a odpovi do Discord chatu.
 - `/read_file` - precte dokument a odpovi na otazku k obsahu.
-- `/process_file` - vytvori novy lidsky citelny MD nebo TXT vystup.
+- `/process_file` - vytvori novy lidsky citelny MD, TXT nebo DOCX vystup.
 - `/extract_data` - vytvori strukturovana data jako JSON, CSV, Markdown nebo XLSX.
 - `/file_job_test` - technicky test file-job pipeline.
 
@@ -173,6 +173,7 @@ Vystupy:
 
 - `md`
 - `txt`
+- `docx`
 
 Priklady:
 
@@ -180,6 +181,7 @@ Priklady:
 /process_file file:requirements.txt instruction:Vysvetli knihovny lidsky output_format:md
 /process_file file:sample.pdf instruction:Udelej z toho kratky checklist output_format:md
 /process_file file:notes.docx instruction:Prepis to do cisteho textu output_format:txt
+/process_file file:report.pdf instruction:Udelej z toho Word dokument output_format:docx
 ```
 
 ### Strukturovana data
@@ -288,7 +290,7 @@ Panam zpracuj ten soubor
 
 #### 2. human_document
 
-Panam pouzije stejnou pipeline jako `/process_file` a vytvori novy MD nebo TXT soubor.
+Panam pouzije stejnou pipeline jako `/process_file` a vytvori novy MD, TXT nebo DOCX soubor.
 
 Priklady:
 
@@ -298,6 +300,8 @@ Panam udelej z toho checklist
 Panam vytvor z toho prehled
 Panam zpracuj to do markdownu
 Panam prepis to do cisteho textu
+Panam dej mi to do Wordu
+Panam udelej z toho DOCX
 Panam priprav z toho navod
 ```
 
@@ -305,6 +309,7 @@ Format se urcuje z textu:
 
 - `markdown`, `md`, `report`, `checklist`, `prehled`, `navod` -> typicky `md`
 - `txt`, `cisty text` -> `txt`
+- `word`, `wordu`, `word dokument`, `docx` -> `docx`
 
 #### 3. structured_data
 
@@ -341,7 +346,7 @@ Tvrda pravidla maji vzdy prednost pred AI classifierem:
 
 - primy pozadavek na upravu puvodniho souboru -> `unsupported_direct_edit`
 - `do Excelu`, `xlsx`, `csv`, `json` -> `structured_data`
-- `report`, `checklist`, `prehled`, `do souboru`, `markdown`, `txt` -> `human_document`
+- `report`, `checklist`, `prehled`, `do souboru`, `markdown`, `txt`, `word`, `docx` -> `human_document`
 - explicitni souborovy subjekt jako `soubor`, `priloha`, `dokument`, `tabulka`, `PDF`, `Excel`, `DOCX` -> file router
 
 Obecne vety bez jasneho souboroveho subjektu, napr. `Panam co je na tom spatne?`, `Panam co je tam spatne?` nebo `Panam najdi chybu`, se samy od sebe nesnazi brat posledni prilohu. Nejdou automaticky do file routeru, pokud neni priloha primo u aktualni zpravy nebo pokud neni jasny vystupni souborovy pozadavek.
@@ -371,9 +376,12 @@ Panam udelej z toho soubor csv
 
 Panam prepis to do cisteho textu
 -> human_document, txt
+
+Panam dej mi to do Wordu
+-> human_document, docx
 ```
 
-Panam zatim primo neupravuje puvodni Excel ani puvodni Discord prilohu. Kdyz uzivatel napise napr. `Panam uprav ten Excel`, Panam odpovi, ze umi vytvorit novy XLSX, CSV, Markdown nebo TXT vystup.
+Panam zatim primo neupravuje puvodni Excel ani puvodni Discord prilohu. Kdyz uzivatel napise napr. `Panam uprav ten Excel`, Panam odpovi, ze umi vytvorit novy XLSX, CSV, Markdown, TXT nebo DOCX vystup.
 
 #### Odkaz na posledni soubor podle nazvu
 
@@ -521,6 +529,12 @@ Priklady pro ladeni routeru jsou v `docs/router_test_cases.md`. Soubor slouzi ja
 - `Panam co je na tom spatne?`
 - `Panam co je spatne v tom souboru?`
 
+Lokalni smoke test routeru bez Discordu a OpenAI:
+
+```powershell
+python scripts/router_smoke_test.py
+```
+
 ## File Jobs
 
 File-job pipeline je izolovane docasne zpracovani souboru v `panam_files.py`.
@@ -550,6 +564,12 @@ Test:
 
 ```text
 /file_job_test file:<dokument> output_format:md
+```
+
+Lokalni smoke test DOCX helperu:
+
+```powershell
+python scripts/docx_smoke_test.py
 ```
 
 ## Kratka Pamet
@@ -603,6 +623,7 @@ Log se rotuje pri velikosti 1 MB a uchovava 5 zaloznich souboru.
 panam-discord-bot/
 |-- bot.py
 |-- panam_ai.py
+|-- panam_docx.py
 |-- panam_excel.py
 |-- panam_file_context.py
 |-- panam_files.py
@@ -610,6 +631,7 @@ panam-discord-bot/
 |-- panam_phrases.py
 |-- panam_router.py
 |-- panam_prompts/
+|-- scripts/
 |-- requirements.txt
 |-- .env.example
 |-- .gitignore
@@ -625,6 +647,7 @@ Soubory:
 
 - `bot.py` - Discord logika, slash commandy, natural message handling a napojeni pipeline.
 - `panam_ai.py` - OpenAI volani, system prompt, analyza, shrnuti, file AI funkce a AI intent classifier.
+- `panam_docx.py` - tvorba jednoducheho DOCX vystupu z textu.
 - `panam_phrases.py` - prirozene fraze, signaly a intent patterny.
 - `panam_router.py` - ciste router/helper funkce pro natural file rozhodovani.
 - `panam_prompts/` - verzovana dokumentacni zaloha promptu z OpenAI Prompt Managementu.
@@ -636,6 +659,8 @@ Soubory:
 - `panam_memory.py` - kratka RAM konverzacni pamet podle kanalu.
 - `requirements.txt` - Python zavislosti.
 - `docs/router_test_cases.md` - testovaci priklady pro natural router a classifier.
+- `scripts/docx_smoke_test.py` - lokalni manualni test DOCX helperu.
+- `scripts/router_smoke_test.py` - lokalni manualni test natural file routeru.
 - `.env.example` - sablona konfigurace.
 - `.env` - lokalni konfigurace s tokeny a klici, nepatri do gitu.
 - `notes.json` - lokalni poznamky, nepatri do gitu.
@@ -649,6 +674,7 @@ Do gitu patri hlavne:
 
 - `bot.py`
 - `panam_ai.py`
+- `panam_docx.py`
 - `panam_excel.py`
 - `panam_file_context.py`
 - `panam_files.py`
@@ -657,6 +683,8 @@ Do gitu patri hlavne:
 - `panam_router.py`
 - `panam_prompts/readme_panam_promts.md`
 - `panam_prompts/panam_personality_v3.md`
+- `scripts/docx_smoke_test.py`
+- `scripts/router_smoke_test.py`
 - `requirements.txt`
 - `README.md`
 - `docs/router_test_cases.md`
