@@ -7,6 +7,9 @@ Living spec pro natural file router a AI intent classifier. Slouzi k ladeni prio
 | `Panam udelej z toho tabulku` | Po praci se souborem, existuje `last_file_context` | `last_file_context` | `structured_data` | `xlsx` | Obecna tabulka nad souborem ma defaultovat na XLSX. |
 | `Panam dej mi to do Excelu` | Po praci se souborem, existuje `last_file_context` | `last_file_context` | `structured_data` | `xlsx` | Tvrde pravidlo, classifier neni potreba. |
 | `Panam udelej z toho soubor csv` | Po praci se souborem, existuje `last_file_context` | `last_file_context` | `structured_data` | `csv` | CSV ma vyhrat nad obecnym "soubor". |
+| `Panam dej mi to do Wordu` | Aktualni priloha nebo predchozi podporovana priloha | `current_attachment` nebo `last_file_context` | `human_document` | `docx` | Word vystup patri do human_document, ne structured_data. |
+| `Panam udelej z toho DOCX` | Aktualni priloha nebo predchozi podporovana priloha | `current_attachment` nebo `last_file_context` | `human_document` | `docx` | DOCX vystup se tvori jako novy dokument. |
+| `Panam priprav z toho Word dokument` | Aktualni priloha nebo predchozi podporovana priloha | `current_attachment` nebo `last_file_context` | `human_document` | `docx` | Word dokument je prirozeny DOCX vystup. |
 | `Panam jen testuju, ze jsi nehledala soubor` | Libovolny kanal, muze existovat predchozi soubor | `conversation` | `chat_answer` | `null` | Meta rozhovor o chovani/routeru, ne file request. |
 | `Panam co je na tom spatne?` | Po bezne odpovedi Panam, bez aktualni prilohy | `conversation` | `chat_answer` | `null` | Navazuje na konverzaci, nema automaticky hledat posledni prilohu. |
 | `Panam co je spatne v tom souboru?` | Aktualni priloha nebo predchozi podporovana priloha | `current_attachment` nebo `last_file_context` | `chat_answer` | `null` | Explicitni file subject + akce nad souborem. |

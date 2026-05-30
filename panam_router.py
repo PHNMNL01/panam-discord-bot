@@ -16,6 +16,7 @@ IGNORED_FILE_REFERENCE_TOKENS = {
     "csv",
     "pdf",
     "xlsx",
+    "docx",
     "json",
     "soubor",
     "dokument",
@@ -105,6 +106,8 @@ def detect_output_format(text: str, default: str = "md") -> str:
         return "md"
     if any(signal in normalized for signal in ("txt", "cisty text", "cisteho textu")):
         return "txt"
+    if re.search(r"\b(?:docx|wordu?|word\s+dokument)\b", normalized) is not None:
+        return "docx"
     if any(
         signal in normalized
         for signal in ("xlsx", "excel", "do excelu", "do tabulky", "tabulku", "tabulkove")
@@ -151,9 +154,10 @@ def has_explicit_file_subject(text: str) -> bool:
 def has_explicit_file_output_request(text: str) -> bool:
     normalized = normalize_natural_text(text)
     patterns = (
-        r"\bdo\s+(?:souboru|excelu|xlsx|csv|jsonu?|markdownu|txt)\b",
+        r"\bdo\s+(?:souboru|excelu|xlsx|csv|jsonu?|markdownu|txt|docx|wordu?)\b",
         r"\bdo\s+tabulky\b",
         r"\b(?:udelej|vytvor|priprav|preved|dej)\b.*\b(?:tabulku|tabulkove)\b",
+        r"\b(?:udelej|vytvor|priprav|preved|dej|zpracuj)\b.*\b(?:docx|wordu?|word\s+dokument)\b",
         r"\bjako\s+soubor\b",
         r"\bvrat\s+json\b",
         r"\budelej(?:\s+z\s+toho)?\s+(?:report|checklist|prehled|soubor)\b",
@@ -288,7 +292,7 @@ def decide_file_response_mode(text: str, extension: str | None = None) -> dict:
 
     if has_explicit_file_output_request(normalized):
         output_format = detect_output_format(text, default="md")
-        if output_format not in {"md", "txt"}:
+        if output_format not in {"md", "txt", "docx"}:
             output_format = "md"
 
         return {
@@ -299,7 +303,7 @@ def decide_file_response_mode(text: str, extension: str | None = None) -> dict:
 
     if contains_natural_signal(normalized, HUMAN_DOCUMENT_SIGNALS):
         output_format = detect_output_format(text, default="md")
-        if output_format not in {"md", "txt"}:
+        if output_format not in {"md", "txt", "docx"}:
             output_format = "md"
 
         return {
@@ -384,7 +388,7 @@ def validate_ai_file_intent(
 
     allowed_targets = {"conversation", "current_attachment", "last_file_context", "none"}
     allowed_modes = {"chat_answer", "human_document", "structured_data", "unsupported_direct_edit"}
-    allowed_formats = {"md", "txt", "json", "csv", "xlsx", None}
+    allowed_formats = {"md", "txt", "docx", "json", "csv", "xlsx", None}
 
     target = intent.get("target")
     mode = intent.get("mode")
@@ -410,7 +414,7 @@ def validate_ai_file_intent(
         return fallback_ai_file_intent()
 
     if mode == "human_document":
-        if output_format not in {"md", "txt", None}:
+        if output_format not in {"md", "txt", "docx", None}:
             return fallback_ai_file_intent()
         output_format = output_format or "md"
     elif mode == "structured_data":

@@ -15,6 +15,7 @@ import discord
 from discord import app_commands
 from dotenv import load_dotenv
 
+import panam_docx
 import panam_excel
 import panam_files
 import panam_memory
@@ -725,11 +726,11 @@ def get_help_text() -> str:
         "Obrázky: `.png`, `.jpg`, `.jpeg`, `.webp`, `.gif`. "
         "Dokumenty: `.txt`, `.md`, `.csv`, `.pdf`, `.docx`, `.xlsx` do 20 MB.\n"
         "`/analyze` nebo `Panam co je v tom souboru?` odpoví do chatu.\n"
-        "`/read_file` přečte dokument. `/process_file` vytvoří `.md`/`.txt`.\n"
+        "`/read_file` přečte dokument. `/process_file` vytvoří `.md`/`.txt`/`.docx`.\n"
         "`/extract_data` vytěží `json`, `csv`, `md` nebo `xlsx`.\n\n"
         "5. Přirozené file požadavky\n"
         "`Panam shrň ten soubor`, `Panam najdi chyby v té tabulce` -> odpověď do chatu\n"
-        "`Panam udělej z toho report`, `Panam dej mi to do souboru` -> nový MD/TXT soubor\n"
+        "`Panam udělej z toho report`, `Panam dej mi to do souboru` -> nový MD/TXT/DOCX soubor\n"
         "`Panam dej mi to do Excelu`, `Panam requirements do csv`, "
         "`Panam udělej z requirements tabulku` -> strukturovaný výstup\n"
         "Název posledního souboru, třeba `requirements`, umím spojit s file contextem. "
@@ -1205,18 +1206,36 @@ async def run_human_document_file_job(
             output_format=normalized_output_format,
         )
 
+        process_output_format = (
+            "md" if normalized_output_format == "docx" else normalized_output_format
+        )
         processed_text = await process_document_text(
             OPENAI_MODEL,
             extracted_text,
             instruction,
             input_path.name,
-            normalized_output_format,
+            process_output_format,
         )
-        output_path = panam_files.write_output_text(
-            job,
-            f"process_file_output{output_extension}",
-            processed_text,
-        )
+        if normalized_output_format == "docx":
+            output_path = panam_files.ensure_within_job(
+                job.output_dir / "process_file_output.docx",
+                job,
+            )
+            panam_docx.create_docx_from_text(processed_text, output_path)
+            job.output_files.append(
+                {
+                    "filename": output_path.name,
+                    "extension": output_path.suffix.lower(),
+                    "size_bytes": output_path.stat().st_size,
+                }
+            )
+            panam_files.write_job_metadata(job)
+        else:
+            output_path = panam_files.write_output_text(
+                job,
+                f"process_file_output{output_extension}",
+                processed_text,
+            )
         log_action(
             action_type,
             action_name,
@@ -1585,7 +1604,7 @@ async def handle_natural_file_request(
         log_action("natural_message", action_name, "started", message)
         await message.reply(
             "Puvodni Excel ani puvodni prilohu zatim primo neupravuju. "
-            "Muzu ale vytvorit novy XLSX, CSV, Markdown nebo TXT vystup.",
+            "Muzu ale vytvorit novy XLSX, CSV, Markdown, TXT nebo DOCX vystup.",
             mention_author=False,
         )
         log_action("natural_message", action_name, "success", message)
@@ -1682,7 +1701,7 @@ async def handle_natural_file_request(
     async with message.channel.typing():
         if mode == "human_document":
             output_format = decision.get("output_format", "md")
-            if output_format not in {"md", "txt"}:
+            if output_format not in {"md", "txt", "docx"}:
                 output_format = "md"
 
             decision["output_format"] = output_format
@@ -1817,7 +1836,7 @@ async def handle_ai_classified_file_request(
 
     if mode == "unsupported_direct_edit":
         await message.reply(
-            "Puvodni prilohu zatim primo neupravuju. Muzu ale vytvorit novy XLSX, CSV, Markdown nebo TXT vystup.",
+            "Puvodni prilohu zatim primo neupravuju. Muzu ale vytvorit novy XLSX, CSV, Markdown, TXT nebo DOCX vystup.",
             mention_author=False,
         )
         return True
@@ -3297,7 +3316,7 @@ async def file_job_test(
 @app_commands.describe(
     file="Dokument ke zpracovani",
     instruction="Co ma Panam s dokumentem udelat",
-    output_format="md nebo txt",
+    output_format="md, txt nebo docx",
 )
 @log_slash_command("process_file")
 async def process_file(
@@ -3329,9 +3348,9 @@ async def process_file(
         return
 
     normalized_output_format = output_format.lower().strip(".")
-    if normalized_output_format not in {"md", "txt"}:
+    if normalized_output_format not in {"md", "txt", "docx"}:
         await interaction.response.send_message(
-            "Podporovane output_format jsou jen md nebo txt.",
+            "Podporovane output_format jsou jen md, txt nebo docx.",
             ephemeral=True,
         )
         return
@@ -3411,18 +3430,36 @@ async def process_file(
             output_format=normalized_output_format,
         )
 
+        process_output_format = (
+            "md" if normalized_output_format == "docx" else normalized_output_format
+        )
         processed_text = await process_document_text(
             OPENAI_MODEL,
             extracted_text,
             instruction,
             input_path.name,
-            normalized_output_format,
+            process_output_format,
         )
-        output_path = panam_files.write_output_text(
-            job,
-            f"process_file_output{output_extension}",
-            processed_text,
-        )
+        if normalized_output_format == "docx":
+            output_path = panam_files.ensure_within_job(
+                job.output_dir / "process_file_output.docx",
+                job,
+            )
+            panam_docx.create_docx_from_text(processed_text, output_path)
+            job.output_files.append(
+                {
+                    "filename": output_path.name,
+                    "extension": output_path.suffix.lower(),
+                    "size_bytes": output_path.stat().st_size,
+                }
+            )
+            panam_files.write_job_metadata(job)
+        else:
+            output_path = panam_files.write_output_text(
+                job,
+                f"process_file_output{output_extension}",
+                processed_text,
+            )
         log_action(
             "slash_command",
             "process_file",
