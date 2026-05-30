@@ -1216,9 +1216,13 @@ async def run_human_document_file_job(
             input_path.name,
             process_output_format,
         )
+        output_filename = panam_files.build_panam_output_filename(
+            input_path.name,
+            output_extension,
+        )
         if normalized_output_format == "docx":
             output_path = panam_files.ensure_within_job(
-                job.output_dir / "process_file_output.docx",
+                job.output_dir / output_filename,
                 job,
             )
             panam_docx.create_docx_from_text(processed_text, output_path)
@@ -1233,7 +1237,7 @@ async def run_human_document_file_job(
         else:
             output_path = panam_files.write_output_text(
                 job,
-                f"process_file_output{output_extension}",
+                output_filename,
                 processed_text,
             )
         log_action(
@@ -1458,8 +1462,16 @@ async def run_structured_data_file_job(
         elif not structured_text.strip():
             raise ValueError("Markdown output is empty.")
 
+        output_filename = panam_files.build_panam_output_filename(
+            input_path.name,
+            output_extension,
+        )
+
         if normalized_output_format == "xlsx":
-            output_path = job.output_dir / "extracted_data.xlsx"
+            output_path = panam_files.ensure_within_job(
+                job.output_dir / output_filename,
+                job,
+            )
             panam_excel.create_xlsx_from_items(
                 get_items_for_xlsx(json_data),
                 output_path,
@@ -1476,7 +1488,7 @@ async def run_structured_data_file_job(
         else:
             output_path = panam_files.write_output_text(
                 job,
-                f"extracted_data{output_extension}",
+                output_filename,
                 structured_text,
             )
             output_status = "output_written"
@@ -3440,9 +3452,13 @@ async def process_file(
             input_path.name,
             process_output_format,
         )
+        output_filename = panam_files.build_panam_output_filename(
+            input_path.name,
+            output_extension,
+        )
         if normalized_output_format == "docx":
             output_path = panam_files.ensure_within_job(
-                job.output_dir / "process_file_output.docx",
+                job.output_dir / output_filename,
                 job,
             )
             panam_docx.create_docx_from_text(processed_text, output_path)
@@ -3457,7 +3473,7 @@ async def process_file(
         else:
             output_path = panam_files.write_output_text(
                 job,
-                f"process_file_output{output_extension}",
+                output_filename,
                 processed_text,
             )
         log_action(
@@ -3698,6 +3714,10 @@ async def extract_data(
             output_format=normalized_output_format,
         )
 
+        output_filename = panam_files.build_panam_output_filename(
+            input_path.name,
+            output_extension,
+        )
         json_data = None
         if normalized_output_format in {"json", "xlsx"}:
             try:
@@ -3738,7 +3758,7 @@ async def extract_data(
                     "json_validated_for_xlsx",
                     interaction,
                     job_id=job.job_id,
-                    filename="extracted_data.xlsx",
+                    filename=output_filename,
                     extension=".xlsx",
                     size_bytes=len(structured_text.encode("utf-8")),
                     output_format=normalized_output_format,
@@ -3755,14 +3775,17 @@ async def extract_data(
             "output_validated",
             interaction,
             job_id=job.job_id,
-            filename=f"extracted_data{output_extension}",
+            filename=output_filename,
             extension=output_extension,
             size_bytes=len(structured_text.encode("utf-8")),
             output_format=normalized_output_format,
         )
 
         if normalized_output_format == "xlsx":
-            output_path = job.output_dir / "extracted_data.xlsx"
+            output_path = panam_files.ensure_within_job(
+                job.output_dir / output_filename,
+                job,
+            )
             panam_excel.create_xlsx_from_items(
                 get_items_for_xlsx(json_data),
                 output_path,
@@ -3779,7 +3802,7 @@ async def extract_data(
         else:
             output_path = panam_files.write_output_text(
                 job,
-                f"extracted_data{output_extension}",
+                output_filename,
                 structured_text,
             )
             output_status = "output_written"

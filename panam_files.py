@@ -48,6 +48,31 @@ def safe_filename(filename: str) -> str:
     return name or "file"
 
 
+def build_panam_output_filename(
+    source_filename: str,
+    output_extension: str,
+    suffix: str = "_by_Panam",
+) -> str:
+    source_stem = Path(str(source_filename or "")).stem.strip()
+    if not source_stem:
+        safe_stem = "panam_output"
+    else:
+        safe_stem = safe_filename(source_stem)
+        if safe_stem == "file" and source_stem.lower() != "file":
+            safe_stem = "panam_output"
+
+    extension = str(output_extension or "").strip()
+    if extension.startswith("."):
+        extension = extension[1:]
+    extension = re.sub(r"[^A-Za-z0-9]+", "", extension)
+
+    filename = f"{safe_stem}{suffix}"
+    if extension:
+        filename = f"{filename}.{extension}"
+
+    return safe_filename(filename)
+
+
 def ensure_within_job(path: Path, job: FileJob) -> Path:
     resolved_path = path.resolve()
     resolved_base = job.base_dir.resolve()

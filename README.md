@@ -203,7 +203,7 @@ Priklady:
 /extract_data file:export.csv instruction:Vytahni jmeno, email a datum output_format:xlsx
 ```
 
-Pro `output_format=xlsx` AI nevytvari Excel primo. AI vrati strukturovana JSON data, Python je zvaliduje a vytvori z nich `extracted_data.xlsx`.
+Pro `output_format=xlsx` AI nevytvari Excel primo. AI vrati strukturovana JSON data, Python je zvaliduje a vytvori z nich soubor pojmenovany podle puvodni prilohy, napr. `export_by_Panam.xlsx`.
 
 Zakladni XLSX vystup v1:
 
