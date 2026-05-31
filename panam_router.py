@@ -3,7 +3,15 @@ from pathlib import Path
 import re
 import unicodedata
 
-from panam_phrases import DIRECT_FILE_EDIT_SIGNALS, HUMAN_DOCUMENT_SIGNALS
+import panam_spreadsheet
+from panam_phrases import (
+    CREATIVE_SPREADSHEET_EDIT_SIGNALS,
+    DIRECT_FILE_EDIT_SIGNALS,
+    HUMAN_DOCUMENT_SIGNALS,
+    SPREADSHEET_TRANSFORM_CONTEXT_SIGNALS,
+    SPREADSHEET_TRANSFORM_OPERATION_SIGNALS,
+    SPREADSHEET_TRANSFORM_SUBJECT_SIGNALS,
+)
 
 
 SUPPORTED_IMAGE_EXTENSIONS = (".png", ".jpg", ".jpeg", ".webp", ".gif")
@@ -91,6 +99,86 @@ def contains_natural_signal(text: str, signals: tuple[str, ...]) -> bool:
             return True
 
     return False
+
+
+def is_xlsx_extension(extension: str | None) -> bool:
+    return str(extension or "").lower().strip() == ".xlsx"
+
+
+def has_spreadsheet_transform_operation(text: str) -> bool:
+    normalized = normalize_natural_text(text)
+    if contains_natural_signal(normalized, SPREADSHEET_TRANSFORM_OPERATION_SIGNALS):
+        return True
+
+    patterns = (
+        r"\b(?:odstran|odstrante|smaz|smazat|vyhod|odeber)\b.*\bprazdne\b.*\bradky\b",
+        r"\b(?:nech|ponech|zachovej|vyfiltruj)\b.*\bradky\b.*\bkde\b.+(?:=|\bje\b|\brovna se\b).+",
+        r"\b(?:vyber|nech|ponech|zachovej)\b(?:\s+jen)?\s+sloupce?\b.+",
+        r"\b(?:serad|setrid|sort)\b.*\bpodle\b.+",
+        r"\b(?:najdi|detekuj|zobraz)\b.*\b(?:duplicity|duplicit|duplikaty)\b.*\bpodle\b.+",
+        r"\b(?:duplicity|duplicit|duplikaty)\b.*\bpodle\b.+",
+    )
+    return any(re.search(pattern, normalized) is not None for pattern in patterns)
+
+
+def has_spreadsheet_transform_context(text: str) -> bool:
+    normalized = normalize_natural_text(text)
+    return (
+        contains_natural_signal(normalized, SPREADSHEET_TRANSFORM_CONTEXT_SIGNALS)
+        or contains_natural_signal(normalized, SPREADSHEET_TRANSFORM_SUBJECT_SIGNALS)
+    )
+
+
+def has_direct_file_edit_request(text: str) -> bool:
+    return contains_natural_signal(text, DIRECT_FILE_EDIT_SIGNALS)
+
+
+def is_unsafe_creative_spreadsheet_request(text: str) -> bool:
+    normalized = normalize_natural_text(text)
+    if contains_natural_signal(normalized, CREATIVE_SPREADSHEET_EDIT_SIGNALS):
+        return True
+
+    patterns = (
+        r"\bneco\s+tam\s+dopln\b",
+        r"\bdopln\s+podle\s+sebe\b",
+        r"\bneco\s+vymysli\b",
+        r"\buprav\s+podle\s+sebe\b",
+        r"\budelej\s+podle\s+sebe\b",
+        r"\bzkus\s+to\s+nejak\s+vylepsit\b",
+    )
+    return any(re.search(pattern, normalized) is not None for pattern in patterns)
+
+
+def has_unsafe_creative_spreadsheet_request(
+    text: str,
+    extension: str | None = None,
+    has_xlsx_context: bool = False,
+) -> bool:
+    if not is_unsafe_creative_spreadsheet_request(text):
+        return False
+
+    return (
+        has_spreadsheet_transform_context(text)
+        or is_xlsx_extension(extension)
+        or has_xlsx_context
+    )
+
+
+def has_spreadsheet_transform_request(
+    text: str,
+    extension: str | None = None,
+    has_xlsx_context: bool = False,
+) -> bool:
+    if not (is_xlsx_extension(extension) or has_xlsx_context):
+        return False
+
+    if not has_spreadsheet_transform_operation(text):
+        return False
+
+    if has_spreadsheet_transform_context(text):
+        return True
+
+    return is_xlsx_extension(extension) or has_xlsx_context
 
 
 def detect_output_format(text: str, default: str = "md") -> str:
@@ -277,8 +365,38 @@ def get_attachment_context_question(text: str, attachment_kind: str) -> str:
     return "Analyzuj tuto prilohu a strucne popis, co obsahuje."
 
 
-def decide_file_response_mode(text: str, extension: str | None = None) -> dict:
+def decide_file_response_mode(
+    text: str,
+    extension: str | None = None,
+    has_xlsx_context: bool = False,
+) -> dict:
     normalized = normalize_natural_text(text)
+
+    if has_unsafe_creative_spreadsheet_request(
+        text,
+        extension=extension,
+        has_xlsx_context=has_xlsx_context,
+    ):
+        return {
+            "mode": "unsupported_creative_spreadsheet_edit",
+            "output_format": None,
+        }
+
+    if has_spreadsheet_transform_request(
+        text,
+        extension=extension,
+        has_xlsx_context=has_xlsx_context,
+    ):
+        try:
+            panam_spreadsheet.parse_transform_instruction(text)
+        except panam_spreadsheet.SpreadsheetTransformUserError:
+            pass
+        else:
+            return {
+                "mode": "spreadsheet_transform",
+                "instruction": text.strip(),
+                "output_format": "xlsx",
+            }
 
     if contains_natural_signal(normalized, DIRECT_FILE_EDIT_SIGNALS):
         return {"mode": "unsupported_direct_edit"}
@@ -387,7 +505,14 @@ def validate_ai_file_intent(
         return fallback_ai_file_intent()
 
     allowed_targets = {"conversation", "current_attachment", "last_file_context", "none"}
-    allowed_modes = {"chat_answer", "human_document", "structured_data", "unsupported_direct_edit"}
+    allowed_modes = {
+        "chat_answer",
+        "human_document",
+        "structured_data",
+        "spreadsheet_transform",
+        "unsupported_creative_spreadsheet_edit",
+        "unsupported_direct_edit",
+    }
     allowed_formats = {"md", "txt", "docx", "json", "csv", "xlsx", None}
 
     target = intent.get("target")
@@ -421,6 +546,12 @@ def validate_ai_file_intent(
         if output_format not in {"json", "csv", "md", "xlsx", None}:
             return fallback_ai_file_intent()
         output_format = output_format or "json"
+    elif mode == "spreadsheet_transform":
+        if output_format not in {"xlsx", None}:
+            return fallback_ai_file_intent()
+        output_format = "xlsx"
+    elif mode == "unsupported_creative_spreadsheet_edit":
+        output_format = None
     elif mode == "chat_answer":
         output_format = None
     elif mode == "unsupported_direct_edit":

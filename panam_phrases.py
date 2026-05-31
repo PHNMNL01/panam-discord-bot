@@ -245,6 +245,49 @@ DIRECT_FILE_EDIT_SIGNALS = (
     "zmen puvodni excel",
 )
 
+SPREADSHEET_TRANSFORM_SUBJECT_SIGNALS = (
+    "excel",
+    "excelu",
+    "xlsx",
+    "tabulka",
+    "tabulku",
+    "tabulce",
+)
+
+SPREADSHEET_TRANSFORM_OPERATION_SIGNALS = (
+    "odstran prazdne radky",
+    "odstrante prazdne radky",
+    "smaz prazdne radky",
+    "smazat prazdne radky",
+    "nech jen radky kde",
+    "vyfiltruj radky kde",
+    "vyber sloupce",
+    "nech jen sloupce",
+    "serad podle",
+    "serad ten excel podle",
+    "najdi duplicity podle",
+)
+
+SPREADSHEET_TRANSFORM_CONTEXT_SIGNALS = (
+    "uprav ten excel",
+    "uprav tento excel",
+    "uprav tu tabulku",
+    "zmen ten excel",
+    "zmen tento excel",
+    "prepracuj ten excel",
+)
+
+CREATIVE_SPREADSHEET_EDIT_SIGNALS = (
+    "hezci tabulka",
+    "hezci",
+    "neco tam dopln",
+    "dopln podle sebe",
+    "neco vymysli",
+    "uprav podle sebe",
+    "udelej podle sebe",
+    "zkus to nejak vylepsit",
+)
+
 ATTACHMENT_ANALYZE_SUBJECTS = (
     ATTACHMENT_ANALYZE_TRIGGERS
     + DOCUMENT_ANALYZE_TRIGGERS

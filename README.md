@@ -114,6 +114,7 @@ Soubory:
 - `/read_file` - precte dokument a odpovi na otazku k obsahu.
 - `/process_file` - vytvori novy lidsky citelny MD, TXT nebo DOCX vystup.
 - `/extract_data` - vytvori strukturovana data jako JSON, CSV, Markdown nebo XLSX.
+- `/transform_excel` - bezpecne vytvori novy upraveny XLSX z puvodniho XLSX.
 - `/file_job_test` - technicky test file-job pipeline.
 
 ## Podporovane Prilohy
@@ -214,6 +215,52 @@ Zakladni XLSX vystup v1:
 - zalamovani dlouheho textu
 
 XLSX vystup zatim neresi barvy, slozite styly, vice listu, grafy, makra, vzorce ani upravu puvodniho XLSX.
+
+### Excel transform v1
+
+Pouzij `/transform_excel`, kdyz chces jednoduse upravit existujici XLSX deterministickou operaci.
+
+Panam nikdy needituje puvodni Discord prilohu. Vzdy vytvori novy XLSX soubor pojmenovany podle puvodniho souboru, napr. `export_by_Panam.xlsx`.
+
+V1 podporuje:
+
+- odstraneni prazdnych radku
+- vyber konkretnich sloupcu podle nazvu
+- filtr hodnoty ve sloupci, napr. `Stav = Chyba`
+- serazeni podle sloupce vzestupne
+- detekci duplicit podle vybraneho sloupce
+
+Nazvy sloupcu se porovnavaji tolerantne bez diakritiky a velikosti pismen. Panam umi najit i delsi nazvy typu `Jmeno a prijmeni` proti hlavicce `Jméno a příjmení`.
+
+Priklady:
+
+```text
+/transform_excel file:export.xlsx instruction:odstran prazdne radky
+/transform_excel file:export.xlsx instruction:nech jen radky kde Stav = Chyba
+/transform_excel file:export.xlsx instruction:vyber sloupce Jmeno, Email
+```
+
+Kdyz instrukce nejde spolehlive prevest na podporovanou operaci, Panam neprovede zadnou AI editaci dat a vrati seznam podporovanych prikladu.
+
+### Natural Excel transform
+
+Kdyz je v aktualni zprave nebo poslednim souborovem kontextu XLSX, Panam umi stejne bezpecne transformace spustit i prirozenou vetou. Natural router jen rozpozna intent; samotna prace jde pres stejnou file-job pipeline jako `/transform_excel`.
+
+Priklady:
+
+```text
+Panam uprav ten Excel a nech jen radky kde Oddeleni = IT
+Panam uprav tu tabulku a vyber sloupce Jmeno a Prijmeni, Soukromy email
+Panam serad ten Excel podle Datum nastupu
+Panam odstran prazdne radky z te tabulky
+Panam najdi duplicity podle Soukromy email
+Panam z toho Excelu nech jen radky kde Licence IFS = Ano
+Panam v tom Excelu vyber sloupce Jmeno a Prijmeni, Oddeleni, Datum nastupu
+```
+
+I pri prirozene vete Panam nikdy nemeni puvodni Discord prilohu. Vzdy vytvori novy XLSX vystup.
+
+Panam zamerne odmita neurcite kreativni upravy Excelu, jako `udelat hezci tabulku`, `neco doplnit podle sebe` nebo `neco vymyslet`. Data si nedomysli a misto toho vrati bezpecny fallback s podporovanymi deterministickymi operacemi.
 
 ## Prirozene Ovladani
 
@@ -630,6 +677,7 @@ panam-discord-bot/
 |-- panam_memory.py
 |-- panam_phrases.py
 |-- panam_router.py
+|-- panam_spreadsheet.py
 |-- panam_prompts/
 |-- scripts/
 |-- requirements.txt
@@ -656,11 +704,13 @@ Soubory:
 - `panam_file_context.py` - RAM last-file context, file summary a posledni router decision podle kanalu.
 - `panam_files.py` - izolovana file-job pipeline.
 - `panam_excel.py` - tvorba jednoducheho XLSX vystupu ze strukturovanych dat.
+- `panam_spreadsheet.py` - bezpecne deterministicke XLSX transformace v1.
 - `panam_memory.py` - kratka RAM konverzacni pamet podle kanalu.
 - `requirements.txt` - Python zavislosti.
 - `docs/router_test_cases.md` - testovaci priklady pro natural router a classifier.
 - `scripts/docx_smoke_test.py` - lokalni manualni test DOCX helperu.
 - `scripts/router_smoke_test.py` - lokalni manualni test natural file routeru.
+- `scripts/spreadsheet_transform_smoke_test.py` - lokalni manualni test XLSX transform helperu.
 - `.env.example` - sablona konfigurace.
 - `.env` - lokalni konfigurace s tokeny a klici, nepatri do gitu.
 - `notes.json` - lokalni poznamky, nepatri do gitu.

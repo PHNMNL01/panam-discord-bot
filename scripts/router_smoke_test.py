@@ -14,16 +14,64 @@ if hasattr(sys.stdout, "reconfigure"):
 
 
 TEST_CASES = [
-    ("Panam dej mi to do Wordu", "human_document", "docx"),
-    ("Panam udělej z toho DOCX", "human_document", "docx"),
-    ("Panam připrav z toho Word dokument", "human_document", "docx"),
-    ("Panam dej mi to do Excelu", "structured_data", "xlsx"),
-    ("Panam udělej z toho tabulku", "structured_data", "xlsx"),
-    ("Panam udělej z toho soubor csv", "structured_data", "csv"),
-    ("Panam vrať JSON", "structured_data", "json"),
-    ("Panam dej mi to do souboru", "human_document", "md"),
-    ("Panam přepiš to do čistého textu", "human_document", "txt"),
-    ("Panam uprav ten Excel", "unsupported_direct_edit", None),
+    ("Panam dej mi to do Wordu", "human_document", "docx", None),
+    ("Panam udelej z toho DOCX", "human_document", "docx", None),
+    ("Panam priprav z toho Word dokument", "human_document", "docx", None),
+    ("Panam dej mi to do Excelu", "structured_data", "xlsx", None),
+    ("Panam udelej z toho tabulku", "structured_data", "xlsx", None),
+    ("Panam udelej z toho soubor csv", "structured_data", "csv", None),
+    ("Panam vrat JSON", "structured_data", "json", None),
+    ("Panam dej mi to do souboru", "human_document", "md", None),
+    ("Panam prepis to do cisteho textu", "human_document", "txt", None),
+    (
+        "Panam udelej z toho hezci tabulku a neco tam dopln podle sebe",
+        "unsupported_creative_spreadsheet_edit",
+        None,
+        None,
+    ),
+    (
+        "Panam udelej z toho hezci tabulku",
+        "unsupported_creative_spreadsheet_edit",
+        None,
+        None,
+    ),
+    (
+        "Panam neco tam dopln podle sebe",
+        "unsupported_creative_spreadsheet_edit",
+        None,
+        ".xlsx",
+    ),
+    ("Panam uprav ten Excel", "unsupported_direct_edit", None, ".xlsx"),
+    (
+        "Panam uprav ten Excel a nech jen radky kde Oddeleni = IT",
+        "spreadsheet_transform",
+        "xlsx",
+        ".xlsx",
+    ),
+    (
+        "Panam odstran prazdne radky z te tabulky",
+        "spreadsheet_transform",
+        "xlsx",
+        ".xlsx",
+    ),
+    (
+        "Panam vyber sloupce Jmeno a Prijmeni, Soukromy email",
+        "spreadsheet_transform",
+        "xlsx",
+        ".xlsx",
+    ),
+    (
+        "Panam serad ten Excel podle Datum nastupu",
+        "spreadsheet_transform",
+        "xlsx",
+        ".xlsx",
+    ),
+    (
+        "Panam najdi duplicity podle Soukromy email",
+        "spreadsheet_transform",
+        "xlsx",
+        ".xlsx",
+    ),
 ]
 
 
@@ -38,9 +86,13 @@ def format_result(mode: str | None, output_format: str | None) -> str:
 def main() -> int:
     failures = 0
 
-    for input_text, expected_mode, expected_output_format in TEST_CASES:
+    for input_text, expected_mode, expected_output_format, extension in TEST_CASES:
         request_text = strip_panam_prefix(input_text)
-        result = decide_file_response_mode(request_text)
+        result = decide_file_response_mode(
+            request_text,
+            extension=extension,
+            has_xlsx_context=extension == ".xlsx",
+        )
         actual_mode = result.get("mode")
         actual_output_format = result.get("output_format")
 

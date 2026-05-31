@@ -19,6 +19,7 @@ import panam_docx
 import panam_excel
 import panam_files
 import panam_memory
+import panam_spreadsheet
 from panam_file_context import (
     clear_last_file_context,
     clear_last_router_decision,
@@ -62,8 +63,11 @@ from panam_phrases import (
 )
 from panam_router import (
     decide_file_response_mode,
+    has_direct_file_edit_request,
     has_explicit_file_action_request,
     has_explicit_file_output_request,
+    has_spreadsheet_transform_request,
+    has_unsafe_creative_spreadsheet_request,
     is_ambiguous_context_request,
     is_followup_to_file_summary,
     is_meta_router_or_behavior_discussion,
@@ -101,6 +105,11 @@ MAX_XLSX_SHEETS = 10
 MAX_XLSX_ROWS_PER_SHEET = 500
 MAX_XLSX_COLUMNS_PER_SHEET = 50
 COMMAND_STATUSES: dict[int, str] = {}
+CREATIVE_SPREADSHEET_FALLBACK_MESSAGE = (
+    "Tohle je moc volná úprava. Původní Excel neupravuju a data si nedomýšlím. "
+    "Umím bezpečně udělat nový XLSX třeba: odstranit prázdné řádky, filtrovat řádky podle sloupce, "
+    "vybrat sloupce, seřadit podle sloupce nebo najít duplicity."
+)
 
 
 logger = logging.getLogger("panam")
@@ -552,6 +561,22 @@ async def find_recent_supported_attachment(channel) -> discord.Attachment | None
 
         for attachment in message.attachments:
             if get_attachment_kind(attachment) is not None:
+                return attachment
+
+    return None
+
+
+async def find_recent_xlsx_attachment(channel) -> discord.Attachment | None:
+    history = getattr(channel, "history", None)
+    if history is None:
+        return None
+
+    async for message in history(limit=15):
+        if message.author.bot:
+            continue
+
+        for attachment in message.attachments:
+            if get_file_extension(attachment.filename) == ".xlsx":
                 return attachment
 
     return None
@@ -1097,6 +1122,10 @@ def get_natural_file_action_name(decision: dict) -> str:
         return "process_file"
     if mode == "structured_data":
         return "extract_data"
+    if mode == "spreadsheet_transform":
+        return "transform_excel"
+    if mode == "unsupported_creative_spreadsheet_edit":
+        return "unsupported_creative_spreadsheet_edit"
     if mode == "unsupported_direct_edit":
         return "unsupported_direct_edit"
     return "chat_answer"
@@ -1574,6 +1603,165 @@ async def run_structured_data_file_job(
             panam_files.cleanup_job(job)
 
 
+async def run_spreadsheet_transform_file_job(
+    source,
+    file: discord.Attachment,
+    instruction: str,
+    action_type: str,
+    action_name: str = "transform_excel",
+) -> None:
+    extension = get_file_extension(file.filename)
+    job = None
+
+    try:
+        context = get_safe_context(source)
+        job = panam_files.create_file_job(
+            user_id=get_context_int(context, "user_id"),
+            channel_id=get_context_int(context, "channel_id"),
+            action="spreadsheet_transform",
+        )
+        log_action(
+            action_type,
+            action_name,
+            "started",
+            source,
+            job_id=job.job_id,
+            filename=Path(file.filename).name,
+            extension=extension,
+            size_bytes=file.size,
+            output_format="xlsx",
+        )
+
+        input_path = await panam_files.save_attachment_to_job(file, job)
+        log_action(
+            action_type,
+            action_name,
+            "attachment_saved",
+            source,
+            job_id=job.job_id,
+            filename=input_path.name,
+            extension=input_path.suffix.lower(),
+            size_bytes=input_path.stat().st_size,
+            output_format="xlsx",
+        )
+
+        output_filename = panam_files.build_panam_output_filename(
+            input_path.name,
+            ".xlsx",
+        )
+        output_path = panam_files.ensure_within_job(
+            job.output_dir / output_filename,
+            job,
+        )
+        result = panam_spreadsheet.transform_xlsx(
+            input_path,
+            output_path,
+            instruction,
+        )
+        job.output_files.append(
+            {
+                "filename": output_path.name,
+                "extension": output_path.suffix.lower(),
+                "size_bytes": output_path.stat().st_size,
+            }
+        )
+        panam_files.write_job_metadata(job)
+        log_action(
+            action_type,
+            action_name,
+            "xlsx_output_written",
+            source,
+            job_id=job.job_id,
+            filename=output_path.name,
+            extension=output_path.suffix.lower(),
+            size_bytes=output_path.stat().st_size,
+            output_format="xlsx",
+            rows_read=result.rows_read,
+            rows_written=result.rows_written,
+            columns_written=result.columns_written,
+            operations=",".join(result.operations),
+        )
+
+        job.status = "success"
+        job.finished_at = datetime.now(timezone.utc).isoformat()
+        panam_files.write_job_metadata(job)
+
+        await send_source_message(
+            source,
+            "Excel je upraveny jako novy soubor. Puvodni priloha zustala beze zmen.",
+            result.output_path,
+        )
+        set_last_file_context(
+            context.get("channel_id"),
+            Path(file.filename).name,
+            extension,
+            "spreadsheet_transform",
+            output_path.name,
+        )
+        log_action(
+            action_type,
+            action_name,
+            "success",
+            source,
+            job_id=job.job_id,
+            filename=Path(file.filename).name,
+            extension=extension,
+            size_bytes=file.size,
+            output_format="xlsx",
+            rows_read=result.rows_read,
+            rows_written=result.rows_written,
+            columns_written=result.columns_written,
+            operations=",".join(result.operations),
+        )
+
+    except panam_spreadsheet.SpreadsheetTransformUserError as error:
+        mark_source_error(source)
+        if job is not None:
+            job.status = "error"
+            job.finished_at = datetime.now(timezone.utc).isoformat()
+            panam_files.write_job_metadata(job)
+            log_action(
+                action_type,
+                action_name,
+                "error",
+                source,
+                job_id=job.job_id,
+                filename=Path(file.filename).name,
+                extension=extension,
+                size_bytes=file.size,
+                output_format="xlsx",
+            )
+        logger.warning(
+            "spreadsheet_transform user_error job_id=%s",
+            job.job_id if job else None,
+        )
+        await send_source_message(source, str(error))
+
+    except Exception:
+        mark_source_error(source)
+        if job is not None:
+            job.status = "error"
+            job.finished_at = datetime.now(timezone.utc).isoformat()
+            panam_files.write_job_metadata(job)
+            log_action(
+                action_type,
+                action_name,
+                "error",
+                source,
+                job_id=job.job_id,
+                filename=Path(file.filename).name,
+                extension=extension,
+                size_bytes=file.size,
+                output_format="xlsx",
+            )
+        logger.exception("Chyba pri spreadsheet_transform file-job pipeline")
+        await send_source_message(source, "Neco se pokazilo pri uprave Excelu.")
+
+    finally:
+        if job is not None:
+            panam_files.cleanup_job(job)
+
+
 def remember_router_decision(
     message: discord.Message,
     decision: dict,
@@ -1607,6 +1795,20 @@ async def handle_natural_file_request(
     mode = decision.get("mode")
     action_name = get_natural_file_action_name(decision)
 
+    if mode == "unsupported_creative_spreadsheet_edit":
+        remember_router_decision(
+            message,
+            decision,
+            "current_attachment" if file is not None else "none",
+        )
+        log_action("natural_message", action_name, "started", message)
+        await message.reply(
+            CREATIVE_SPREADSHEET_FALLBACK_MESSAGE,
+            mention_author=False,
+        )
+        log_action("natural_message", action_name, "success", message)
+        return
+
     if mode == "unsupported_direct_edit":
         remember_router_decision(
             message,
@@ -1616,7 +1818,8 @@ async def handle_natural_file_request(
         log_action("natural_message", action_name, "started", message)
         await message.reply(
             "Puvodni Excel ani puvodni prilohu zatim primo neupravuju. "
-            "Muzu ale vytvorit novy XLSX, CSV, Markdown, TXT nebo DOCX vystup.",
+            "Muzu ale vytvorit novy XLSX vystup, kdyz pozadas o podporovanou jednoduchou upravu.\n\n"
+            f"{panam_spreadsheet.unsupported_instruction_message()}",
             mention_author=False,
         )
         log_action("natural_message", action_name, "success", message)
@@ -1711,6 +1914,25 @@ async def handle_natural_file_request(
         return
 
     async with message.channel.typing():
+        if mode == "spreadsheet_transform":
+            if extension != ".xlsx":
+                remember_router_decision(message, decision)
+                await message.reply(
+                    "Excel transform v1 podporuje jen XLSX soubory. Puvodni prilohu neupravuju.",
+                    mention_author=False,
+                )
+                return
+
+            decision["output_format"] = "xlsx"
+            remember_router_decision(message, decision)
+            await run_spreadsheet_transform_file_job(
+                message,
+                file,
+                decision.get("instruction", message.content or ""),
+                "natural_message",
+            )
+            return
+
         if mode == "human_document":
             output_format = decision.get("output_format", "md")
             if output_format not in {"md", "txt", "docx"}:
@@ -1848,7 +2070,16 @@ async def handle_ai_classified_file_request(
 
     if mode == "unsupported_direct_edit":
         await message.reply(
-            "Puvodni prilohu zatim primo neupravuju. Muzu ale vytvorit novy XLSX, CSV, Markdown, TXT nebo DOCX vystup.",
+            "Puvodni prilohu zatim primo neupravuju. "
+            "Muzu ale vytvorit novy XLSX vystup, kdyz pozadas o podporovanou jednoduchou upravu.\n\n"
+            f"{panam_spreadsheet.unsupported_instruction_message()}",
+            mention_author=False,
+        )
+        return True
+
+    if mode == "unsupported_creative_spreadsheet_edit":
+        await message.reply(
+            CREATIVE_SPREADSHEET_FALLBACK_MESSAGE,
             mention_author=False,
         )
         return True
@@ -1875,6 +2106,15 @@ async def handle_ai_classified_file_request(
             "mode": "structured_data",
             "instruction": intent.get("instruction") or request_text,
             "output_format": intent.get("output_format") or "json",
+            "classifier_used": True,
+            "confidence": intent.get("confidence"),
+        }
+    elif mode == "spreadsheet_transform":
+        decision = {
+            "target": target,
+            "mode": "spreadsheet_transform",
+            "instruction": intent.get("instruction") or request_text,
+            "output_format": "xlsx",
             "classifier_used": True,
             "confidence": intent.get("confidence"),
         }
@@ -2068,7 +2308,28 @@ class DiscordAIBot(discord.Client):
         explicit_file_output_request = has_explicit_file_output_request(request_text)
         explicit_file_action_request = has_explicit_file_action_request(request_text)
         meta_router_discussion = is_meta_router_or_behavior_discussion(request_text)
+        direct_file_edit_request = has_direct_file_edit_request(request_text)
         last_file_context = get_last_file_context(message.channel.id)
+        last_context_extension = (
+            str(last_file_context.get("source_extension") or "").lower()
+            if last_file_context is not None
+            else ""
+        )
+        has_xlsx_file_context = (
+            get_file_extension(current_file.filename) == ".xlsx"
+            if current_file is not None
+            else last_context_extension == ".xlsx"
+        )
+        spreadsheet_transform_candidate = has_spreadsheet_transform_request(
+            request_text,
+            get_file_extension(current_file.filename) if current_file is not None else last_context_extension,
+            has_xlsx_context=has_xlsx_file_context,
+        )
+        unsafe_creative_spreadsheet_candidate = has_unsafe_creative_spreadsheet_request(
+            request_text,
+            get_file_extension(current_file.filename) if current_file is not None else last_context_extension,
+            has_xlsx_context=has_xlsx_file_context,
+        )
         last_file_reference = (
             current_file is None
             and not meta_router_discussion
@@ -2077,14 +2338,22 @@ class DiscordAIBot(discord.Client):
         file_router_candidate = (
             explicit_file_output_request
             or explicit_file_action_request
+            or spreadsheet_transform_candidate
+            or unsafe_creative_spreadsheet_candidate
+            or direct_file_edit_request
             or last_file_reference
         )
         if file_router_candidate and selected_file is None:
-            selected_file = await find_recent_supported_attachment(message.channel)
+            selected_file = (
+                await find_recent_xlsx_attachment(message.channel)
+                if spreadsheet_transform_candidate or unsafe_creative_spreadsheet_candidate
+                else await find_recent_supported_attachment(message.channel)
+            )
 
         file_decision = decide_file_response_mode(
             request_text,
             get_file_extension(selected_file.filename) if selected_file is not None else None,
+            has_xlsx_context=has_xlsx_file_context,
         )
 
         if (
@@ -2106,9 +2375,11 @@ class DiscordAIBot(discord.Client):
 
         if file_router_candidate and (
             selected_file is not None
-            or file_decision.get("mode") in {"human_document", "structured_data", "unsupported_direct_edit"}
+            or file_decision.get("mode") in {"human_document", "structured_data", "spreadsheet_transform", "unsupported_creative_spreadsheet_edit", "unsupported_direct_edit"}
             or explicit_file_output_request
             or explicit_file_action_request
+            or spreadsheet_transform_candidate
+            or unsafe_creative_spreadsheet_candidate
             or last_file_reference
         ):
             file_decision["target"] = (
@@ -3319,6 +3590,51 @@ async def file_job_test(
     finally:
         if job is not None:
             panam_files.cleanup_job(job)
+
+
+@bot.tree.command(
+    name="transform_excel",
+    description="Bezpecne uprav XLSX podle jednoduche instrukce a vrat novy soubor."
+)
+@app_commands.describe(
+    file="XLSX soubor k uprave",
+    instruction="Jednoducha deterministicka uprava Excelu",
+)
+@log_slash_command("transform_excel")
+async def transform_excel(
+    interaction: discord.Interaction,
+    file: discord.Attachment,
+    instruction: str,
+) -> None:
+    if not is_interaction_allowed(interaction, "transform_excel"):
+        await interaction.response.send_message(
+            "Tady nemam povolene odpovidat.",
+            ephemeral=True,
+        )
+        return
+
+    if file.size > MAX_DOCUMENT_SIZE_BYTES:
+        await interaction.response.send_message(
+            "Ten soubor je moc velky. Zatim beru max 20 MB.",
+            ephemeral=True,
+        )
+        return
+
+    extension = get_file_extension(file.filename)
+    if extension != ".xlsx":
+        await interaction.response.send_message(
+            "Tenhle command podporuje jen XLSX soubory.",
+            ephemeral=True,
+        )
+        return
+
+    await interaction.response.defer(thinking=True)
+    await run_spreadsheet_transform_file_job(
+        interaction,
+        file,
+        instruction,
+        "slash_command",
+    )
 
 
 @bot.tree.command(
