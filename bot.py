@@ -16,6 +16,7 @@ from discord import app_commands
 from dotenv import load_dotenv
 
 import panam_docx
+import panam_docx_transform
 import panam_excel
 import panam_files
 import panam_memory
@@ -38,6 +39,7 @@ from panam_ai import (
     shorten_for_discord,
     summarize_channel_messages,
     summarize_text,
+    transform_docx_text,
 )
 from panam_phrases import (
     ATTACHMENT_ANALYZE_PATTERNS,
@@ -64,9 +66,11 @@ from panam_phrases import (
 from panam_router import (
     decide_file_response_mode,
     has_direct_file_edit_request,
+    has_docx_transform_request,
     has_explicit_file_action_request,
     has_explicit_file_output_request,
     has_spreadsheet_transform_request,
+    has_unsafe_creative_docx_request,
     has_unsafe_creative_spreadsheet_request,
     is_ambiguous_context_request,
     is_followup_to_file_summary,
@@ -582,6 +586,22 @@ async def find_recent_xlsx_attachment(channel) -> discord.Attachment | None:
     return None
 
 
+async def find_recent_docx_attachment(channel) -> discord.Attachment | None:
+    history = getattr(channel, "history", None)
+    if history is None:
+        return None
+
+    async for message in history(limit=15):
+        if message.author.bot:
+            continue
+
+        for attachment in message.attachments:
+            if get_file_extension(attachment.filename) == ".docx":
+                return attachment
+
+    return None
+
+
 async def analyze_selected_attachment(file: discord.Attachment, question: str) -> str:
     attachment_kind = get_attachment_kind(file)
     if attachment_kind is None:
@@ -736,7 +756,7 @@ def get_help_text() -> str:
         "1. Slash commandy\n"
         "`/ask`, `/summary`, `/channel_summary`, `/search_messages`, `/panam_talk`\n"
         "`/note_add`, `/note_list`, `/note_search`, `/todo_add`, `/todo_list`, `/todo_done`\n"
-        "`/analyze`, `/read_file`, `/process_file`, `/extract_data`, `/file_job_test`\n"
+        "`/analyze`, `/read_file`, `/process_file`, `/extract_data`, `/transform_docx`, `/transform_excel`, `/file_job_test`\n"
         "`/memory_clear`, `/ping`, `/help`\n\n"
         "2. Běžný chat\n"
         "`Panam <dotaz>`, `Panam řekni mi <dotaz>`, `Panam odpověz <dotaz>`\n"
@@ -1122,8 +1142,12 @@ def get_natural_file_action_name(decision: dict) -> str:
         return "process_file"
     if mode == "structured_data":
         return "extract_data"
+    if mode == "docx_transform":
+        return "transform_docx"
     if mode == "spreadsheet_transform":
         return "transform_excel"
+    if mode == "unsupported_creative_docx_edit":
+        return "unsupported_creative_docx_edit"
     if mode == "unsupported_creative_spreadsheet_edit":
         return "unsupported_creative_spreadsheet_edit"
     if mode == "unsupported_direct_edit":
@@ -1143,6 +1167,77 @@ async def send_source_message(source, text: str, file_path: Path | None = None) 
         await source.reply(text, mention_author=False)
     else:
         await source.reply(text, file=discord.File(file_path), mention_author=False)
+
+
+FILE_JOB_OPERATION_FALLBACKS = {
+    "process_file": "zpracování dokumentu podle instrukce",
+    "extract_data": "extrakce strukturovaných dat",
+    "transform_excel": "podporovaná Excel transformace",
+    "spreadsheet_transform": "podporovaná Excel transformace",
+    "transform_docx": "podporovaná DOCX transformace",
+    "docx_transform": "podporovaná DOCX transformace",
+    "file_job_test": "technický test file pipeline",
+}
+
+OUTPUT_FORMAT_LABELS = {
+    "csv": "CSV",
+    "docx": "DOCX",
+    "excel": "Excel",
+    "json": "JSON",
+    "markdown": "Markdown",
+    "md": "Markdown",
+    "txt": "TXT",
+    "xlsx": "XLSX",
+}
+
+
+def build_file_job_success_message(
+    output_format: str,
+    action_name: str,
+    operation_summary: str | None = None,
+    row_count_before: int | None = None,
+    row_count_after: int | None = None,
+    column_count_before: int | None = None,
+    column_count_after: int | None = None,
+    paragraph_count_before: int | None = None,
+    paragraph_count_after: int | None = None,
+) -> str:
+    normalized_format = (output_format or "").lower().strip().strip(".")
+    normalized_action = (action_name or "").lower().strip()
+    output_label = OUTPUT_FORMAT_LABELS.get(
+        normalized_format,
+        normalized_format.upper() if normalized_format else "Soubor",
+    )
+    summary = (operation_summary or "").strip() or FILE_JOB_OPERATION_FALLBACKS.get(
+        normalized_action,
+        "vytvoření výstupního souboru",
+    )
+
+    if normalized_action in {"transform_excel", "spreadsheet_transform"}:
+        intro = "Excel jsem upravila jako nový soubor."
+    elif normalized_action in {"transform_docx", "docx_transform"}:
+        intro = "DOCX jsem upravila jako nový soubor."
+    else:
+        intro = f"{output_label} jsem vytvořila jako nový soubor."
+
+    message_parts = [
+        intro,
+        f"Provedená změna: {summary}.",
+    ]
+    if row_count_before is not None and row_count_after is not None:
+        message_parts.append(f"Řádky: {row_count_before} → {row_count_after}.")
+    if (
+        column_count_before is not None
+        and column_count_after is not None
+        and column_count_before != column_count_after
+    ):
+        message_parts.append(f"Sloupce: {column_count_before} → {column_count_after}.")
+    if paragraph_count_before is not None and paragraph_count_after is not None:
+        message_parts.append(
+            f"Odstavce: {paragraph_count_before} → {paragraph_count_after}."
+        )
+    message_parts.append("Původní příloha zůstala beze změn.")
+    return " ".join(message_parts)
 
 
 def mark_source_error(source) -> None:
@@ -1285,7 +1380,14 @@ async def run_human_document_file_job(
         job.finished_at = datetime.now(timezone.utc).isoformat()
         panam_files.write_job_metadata(job)
 
-        await send_source_message(source, "Soubor je zpracovany.", output_path)
+        await send_source_message(
+            source,
+            build_file_job_success_message(
+                normalized_output_format,
+                action_name,
+            ),
+            output_path,
+        )
         set_last_file_context(
             context.get("channel_id"),
             Path(file.filename).name,
@@ -1538,7 +1640,14 @@ async def run_structured_data_file_job(
         job.finished_at = datetime.now(timezone.utc).isoformat()
         panam_files.write_job_metadata(job)
 
-        await send_source_message(source, "Data jsou vytezena.", output_path)
+        await send_source_message(
+            source,
+            build_file_job_success_message(
+                normalized_output_format,
+                action_name,
+            ),
+            output_path,
+        )
         set_last_file_context(
             context.get("channel_id"),
             Path(file.filename).name,
@@ -1686,29 +1795,17 @@ async def run_spreadsheet_transform_file_job(
         job.finished_at = datetime.now(timezone.utc).isoformat()
         panam_files.write_job_metadata(job)
 
-        success_message_parts = [
-            "Excel jsem upravila jako nový soubor.",
-            f"Provedená změna: {result.operation_summary}.",
-        ]
-        if (
-            result.row_count_before is not None
-            and result.row_count_after is not None
-        ):
-            success_message_parts.append(
-                f"Řádky: {result.row_count_before} -> {result.row_count_after}."
-            )
-        if (
-            result.column_count_before is not None
-            and result.column_count_after is not None
-            and result.column_count_before != result.column_count_after
-        ):
-            success_message_parts.append(
-                f"Sloupce: {result.column_count_before} -> {result.column_count_after}."
-            )
-        success_message_parts.append("Původní příloha zůstala beze změn.")
         await send_source_message(
             source,
-            " ".join(success_message_parts),
+            build_file_job_success_message(
+                "xlsx",
+                action_name,
+                result.operation_summary,
+                row_count_before=result.row_count_before,
+                row_count_after=result.row_count_after,
+                column_count_before=result.column_count_before,
+                column_count_after=result.column_count_after,
+            ),
             result.output_path,
         )
         set_last_file_context(
@@ -1782,6 +1879,231 @@ async def run_spreadsheet_transform_file_job(
             panam_files.cleanup_job(job)
 
 
+async def run_docx_transform_file_job(
+    source,
+    file: discord.Attachment,
+    instruction: str,
+    action_type: str,
+    action_name: str = "transform_docx",
+) -> None:
+    extension = get_file_extension(file.filename)
+    job = None
+
+    try:
+        operation = panam_docx_transform.detect_docx_transform_operation(instruction)
+        operation_name = str(operation.get("operation") or "unknown")
+        operation_summary = str(
+            operation.get("operation_summary") or "provedena podporovaná DOCX transformace"
+        )
+
+        if panam_docx_transform.contains_sensitive_docx_transform_signal(instruction):
+            raise panam_docx_transform.DocxTransformUserError(
+                "Tenhle DOCX transform nepouzivam pro hesla, tokeny, HR data, zakaznicka data ani citliva data."
+            )
+
+        context = get_safe_context(source)
+        job = panam_files.create_file_job(
+            user_id=get_context_int(context, "user_id"),
+            channel_id=get_context_int(context, "channel_id"),
+            action="docx_transform",
+        )
+        log_action(
+            action_type,
+            action_name,
+            "started",
+            source,
+            job_id=job.job_id,
+            filename=Path(file.filename).name,
+            extension=extension,
+            size_bytes=file.size,
+            output_format="docx",
+            operation=operation_name,
+        )
+
+        input_path = await panam_files.save_attachment_to_job(file, job)
+        log_action(
+            action_type,
+            action_name,
+            "attachment_saved",
+            source,
+            job_id=job.job_id,
+            filename=input_path.name,
+            extension=input_path.suffix.lower(),
+            size_bytes=input_path.stat().st_size,
+            output_format="docx",
+            operation=operation_name,
+        )
+
+        data = input_path.read_bytes()
+        extracted_text = extract_text_from_attachment(input_path.name, data)
+        if not extracted_text.strip():
+            mark_source_error(source)
+            job.status = "error"
+            job.finished_at = datetime.now(timezone.utc).isoformat()
+            panam_files.write_job_metadata(job)
+            log_action(
+                action_type,
+                action_name,
+                "error",
+                source,
+                job_id=job.job_id,
+                filename=input_path.name,
+                extension=input_path.suffix.lower(),
+                size_bytes=input_path.stat().st_size,
+                output_format="docx",
+                operation=operation_name,
+            )
+            await send_source_message(
+                source,
+                "Z toho DOCX se mi nepodarilo vytahnout zadny text.",
+            )
+            return
+
+        if panam_docx_transform.contains_sensitive_docx_transform_signal(extracted_text):
+            raise panam_docx_transform.DocxTransformUserError(
+                "Tenhle DOCX transform nepouzivam pro hesla, tokeny, HR data, zakaznicka data ani citliva data."
+            )
+
+        extracted_text = trim_document_text(extracted_text)
+        work_path = panam_files.write_work_text(job, "extracted_text.txt", extracted_text)
+        log_action(
+            action_type,
+            action_name,
+            "text_extracted",
+            source,
+            job_id=job.job_id,
+            filename=work_path.name,
+            extension=work_path.suffix.lower(),
+            size_bytes=work_path.stat().st_size,
+            output_format="docx",
+            operation=operation_name,
+        )
+
+        transformed_text = await transform_docx_text(
+            OPENAI_MODEL,
+            extracted_text,
+            operation_name,
+            instruction,
+            input_path.name,
+        )
+        output_filename = panam_files.build_panam_output_filename(
+            input_path.name,
+            ".docx",
+        )
+        output_path = panam_files.ensure_within_job(
+            job.output_dir / output_filename,
+            job,
+        )
+        result = panam_docx_transform.create_docx_transform_from_text(
+            extracted_text,
+            transformed_text,
+            output_path,
+            operation_summary,
+        )
+        job.output_files.append(
+            {
+                "filename": output_path.name,
+                "extension": output_path.suffix.lower(),
+                "size_bytes": output_path.stat().st_size,
+            }
+        )
+        panam_files.write_job_metadata(job)
+        log_action(
+            action_type,
+            action_name,
+            "docx_output_written",
+            source,
+            job_id=job.job_id,
+            filename=output_path.name,
+            extension=output_path.suffix.lower(),
+            size_bytes=output_path.stat().st_size,
+            output_format="docx",
+            operation=operation_name,
+            paragraph_count_before=result.paragraph_count_before,
+            paragraph_count_after=result.paragraph_count_after,
+        )
+
+        job.status = "success"
+        job.finished_at = datetime.now(timezone.utc).isoformat()
+        panam_files.write_job_metadata(job)
+
+        await send_source_message(
+            source,
+            build_file_job_success_message(
+                "docx",
+                action_name,
+                result.operation_summary,
+                paragraph_count_before=result.paragraph_count_before,
+                paragraph_count_after=result.paragraph_count_after,
+            ),
+            result.output_path,
+        )
+        set_last_file_context(
+            context.get("channel_id"),
+            Path(file.filename).name,
+            extension,
+            "docx_transform",
+            output_path.name,
+        )
+        log_action(
+            action_type,
+            action_name,
+            "success",
+            source,
+            job_id=job.job_id,
+            filename=Path(file.filename).name,
+            extension=extension,
+            size_bytes=file.size,
+            output_format="docx",
+            operation=operation_name,
+            paragraph_count_before=result.paragraph_count_before,
+            paragraph_count_after=result.paragraph_count_after,
+        )
+
+    except panam_docx_transform.DocxTransformUserError as error:
+        mark_source_error(source)
+        if job is not None:
+            job.status = "error"
+            job.finished_at = datetime.now(timezone.utc).isoformat()
+            panam_files.write_job_metadata(job)
+            log_action(
+                action_type,
+                action_name,
+                "error",
+                source,
+                job_id=job.job_id,
+                filename=Path(file.filename).name,
+                extension=extension,
+                size_bytes=file.size,
+                output_format="docx",
+            )
+        await send_source_message(source, str(error))
+
+    except Exception:
+        mark_source_error(source)
+        if job is not None:
+            job.status = "error"
+            job.finished_at = datetime.now(timezone.utc).isoformat()
+            panam_files.write_job_metadata(job)
+            log_action(
+                action_type,
+                action_name,
+                "error",
+                source,
+                job_id=job.job_id,
+                filename=Path(file.filename).name,
+                extension=extension,
+                size_bytes=file.size,
+                output_format="docx",
+            )
+        logger.exception("Chyba pri docx_transform file-job pipeline")
+        await send_source_message(source, "Neco se pokazilo pri uprave DOCX.")
+
+    finally:
+        if job is not None:
+            panam_files.cleanup_job(job)
+
+
 def remember_router_decision(
     message: discord.Message,
     decision: dict,
@@ -1815,6 +2137,20 @@ async def handle_natural_file_request(
     mode = decision.get("mode")
     action_name = get_natural_file_action_name(decision)
 
+    if mode == "unsupported_creative_docx_edit":
+        remember_router_decision(
+            message,
+            decision,
+            "current_attachment" if file is not None else "none",
+        )
+        log_action("natural_message", action_name, "started", message)
+        await message.reply(
+            panam_docx_transform.DOCX_TRANSFORM_FALLBACK_MESSAGE,
+            mention_author=False,
+        )
+        log_action("natural_message", action_name, "success", message)
+        return
+
     if mode == "unsupported_creative_spreadsheet_edit":
         remember_router_decision(
             message,
@@ -1837,9 +2173,7 @@ async def handle_natural_file_request(
         )
         log_action("natural_message", action_name, "started", message)
         await message.reply(
-            "Puvodni Excel ani puvodni prilohu zatim primo neupravuju. "
-            "Muzu ale vytvorit novy XLSX vystup, kdyz pozadas o podporovanou jednoduchou upravu.\n\n"
-            f"{panam_spreadsheet.unsupported_instruction_message()}",
+            "Puvodni prilohu primo neupravuju. Umim ale vytvorit novy soubor pres podporovanou DOCX nebo XLSX transformaci.",
             mention_author=False,
         )
         log_action("natural_message", action_name, "success", message)
@@ -1934,6 +2268,25 @@ async def handle_natural_file_request(
         return
 
     async with message.channel.typing():
+        if mode == "docx_transform":
+            if extension != ".docx":
+                remember_router_decision(message, decision)
+                await message.reply(
+                    "DOCX transform v1 podporuje jen DOCX soubory. Puvodni prilohu neupravuju.",
+                    mention_author=False,
+                )
+                return
+
+            decision["output_format"] = "docx"
+            remember_router_decision(message, decision)
+            await run_docx_transform_file_job(
+                message,
+                file,
+                decision.get("instruction", message.content or ""),
+                "natural_message",
+            )
+            return
+
         if mode == "spreadsheet_transform":
             if extension != ".xlsx":
                 remember_router_decision(message, decision)
@@ -2090,9 +2443,14 @@ async def handle_ai_classified_file_request(
 
     if mode == "unsupported_direct_edit":
         await message.reply(
-            "Puvodni prilohu zatim primo neupravuju. "
-            "Muzu ale vytvorit novy XLSX vystup, kdyz pozadas o podporovanou jednoduchou upravu.\n\n"
-            f"{panam_spreadsheet.unsupported_instruction_message()}",
+            "Puvodni prilohu primo neupravuju. Umim ale vytvorit novy soubor pres podporovanou DOCX nebo XLSX transformaci.",
+            mention_author=False,
+        )
+        return True
+
+    if mode == "unsupported_creative_docx_edit":
+        await message.reply(
+            panam_docx_transform.DOCX_TRANSFORM_FALLBACK_MESSAGE,
             mention_author=False,
         )
         return True
@@ -2106,7 +2464,12 @@ async def handle_ai_classified_file_request(
 
     selected_file = current_file
     if target == "last_file_context":
-        selected_file = await find_recent_supported_attachment(message.channel)
+        if mode == "docx_transform":
+            selected_file = await find_recent_docx_attachment(message.channel)
+        elif mode == "spreadsheet_transform":
+            selected_file = await find_recent_xlsx_attachment(message.channel)
+        else:
+            selected_file = await find_recent_supported_attachment(message.channel)
 
     if selected_file is None:
         return False
@@ -2126,6 +2489,15 @@ async def handle_ai_classified_file_request(
             "mode": "structured_data",
             "instruction": intent.get("instruction") or request_text,
             "output_format": intent.get("output_format") or "json",
+            "classifier_used": True,
+            "confidence": intent.get("confidence"),
+        }
+    elif mode == "docx_transform":
+        decision = {
+            "target": target,
+            "mode": "docx_transform",
+            "instruction": intent.get("instruction") or request_text,
+            "output_format": "docx",
             "classifier_used": True,
             "confidence": intent.get("confidence"),
         }
@@ -2335,19 +2707,37 @@ class DiscordAIBot(discord.Client):
             if last_file_context is not None
             else ""
         )
+        current_extension = (
+            get_file_extension(current_file.filename) if current_file is not None else None
+        )
         has_xlsx_file_context = (
-            get_file_extension(current_file.filename) == ".xlsx"
+            current_extension == ".xlsx"
             if current_file is not None
             else last_context_extension == ".xlsx"
         )
+        has_docx_file_context = (
+            current_extension == ".docx"
+            if current_file is not None
+            else last_context_extension == ".docx"
+        )
+        docx_transform_candidate = has_docx_transform_request(
+            request_text,
+            current_extension if current_file is not None else last_context_extension,
+            has_docx_context=has_docx_file_context,
+        )
         spreadsheet_transform_candidate = has_spreadsheet_transform_request(
             request_text,
-            get_file_extension(current_file.filename) if current_file is not None else last_context_extension,
+            current_extension if current_file is not None else last_context_extension,
             has_xlsx_context=has_xlsx_file_context,
+        )
+        unsafe_creative_docx_candidate = has_unsafe_creative_docx_request(
+            request_text,
+            current_extension if current_file is not None else last_context_extension,
+            has_docx_context=has_docx_file_context,
         )
         unsafe_creative_spreadsheet_candidate = has_unsafe_creative_spreadsheet_request(
             request_text,
-            get_file_extension(current_file.filename) if current_file is not None else last_context_extension,
+            current_extension if current_file is not None else last_context_extension,
             has_xlsx_context=has_xlsx_file_context,
         )
         last_file_reference = (
@@ -2358,22 +2748,26 @@ class DiscordAIBot(discord.Client):
         file_router_candidate = (
             explicit_file_output_request
             or explicit_file_action_request
+            or docx_transform_candidate
             or spreadsheet_transform_candidate
+            or unsafe_creative_docx_candidate
             or unsafe_creative_spreadsheet_candidate
             or direct_file_edit_request
             or last_file_reference
         )
         if file_router_candidate and selected_file is None:
-            selected_file = (
-                await find_recent_xlsx_attachment(message.channel)
-                if spreadsheet_transform_candidate or unsafe_creative_spreadsheet_candidate
-                else await find_recent_supported_attachment(message.channel)
-            )
+            if docx_transform_candidate or unsafe_creative_docx_candidate:
+                selected_file = await find_recent_docx_attachment(message.channel)
+            elif spreadsheet_transform_candidate or unsafe_creative_spreadsheet_candidate:
+                selected_file = await find_recent_xlsx_attachment(message.channel)
+            else:
+                selected_file = await find_recent_supported_attachment(message.channel)
 
         file_decision = decide_file_response_mode(
             request_text,
             get_file_extension(selected_file.filename) if selected_file is not None else None,
             has_xlsx_context=has_xlsx_file_context,
+            has_docx_context=has_docx_file_context,
         )
 
         if (
@@ -2395,10 +2789,12 @@ class DiscordAIBot(discord.Client):
 
         if file_router_candidate and (
             selected_file is not None
-            or file_decision.get("mode") in {"human_document", "structured_data", "spreadsheet_transform", "unsupported_creative_spreadsheet_edit", "unsupported_direct_edit"}
+            or file_decision.get("mode") in {"human_document", "structured_data", "docx_transform", "spreadsheet_transform", "unsupported_creative_docx_edit", "unsupported_creative_spreadsheet_edit", "unsupported_direct_edit"}
             or explicit_file_output_request
             or explicit_file_action_request
+            or docx_transform_candidate
             or spreadsheet_transform_candidate
+            or unsafe_creative_docx_candidate
             or unsafe_creative_spreadsheet_candidate
             or last_file_reference
         ):
@@ -3516,7 +3912,8 @@ async def file_job_test(
         )
         return
 
-    output_extension = ".md" if output_format.lower().strip(".") == "md" else ".txt"
+    normalized_output_format = "md" if output_format.lower().strip(".") == "md" else "txt"
+    output_extension = f".{normalized_output_format}"
     job = None
     await interaction.response.defer(thinking=True)
 
@@ -3572,7 +3969,10 @@ async def file_job_test(
         panam_files.write_job_metadata(job)
 
         await interaction.followup.send(
-            "File job hotovy.",
+            build_file_job_success_message(
+                normalized_output_format,
+                "file_job_test",
+            ),
             file=discord.File(output_path),
         )
         log_action(
@@ -3610,6 +4010,51 @@ async def file_job_test(
     finally:
         if job is not None:
             panam_files.cleanup_job(job)
+
+
+@bot.tree.command(
+    name="transform_docx",
+    description="Bezpecne vytvor novy cisty DOCX podle podporovane upravy."
+)
+@app_commands.describe(
+    file="DOCX soubor k uprave",
+    instruction="Jednoducha podporovana uprava dokumentu",
+)
+@log_slash_command("transform_docx")
+async def transform_docx(
+    interaction: discord.Interaction,
+    file: discord.Attachment,
+    instruction: str,
+) -> None:
+    if not is_interaction_allowed(interaction, "transform_docx"):
+        await interaction.response.send_message(
+            "Tady nemam povolene odpovidat.",
+            ephemeral=True,
+        )
+        return
+
+    if file.size > MAX_DOCUMENT_SIZE_BYTES:
+        await interaction.response.send_message(
+            "Ten soubor je moc velky. Zatim beru max 20 MB.",
+            ephemeral=True,
+        )
+        return
+
+    extension = get_file_extension(file.filename)
+    if extension != ".docx":
+        await interaction.response.send_message(
+            "Tenhle command podporuje jen DOCX soubory.",
+            ephemeral=True,
+        )
+        return
+
+    await interaction.response.defer(thinking=True)
+    await run_docx_transform_file_job(
+        interaction,
+        file,
+        instruction,
+        "slash_command",
+    )
 
 
 @bot.tree.command(
@@ -3829,7 +4274,10 @@ async def process_file(
         panam_files.write_job_metadata(job)
 
         await interaction.followup.send(
-            "Soubor je zpracovany.",
+            build_file_job_success_message(
+                normalized_output_format,
+                "process_file",
+            ),
             file=discord.File(output_path),
         )
         set_last_file_context(
@@ -4160,7 +4608,10 @@ async def extract_data(
         panam_files.write_job_metadata(job)
 
         await interaction.followup.send(
-            "Data jsou vytezena.",
+            build_file_job_success_message(
+                normalized_output_format,
+                "extract_data",
+            ),
             file=discord.File(output_path),
         )
         set_last_file_context(

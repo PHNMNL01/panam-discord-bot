@@ -361,6 +361,77 @@ async def process_document_text(
     return answer
 
 
+async def transform_docx_text(
+    model: str,
+    document_text: str,
+    operation: str,
+    instruction: str,
+    filename: str,
+) -> str:
+    operation_instructions = {
+        "proofread": (
+            "Oprav preklepy, pravopis a stylistiku. Zachovej vyznam, strukturu a fakta."
+        ),
+        "summarize": (
+            "Zestrucni text. Zachovej pouze dulezite informace a nevymyslej nove body."
+        ),
+        "formalize": (
+            "Preved text do formalniho tonu. Zachovej vyznam a nepridavej nova fakta."
+        ),
+        "simplify": (
+            "Preved text do jednodussiho a srozumitelnejsiho tonu. Zachovej fakta."
+        ),
+        "structure": (
+            "Vytvor strukturovanou verzi s nadpisy. Pouzij Markdown nadpisy, ktere se pak prekopiruji do DOCX."
+        ),
+        "checklist": (
+            "Vytvor checklist z informaci v dokumentu. Pouzij odrazky a nepridavej ukoly, ktere ze vstupu neplynou."
+        ),
+        "clean": (
+            "Vytvor cistou verzi bez zbytecnych poznamek, vycpavek a pracovnich komentaru. Zachovej podstatny obsah."
+        ),
+    }
+    operation_instruction = operation_instructions.get(
+        operation,
+        "Bezpecne uprav text podle rozpoznane podporovane operace a zachovej fakta.",
+    )
+
+    response = await openai_client.responses.create(
+        model=model,
+        input=[
+            {
+                "role": "system",
+                "content": (
+                    PANAM_SYSTEM_PROMPT +
+                    "\n\nUkol pro tento command: vytvor text pro novy cisty DOCX dokument. "
+                    "Odpovez pouze obsahem noveho dokumentu. "
+                    "Nepridavej Discord komentare typu 'Jasne, tady to je'. "
+                    "Nevymyslej nova fakta, osoby, data, cisla ani chybejici casti. "
+                    "Nepridavej udaje, ktere nejsou ve vstupu. "
+                    "Pokud opravujes nebo preformulovavas, zachovej puvodni vyznam. "
+                    "Pokud dokument obsahuje citliva data, zbytecne je neopisuj a nevytahuj. "
+                    f"Rozpoznana operace: {operation}. {operation_instruction}"
+                ),
+            },
+            {
+                "role": "user",
+                "content": (
+                    f"Nazev souboru: {filename}\n"
+                    f"Instrukce uzivatele: {instruction}\n\n"
+                    "Text dokumentu:\n"
+                    f"{document_text}"
+                ),
+            },
+        ],
+    )
+
+    answer = response.output_text.strip()
+    if not answer:
+        answer = "Nepodarilo se vytvorit vystupni DOCX dokument."
+
+    return answer
+
+
 async def extract_structured_data(
     model: str,
     document_text: str,
@@ -467,7 +538,7 @@ async def classify_file_request_intent(
                         "Allowed JSON shape:\n"
                         "{"
                         "\"target\":\"conversation|current_attachment|last_file_context|none\","
-                        "\"mode\":\"chat_answer|human_document|structured_data|unsupported_direct_edit\","
+                        "\"mode\":\"chat_answer|human_document|structured_data|docx_transform|spreadsheet_transform|unsupported_creative_docx_edit|unsupported_creative_spreadsheet_edit|unsupported_direct_edit\","
                         "\"output_format\":null,"
                         "\"question\":\"string|null\","
                         "\"instruction\":\"string|null\","

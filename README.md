@@ -114,6 +114,7 @@ Soubory:
 - `/read_file` - precte dokument a odpovi na otazku k obsahu.
 - `/process_file` - vytvori novy lidsky citelny MD, TXT nebo DOCX vystup.
 - `/extract_data` - vytvori strukturovana data jako JSON, CSV, Markdown nebo XLSX.
+- `/transform_docx` - bezpecne vytvori novy cisty DOCX z puvodniho DOCX.
 - `/transform_excel` - bezpecne vytvori novy upraveny XLSX z puvodniho XLSX.
 - `/file_job_test` - technicky test file-job pipeline.
 
@@ -215,6 +216,57 @@ Zakladni XLSX vystup v1:
 - zalamovani dlouheho textu
 
 XLSX vystup zatim neresi barvy, slozite styly, vice listu, grafy, makra, vzorce ani upravu puvodniho XLSX.
+
+### Odpovedi u novych souboru
+
+Kdyz Panam vytvori vystupni soubor z prilohy, v odpovedi strucne napise typ vystupu, provedenou zmenu a potvrzeni, ze puvodni priloha zustala beze zmen. U Excel transformaci a DOCX transformaci muze pridat i dostupne pocty radku, sloupcu nebo odstavcu pred a po uprave.
+
+### DOCX transform v1
+
+Pouzij `/transform_docx`, kdyz chces z existujiciho DOCX vytvorit novy cisty DOCX podle podporovane upravy.
+
+Panam nikdy needituje puvodni Discord prilohu. V1 pracuje jen s textem extrahovanym z DOCX a vytvari novy dokument pres cisty DOCX vystup. Neprenasi makra, revize, komentare, metadata, obrazky ani slozite styly.
+
+V1 podporuje:
+
+- opravu preklepu a stylistiky
+- zestrucneni textu
+- prevod do formalniho tonu
+- prevod do jednodussiho nebo srozumitelnejsiho tonu
+- strukturovanou verzi s nadpisy
+- checklist z dokumentu
+- cistou verzi bez zbytecnych poznamek
+
+Priklady:
+
+```text
+/transform_docx file:dokument.docx instruction:oprav preklepy a stylistiku
+/transform_docx file:dokument.docx instruction:zestrucni text
+/transform_docx file:dokument.docx instruction:preved do formalniho tonu
+/transform_docx file:dokument.docx instruction:udelej z toho strukturovany dokument s nadpisy
+/transform_docx file:dokument.docx instruction:vytvor checklist
+```
+
+Kdyz je instrukce moc volna, napr. `neco tam dopln podle sebe`, Panam nevymysli chybejici obsah a vrati bezpecny fallback. DOCX transform v1 nepouzivej pro hesla, tokeny, HR data, zakaznicka data ani citliva data.
+
+### Natural DOCX transform
+
+Kdyz je v aktualni zprave nebo poslednim souborovem kontextu DOCX, Panam umi stejne bezpecne DOCX transformace spustit i prirozenou vetou. Natural router jen rozpozna intent; samotna prace jde pres stejnou file-job pipeline jako `/transform_docx`.
+
+Priklady:
+
+```text
+Panam oprav v tom Wordu preklepy a stylistiku
+Panam oprav ten DOCX
+Panam zestrucni ten Word dokument
+Panam preved ten dokument do formalniho tonu
+Panam udelej z toho DOCX checklist
+Panam udelej z toho strukturovany dokument s nadpisy
+Panam vytvor cistou verzi toho Wordu
+Panam ten dokument uces a vrat jako DOCX
+```
+
+I pri prirozene vete Panam nikdy nemeni puvodni DOCX prilohu. Vzdy vytvori novy cisty DOCX z extrahovaneho textu a neprenasi makra, obrazky, komentare, revize ani metadata.
 
 ### Excel transform v1
 
@@ -673,6 +725,7 @@ panam-discord-bot/
 |-- bot.py
 |-- panam_ai.py
 |-- panam_docx.py
+|-- panam_docx_transform.py
 |-- panam_excel.py
 |-- panam_file_context.py
 |-- panam_files.py
@@ -698,6 +751,7 @@ Soubory:
 - `bot.py` - Discord logika, slash commandy, natural message handling a napojeni pipeline.
 - `panam_ai.py` - OpenAI volani, system prompt, analyza, shrnuti, file AI funkce a AI intent classifier.
 - `panam_docx.py` - tvorba jednoducheho DOCX vystupu z textu.
+- `panam_docx_transform.py` - bezpecne DOCX transformace v1 nad extrahovanym textem.
 - `panam_phrases.py` - prirozene fraze, signaly a intent patterny.
 - `panam_router.py` - ciste router/helper funkce pro natural file rozhodovani.
 - `panam_prompts/` - verzovana dokumentacni zaloha promptu z OpenAI Prompt Managementu.
@@ -711,6 +765,7 @@ Soubory:
 - `requirements.txt` - Python zavislosti.
 - `docs/router_test_cases.md` - testovaci priklady pro natural router a classifier.
 - `scripts/docx_smoke_test.py` - lokalni manualni test DOCX helperu.
+- `scripts/docx_transform_smoke_test.py` - lokalni manualni test DOCX transform helperu.
 - `scripts/router_smoke_test.py` - lokalni manualni test natural file routeru.
 - `scripts/spreadsheet_transform_smoke_test.py` - lokalni manualni test XLSX transform helperu.
 - `.env.example` - sablona konfigurace.

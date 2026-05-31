@@ -41,6 +41,61 @@ TEST_CASES = [
         None,
         ".xlsx",
     ),
+    (
+        "Panam oprav v tom Wordu preklepy a stylistiku",
+        "docx_transform",
+        "docx",
+        ".docx",
+    ),
+    (
+        "Panam oprav ten DOCX",
+        "docx_transform",
+        "docx",
+        ".docx",
+    ),
+    (
+        "Panam zestrucni ten Word dokument",
+        "docx_transform",
+        "docx",
+        ".docx",
+    ),
+    (
+        "Panam preved ten dokument do formalniho tonu",
+        "docx_transform",
+        "docx",
+        ".docx",
+    ),
+    (
+        "Panam udelej z toho DOCX checklist",
+        "docx_transform",
+        "docx",
+        ".docx",
+    ),
+    (
+        "Panam udelej z toho strukturovany dokument s nadpisy",
+        "docx_transform",
+        "docx",
+        ".docx",
+    ),
+    (
+        "Panam vytvor cistou verzi toho Wordu",
+        "docx_transform",
+        "docx",
+        ".docx",
+    ),
+    (
+        "Panam ten dokument uces a vrat jako DOCX",
+        "docx_transform",
+        "docx",
+        ".docx",
+    ),
+    (
+        "Panam neco tam dopln podle sebe",
+        "unsupported_creative_docx_edit",
+        None,
+        ".docx",
+    ),
+    ("Panam uprav ten Word", "unsupported_direct_edit", None, ".docx"),
     ("Panam uprav ten Excel", "unsupported_direct_edit", None, ".xlsx"),
     (
         "Panam uprav ten Excel a nech jen radky kde Oddeleni = IT",
@@ -92,6 +147,7 @@ def main() -> int:
             request_text,
             extension=extension,
             has_xlsx_context=extension == ".xlsx",
+            has_docx_context=extension == ".docx",
         )
         actual_mode = result.get("mode")
         actual_output_format = result.get("output_format")

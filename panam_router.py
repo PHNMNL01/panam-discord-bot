@@ -3,10 +3,14 @@ from pathlib import Path
 import re
 import unicodedata
 
+import panam_docx_transform
 import panam_spreadsheet
 from panam_phrases import (
+    CREATIVE_DOCX_EDIT_SIGNALS,
     CREATIVE_SPREADSHEET_EDIT_SIGNALS,
     DIRECT_FILE_EDIT_SIGNALS,
+    DOCX_TRANSFORM_OPERATION_SIGNALS,
+    DOCX_TRANSFORM_SUBJECT_SIGNALS,
     HUMAN_DOCUMENT_SIGNALS,
     SPREADSHEET_TRANSFORM_CONTEXT_SIGNALS,
     SPREADSHEET_TRANSFORM_OPERATION_SIGNALS,
@@ -105,6 +109,34 @@ def is_xlsx_extension(extension: str | None) -> bool:
     return str(extension or "").lower().strip() == ".xlsx"
 
 
+def is_docx_extension(extension: str | None) -> bool:
+    return str(extension or "").lower().strip() == ".docx"
+
+
+def has_docx_transform_context(text: str) -> bool:
+    return contains_natural_signal(text, DOCX_TRANSFORM_SUBJECT_SIGNALS)
+
+
+def has_docx_transform_operation(text: str) -> bool:
+    normalized = normalize_natural_text(text)
+    if contains_natural_signal(normalized, DOCX_TRANSFORM_OPERATION_SIGNALS):
+        return True
+
+    patterns = (
+        r"\b(?:oprav|opravit)\b.*\b(?:preklepy|stylistiku|gramatiku|pravopis|docx|word|dokument)\b",
+        r"\buces\b",
+        r"\b(?:zestrucni|zestrucneni|zkrac)\b.*\b(?:text|dokument|docx|word)?\b",
+        r"\b(?:preved|dej)\b.*\bformalni(?:ho|m)?\s+tonu\b",
+        r"\b(?:preved|dej)\b.*\bjednodussi(?:ho|m)?\s+tonu\b",
+        r"\bvysvetli\s+jednoduseji\b",
+        r"\budelej\b.*\bstrukturovany\s+dokument\b",
+        r"\budelej\b.*\bdokument\s+s\s+nadpisy\b",
+        r"\b(?:vytvor|udelej)\b.*\bchecklist\b",
+        r"\bvytvor\b.*\bcist\w*\s+verzi\b",
+    )
+    return any(re.search(pattern, normalized) is not None for pattern in patterns)
+
+
 def has_spreadsheet_transform_operation(text: str) -> bool:
     normalized = normalize_natural_text(text)
     if contains_natural_signal(normalized, SPREADSHEET_TRANSFORM_OPERATION_SIGNALS):
@@ -131,6 +163,37 @@ def has_spreadsheet_transform_context(text: str) -> bool:
 
 def has_direct_file_edit_request(text: str) -> bool:
     return contains_natural_signal(text, DIRECT_FILE_EDIT_SIGNALS)
+
+
+def is_unsafe_creative_docx_request(text: str) -> bool:
+    normalized = normalize_natural_text(text)
+    if contains_natural_signal(normalized, CREATIVE_DOCX_EDIT_SIGNALS):
+        return True
+
+    patterns = (
+        r"\bneco\s+tam\s+dopln\b",
+        r"\bdopln\s+podle\s+sebe\b",
+        r"\bneco\s+vymysli\b",
+        r"\bvymysli\s+chybejici\s+casti\b",
+        r"\budelej\s+to\s+lepsi\s+podle\s+sebe\b",
+        r"\brozsir\s+to\s+o\s+nove\s+informace\b",
+    )
+    return any(re.search(pattern, normalized) is not None for pattern in patterns)
+
+
+def has_unsafe_creative_docx_request(
+    text: str,
+    extension: str | None = None,
+    has_docx_context: bool = False,
+) -> bool:
+    if not is_unsafe_creative_docx_request(text):
+        return False
+
+    return (
+        has_docx_transform_context(text)
+        or is_docx_extension(extension)
+        or has_docx_context
+    )
 
 
 def is_unsafe_creative_spreadsheet_request(text: str) -> bool:
@@ -179,6 +242,23 @@ def has_spreadsheet_transform_request(
         return True
 
     return is_xlsx_extension(extension) or has_xlsx_context
+
+
+def has_docx_transform_request(
+    text: str,
+    extension: str | None = None,
+    has_docx_context: bool = False,
+) -> bool:
+    if not (is_docx_extension(extension) or has_docx_context):
+        return False
+
+    if not has_docx_transform_operation(text):
+        return False
+
+    if has_docx_transform_context(text):
+        return True
+
+    return is_docx_extension(extension) or has_docx_context
 
 
 def detect_output_format(text: str, default: str = "md") -> str:
@@ -369,8 +449,19 @@ def decide_file_response_mode(
     text: str,
     extension: str | None = None,
     has_xlsx_context: bool = False,
+    has_docx_context: bool = False,
 ) -> dict:
     normalized = normalize_natural_text(text)
+
+    if has_unsafe_creative_docx_request(
+        text,
+        extension=extension,
+        has_docx_context=has_docx_context,
+    ):
+        return {
+            "mode": "unsupported_creative_docx_edit",
+            "output_format": None,
+        }
 
     if has_unsafe_creative_spreadsheet_request(
         text,
@@ -396,6 +487,22 @@ def decide_file_response_mode(
                 "mode": "spreadsheet_transform",
                 "instruction": text.strip(),
                 "output_format": "xlsx",
+            }
+
+    if has_docx_transform_request(
+        text,
+        extension=extension,
+        has_docx_context=has_docx_context,
+    ):
+        try:
+            panam_docx_transform.detect_docx_transform_operation(text)
+        except panam_docx_transform.DocxTransformUserError:
+            pass
+        else:
+            return {
+                "mode": "docx_transform",
+                "instruction": text.strip(),
+                "output_format": "docx",
             }
 
     if contains_natural_signal(normalized, DIRECT_FILE_EDIT_SIGNALS):
@@ -509,7 +616,9 @@ def validate_ai_file_intent(
         "chat_answer",
         "human_document",
         "structured_data",
+        "docx_transform",
         "spreadsheet_transform",
+        "unsupported_creative_docx_edit",
         "unsupported_creative_spreadsheet_edit",
         "unsupported_direct_edit",
     }
@@ -546,10 +655,16 @@ def validate_ai_file_intent(
         if output_format not in {"json", "csv", "md", "xlsx", None}:
             return fallback_ai_file_intent()
         output_format = output_format or "json"
+    elif mode == "docx_transform":
+        if output_format not in {"docx", None}:
+            return fallback_ai_file_intent()
+        output_format = "docx"
     elif mode == "spreadsheet_transform":
         if output_format not in {"xlsx", None}:
             return fallback_ai_file_intent()
         output_format = "xlsx"
+    elif mode == "unsupported_creative_docx_edit":
+        output_format = None
     elif mode == "unsupported_creative_spreadsheet_edit":
         output_format = None
     elif mode == "chat_answer":

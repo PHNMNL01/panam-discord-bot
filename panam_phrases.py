@@ -231,10 +231,18 @@ HUMAN_DOCUMENT_SIGNALS = (
 DIRECT_FILE_EDIT_SIGNALS = (
     "uprav ten excel",
     "uprav tento excel",
+    "uprav ten word",
+    "uprav tento word",
+    "uprav ten docx",
+    "uprav tento docx",
     "uprav ten soubor",
     "uprav tu tabulku",
     "zmen ten excel",
     "zmen tento excel",
+    "zmen ten word",
+    "zmen tento word",
+    "zmen ten docx",
+    "zmen tento docx",
     "zmen ten soubor",
     "zmen tu tabulku",
     "prepis puvodni soubor",
@@ -243,6 +251,41 @@ DIRECT_FILE_EDIT_SIGNALS = (
     "uprav puvodni excel",
     "zmen puvodni soubor",
     "zmen puvodni excel",
+)
+
+DOCX_TRANSFORM_SUBJECT_SIGNALS = (
+    "word",
+    "wordu",
+    "docx",
+    "dokument",
+    "dokumentu",
+)
+
+DOCX_TRANSFORM_OPERATION_SIGNALS = (
+    "oprav preklepy",
+    "oprav stylistiku",
+    "oprav preklepy a stylistiku",
+    "uces text",
+    "zestrucni text",
+    "zkrac to",
+    "preved do formalniho tonu",
+    "dej to do formalniho tonu",
+    "preved do jednodussiho tonu",
+    "vysvetli jednoduseji",
+    "udelej z toho strukturovany dokument",
+    "udelej z toho dokument s nadpisy",
+    "vytvor checklist",
+    "udelej checklist",
+    "vytvor cistou verzi",
+)
+
+CREATIVE_DOCX_EDIT_SIGNALS = (
+    "neco tam dopln",
+    "dopln podle sebe",
+    "neco vymysli",
+    "vymysli chybejici casti",
+    "udelej to lepsi podle sebe",
+    "rozsir to o nove informace",
 )
 
 SPREADSHEET_TRANSFORM_SUBJECT_SIGNALS = (
