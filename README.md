@@ -242,6 +242,8 @@ Priklady:
 
 Kdyz instrukce nejde spolehlive prevest na podporovanou operaci, Panam neprovede zadnou AI editaci dat a vrati seznam podporovanych prikladu.
 
+Po uspesne transformaci Panam strucne vypise provedenou zmenu, napr. filtr, vyber sloupcu, serazeni, odstraneni prazdnych radku nebo hledani duplicit. Pokud jsou dostupne, prida i pocty radku a sloupcu pred a po uprave.
+
 ### Natural Excel transform
 
 Kdyz je v aktualni zprave nebo poslednim souborovem kontextu XLSX, Panam umi stejne bezpecne transformace spustit i prirozenou vetou. Natural router jen rozpozna intent; samotna prace jde pres stejnou file-job pipeline jako `/transform_excel`.

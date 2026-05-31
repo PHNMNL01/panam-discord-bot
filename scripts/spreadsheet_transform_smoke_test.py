@@ -26,6 +26,7 @@ def create_input_xlsx(path: Path) -> None:
     worksheet.append([None, None, None, None, None])
     worksheet.append(["Bela Svoboda", "bela@example.com", "HR specialista", "HR", "2023-06-01"])
     worksheet.append(["Cyril Dvorak", "cyril@example.com", "Vyvojar", "IT", "2022-03-20"])
+    worksheet.append(["Daria Novak", "ana@example.com", "Tester", "HR", "2025-02-10"])
     workbook.save(path)
     workbook.close()
 
@@ -48,33 +49,51 @@ def main() -> None:
         input_path = base_dir / "export.xlsx"
         create_input_xlsx(input_path)
 
+        output_path = base_dir / "export_remove_empty_by_Panam.xlsx"
+        result = panam_spreadsheet.transform_xlsx(
+            input_path,
+            output_path,
+            "odstran prazdne radky",
+        )
+        assert output_path.exists(), "Vystupni XLSX neexistuje."
+        assert result.operation_summary == "odstranění prázdných řádků"
+        assert result.row_count_before == 5
+        assert result.row_count_after == 4
+
         output_path = base_dir / "export_select_email_by_Panam.xlsx"
-        panam_spreadsheet.transform_xlsx(
+        result = panam_spreadsheet.transform_xlsx(
             input_path,
             output_path,
             "vyber sloupce Jmeno a Prijmeni, Soukromy email",
         )
         assert output_path.exists(), "Vystupni XLSX neexistuje."
+        assert result.operation_summary == "výběr sloupců Jméno a příjmení, Soukromý e-mail"
+        assert result.column_count_before == 5
+        assert result.column_count_after == 2
         rows = read_rows(output_path)
         assert rows[0] == ("Jméno a příjmení", "Soukromý e-mail")
 
         output_path = base_dir / "export_select_position_by_Panam.xlsx"
-        panam_spreadsheet.transform_xlsx(
+        result = panam_spreadsheet.transform_xlsx(
             input_path,
             output_path,
             "vyber sloupce Jmeno a prijmeni, Nazev pracovni pozice",
         )
         assert output_path.exists(), "Vystupni XLSX neexistuje."
+        assert result.operation_summary == "výběr sloupců Jméno a příjmení, Název pracovní pozice"
         rows = read_rows(output_path)
         assert rows[0] == ("Jméno a příjmení", "Název pracovní pozice")
 
         output_path = base_dir / "export_filter_it_by_Panam.xlsx"
-        panam_spreadsheet.transform_xlsx(
+        result = panam_spreadsheet.transform_xlsx(
             input_path,
             output_path,
             "nech jen řádky kde Oddeleni = IT",
         )
         assert output_path.exists(), "Vystupni XLSX neexistuje."
+        assert result.operation_summary == "filtr řádků, kde Oddělení = IT"
+        assert result.row_count_before == 5
+        assert result.row_count_after == 2
         rows = read_rows(output_path)
         assert rows[0] == (
             "Jméno a příjmení",
@@ -86,12 +105,13 @@ def main() -> None:
         assert len(rows) == 3
 
         output_path = base_dir / "export_sort_date_by_Panam.xlsx"
-        panam_spreadsheet.transform_xlsx(
+        result = panam_spreadsheet.transform_xlsx(
             input_path,
             output_path,
             "seřaď podle Datum nastupu",
         )
         assert output_path.exists(), "Vystupni XLSX neexistuje."
+        assert result.operation_summary == "seřazení podle sloupce Datum nástupu"
         rows = read_rows(output_path)
         assert rows[0] == (
             "Jméno a příjmení",
@@ -100,6 +120,15 @@ def main() -> None:
             "Oddělení",
             "Datum nástupu",
         )
+
+        output_path = base_dir / "export_duplicates_by_Panam.xlsx"
+        result = panam_spreadsheet.transform_xlsx(
+            input_path,
+            output_path,
+            "najdi duplicity podle Soukromy email",
+        )
+        assert output_path.exists(), "Vystupni XLSX neexistuje."
+        assert result.operation_summary == "nalezení duplicit podle sloupce Soukromý e-mail"
 
     print("spreadsheet transform smoke test ok")
 

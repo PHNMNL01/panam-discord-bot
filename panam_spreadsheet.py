@@ -29,6 +29,7 @@ class SpreadsheetTransformPlan:
     selected_columns: tuple[str, ...] = ()
     filter_column: str | None = None
     filter_value: str | None = None
+    filter_value_display: str | None = None
     sort_column: str | None = None
     duplicate_column: str | None = None
 
@@ -36,6 +37,11 @@ class SpreadsheetTransformPlan:
 @dataclass(frozen=True)
 class SpreadsheetTransformResult:
     output_path: Path
+    operation_summary: str
+    row_count_before: int | None
+    row_count_after: int | None
+    column_count_before: int | None
+    column_count_after: int | None
     rows_read: int
     rows_written: int
     columns_written: int
@@ -177,6 +183,19 @@ def _split_columns(text: str) -> tuple[str, ...]:
     return tuple(parts)
 
 
+def _extract_filter_display_value(instruction: str) -> str | None:
+    match = re.search(
+        r"\bkde\s+(.+?)\s*(?:=|\s+je\s+|\s+rovna\s+se\s+)\s*(.+?)(?=\s*(?:,|;|$|\bvyber\b|\bserad\b|\bseřaď\b|\bsetrid\b|\bsort\b|\bodstran\b|\bodstraň\b|\bsmaz\b|\bsmaž\b|\bnajdi\b|\bdetekuj\b|\bduplicity\b|\bduplicit\b))",
+        str(instruction or ""),
+        flags=re.IGNORECASE,
+    )
+    if not match:
+        return None
+
+    value = re.sub(r"\s+", " ", match.group(2)).strip(" .,;:")
+    return value or None
+
+
 def parse_transform_instruction(instruction: str) -> SpreadsheetTransformPlan:
     normalized = _normalize_text(instruction)
     if not normalized:
@@ -228,6 +247,7 @@ def parse_transform_instruction(instruction: str) -> SpreadsheetTransformPlan:
         selected_columns=selected_columns,
         filter_column=filter_column,
         filter_value=filter_value,
+        filter_value_display=_extract_filter_display_value(instruction),
         sort_column=sort_column,
         duplicate_column=duplicate_column,
     )
@@ -341,6 +361,13 @@ def _operation_names(plan: SpreadsheetTransformPlan) -> tuple[str, ...]:
     return tuple(operations)
 
 
+def _build_operation_summary(parts: list[str]) -> str:
+    clean_parts = [part.strip() for part in parts if part.strip()]
+    if not clean_parts:
+        return "provedena podporovaná Excel transformace"
+    return "; ".join(clean_parts)
+
+
 def transform_xlsx(
     input_path: Path,
     output_path: Path,
@@ -350,12 +377,20 @@ def transform_xlsx(
     plan = parse_transform_instruction(instruction)
     headers, rows = _read_first_sheet_values(input_path)
     rows_read = len(rows)
+    column_count_before = len(headers)
+    operation_summary_parts: list[str] = []
 
     if plan.remove_empty_rows:
         rows = [row for row in rows if not all(_is_empty_value(value) for value in row)]
+        operation_summary_parts.append("odstranění prázdných řádků")
 
     if plan.filter_column and plan.filter_value is not None:
         column_index = _header_index(headers, plan.filter_column)
+        column_name = headers[column_index]
+        display_value = plan.filter_value_display or plan.filter_value
+        operation_summary_parts.append(
+            f"filtr řádků, kde {column_name} = {display_value}"
+        )
         wanted = _normalize_text(plan.filter_value)
         rows = [
             row
@@ -365,6 +400,10 @@ def transform_xlsx(
 
     if plan.duplicate_column:
         column_index = _header_index(headers, plan.duplicate_column)
+        column_name = headers[column_index]
+        operation_summary_parts.append(
+            f"nalezení duplicit podle sloupce {column_name}"
+        )
         counts: dict[str, int] = {}
         keys: list[str] = []
         for row in rows:
@@ -380,6 +419,8 @@ def transform_xlsx(
 
     if plan.sort_column:
         column_index = _header_index(headers, plan.sort_column)
+        column_name = headers[column_index]
+        operation_summary_parts.append(f"seřazení podle sloupce {column_name}")
         rows = sorted(
             rows,
             key=lambda row: _normalize_text(
@@ -390,7 +431,11 @@ def transform_xlsx(
     selected_indexes = list(range(len(headers)))
     if plan.selected_columns:
         selected_indexes = [_header_index(headers, column) for column in plan.selected_columns]
-        headers = [headers[index] for index in selected_indexes]
+        selected_headers = [headers[index] for index in selected_indexes]
+        operation_summary_parts.append(
+            f"výběr sloupců {', '.join(selected_headers)}"
+        )
+        headers = selected_headers
         rows = [[row[index] if index < len(row) else None for index in selected_indexes] for row in rows]
 
     workbook = Workbook()
@@ -407,6 +452,7 @@ def transform_xlsx(
     workbook.close()
 
     operations = _operation_names(plan)
+    operation_summary = _build_operation_summary(operation_summary_parts)
     logger.info(
         "spreadsheet_transform status=success input=%s output=%s rows_read=%s rows_written=%s columns_written=%s operations=%s",
         input_path.name,
@@ -419,6 +465,11 @@ def transform_xlsx(
 
     return SpreadsheetTransformResult(
         output_path=output_path,
+        operation_summary=operation_summary,
+        row_count_before=rows_read,
+        row_count_after=len(rows),
+        column_count_before=column_count_before,
+        column_count_after=len(headers),
         rows_read=rows_read,
         rows_written=len(rows),
         columns_written=len(headers),

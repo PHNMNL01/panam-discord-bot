@@ -1686,9 +1686,29 @@ async def run_spreadsheet_transform_file_job(
         job.finished_at = datetime.now(timezone.utc).isoformat()
         panam_files.write_job_metadata(job)
 
+        success_message_parts = [
+            "Excel jsem upravila jako nový soubor.",
+            f"Provedená změna: {result.operation_summary}.",
+        ]
+        if (
+            result.row_count_before is not None
+            and result.row_count_after is not None
+        ):
+            success_message_parts.append(
+                f"Řádky: {result.row_count_before} -> {result.row_count_after}."
+            )
+        if (
+            result.column_count_before is not None
+            and result.column_count_after is not None
+            and result.column_count_before != result.column_count_after
+        ):
+            success_message_parts.append(
+                f"Sloupce: {result.column_count_before} -> {result.column_count_after}."
+            )
+        success_message_parts.append("Původní příloha zůstala beze změn.")
         await send_source_message(
             source,
-            "Excel je upraveny jako novy soubor. Puvodni priloha zustala beze zmen.",
+            " ".join(success_message_parts),
             result.output_path,
         )
         set_last_file_context(
