@@ -7,7 +7,6 @@ import discord
 from discord import app_commands
 from dotenv import load_dotenv
 
-import panam_memory
 import panam_core
 from panam_discord_analyze_command import handle_analyze_command
 from panam_discord_context import (
@@ -38,15 +37,12 @@ from panam_discord_file_commands import (
 )
 from panam_discord_file_job_test import handle_file_job_test_command
 from panam_discord_help import get_help_text
+from panam_discord_memory_command import handle_memory_clear_command
 from panam_discord_message_router import handle_discord_message
 from panam_discord_responses import (
     split_discord_message,
 )
 from panam_discord_read_file import handle_read_file_command
-from panam_file_context import (
-    clear_last_file_context,
-    clear_last_router_decision,
-)
 from panam_ai import (
     shorten_for_discord,
 )
@@ -229,11 +225,9 @@ async def memory_clear(interaction: discord.Interaction) -> None:
         )
         return
 
-    panam_memory.clear_channel_memory(channel_id)
-    clear_last_file_context(channel_id)
-    clear_last_router_decision(channel_id)
-    await interaction.response.send_message(
-        "Krátká paměť pro tento kanál je vymazaná."
+    await handle_memory_clear_command(
+        interaction,
+        channel_id,
     )
 
 
