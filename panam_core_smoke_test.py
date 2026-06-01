@@ -9,6 +9,12 @@ def main() -> None:
     assert hasattr(panam_core, "handle_talk")
     assert hasattr(panam_core, "handle_summary")
     assert hasattr(panam_core, "handle_channel_summary")
+    assert hasattr(panam_core, "handle_note_add")
+    assert hasattr(panam_core, "handle_note_list")
+    assert hasattr(panam_core, "handle_note_search")
+    assert hasattr(panam_core, "handle_todo_add")
+    assert hasattr(panam_core, "handle_todo_list")
+    assert hasattr(panam_core, "handle_todo_done")
 
     source = Path("panam_core.py").read_text(encoding="utf-8")
     assert "import discord" not in source
