@@ -38,6 +38,7 @@ from panam_discord_file_jobs import (
     run_spreadsheet_transform_file_job,
     run_structured_data_file_job,
 )
+from panam_discord_help import get_help_text
 from panam_discord_history import (
     find_recent_docx_attachment,
     find_recent_image_attachment,
@@ -231,49 +232,6 @@ async def analyze_selected_attachment(file: discord.Attachment, question: str) -
         file.filename,
     )
     return shorten_for_discord(answer)
-
-
-def get_help_text() -> str:
-    return (
-        "Panam nápověda\n\n"
-        "1. Slash commandy\n"
-        "`/ask`, `/summary`, `/channel_summary`, `/search_messages`, `/panam_talk`\n"
-        "`/note_add`, `/note_list`, `/note_search`, `/todo_add`, `/todo_list`, `/todo_done`\n"
-        "`/analyze`, `/read_file`, `/process_file`, `/extract_data`, `/transform_docx`, `/transform_excel`, `/file_job_test`\n"
-        "`/memory_clear`, `/ping`, `/help`\n\n"
-        "2. Běžný chat\n"
-        "`Panam <dotaz>`, `Panam řekni mi <dotaz>`, `Panam odpověz <dotaz>`\n"
-        "`Panam co si myslíš o <text>`, `Panam co si o tom myslíš?`\n"
-        "`Panam shrň <text>`, `Panam shrň to`, `Panam vysvětli to`\n\n"
-        "3. Poznámky a todo\n"
-        "`Panam přidej poznámku <text>`, `Panam zapamatuj si to`, "
-        "`Panam ukaž poznámky`, `Panam najdi poznámku <text>`\n"
-        "`Panam přidej todo <text>`, `Panam přidej úkol <text>`, "
-        "`Panam ukaž todo`, `Panam ukaž úkoly`\n\n"
-        "4. Přílohy a soubory\n"
-        "Obrázky: `.png`, `.jpg`, `.jpeg`, `.webp`, `.gif`. "
-        "Dokumenty: `.txt`, `.md`, `.csv`, `.json`, `.pdf`, `.docx`, `.xlsx` do 20 MB.\n"
-        "`/analyze` nebo `Panam co je v tom souboru?` odpoví do chatu.\n"
-        "`/read_file` přečte dokument. `/process_file` vytvoří `.md`/`.txt`/`.docx`.\n"
-        "`/extract_data` vytěží `json`, `csv`, `md` nebo `xlsx`.\n\n"
-        "5. Přirozené file požadavky\n"
-        "`Panam shrň ten soubor`, `Panam najdi chyby v té tabulce` -> odpověď do chatu\n"
-        "`Panam udělej z toho report`, `Panam dej mi to do souboru` -> nový MD/TXT/DOCX soubor\n"
-        "`Panam dej mi to do Excelu`, `Panam requirements do csv`, "
-        "`Panam udělej z requirements tabulku` -> strukturovaný výstup\n"
-        "Název posledního souboru, třeba `requirements`, umím spojit s file contextem. "
-        "Obecné `co je na tom špatně?` nechávám chatu, pokud není jasné, že jde o soubor.\n\n"
-        "6. Krátká RAM paměť\n"
-        "Pamatuju si krátkou historii, poslední file context, bezpečné shrnutí souboru "
-        "a poslední router rozhodnutí. Jen v RAM, po restartu pryč.\n"
-        "`/memory_clear` smaže paměť pro aktuální kanál.\n\n"
-        "7. Talk mód\n"
-        "`/panam_talk <text>`, `Panam talk <text>`, `Panam pokec <text>`, "
-        "`Panam co si fakt myslíš o <text>`\n\n"
-        "8. Bezpečnost\n"
-        "Původní přílohu neupravuju, vytvářím nový XLSX, CSV, MD nebo TXT. "
-        "Neposílej hesla, tokeny, API klíče ani citlivá data."
-    )
 
 
 async def find_previous_message_content(
@@ -1514,7 +1472,7 @@ class DiscordAIBot(discord.Client):
 
         try:
             if intent_name == "help":
-                await message.channel.send(get_help_text())
+                await send_channel_chunks(message, get_help_text())
                 return
 
             if intent_name == "note_add_previous":
@@ -1786,7 +1744,10 @@ async def help_command(interaction: discord.Interaction) -> None:
         )
         return
 
-    await interaction.response.send_message(get_help_text())
+    help_chunks = split_discord_message(get_help_text())
+    await interaction.response.send_message(help_chunks[0])
+    for chunk in help_chunks[1:]:
+        await interaction.followup.send(chunk)
 
 
 @bot.tree.command(
