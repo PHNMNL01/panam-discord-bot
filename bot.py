@@ -1,10 +1,8 @@
 import os
 import logging
 import logging.handlers
-import re
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Optional
 
 import discord
 from discord import app_commands
@@ -52,15 +50,18 @@ from panam_discord_message_helpers import (
     extract_inline_content_after_trigger,
     extract_panam_request,
     is_context_reference,
-    is_panam_addressed,
-    normalize_text,
 )
 from panam_discord_natural_file_orchestrator import (
-    get_natural_file_action_name,
     handle_ai_classified_file_request,
     handle_file_summary_followup,
     handle_natural_file_request,
     remember_router_decision,
+)
+from panam_discord_natural_intents import (
+    get_natural_action_name,
+    is_file_router_candidate,
+    parse_natural_intent,
+    should_skip_recent_text_content,
 )
 from panam_discord_responses import (
     send_channel_chunks,
@@ -84,17 +85,9 @@ from panam_ai import (
 )
 from panam_phrases import (
     BASIC_PANAM_EMPTY_RESPONSE,
-    HELP_PATTERNS,
-    NATURAL_INTENT_PATTERNS,
-    NOTE_ADD_PREVIOUS_PATTERN,
     NOTE_ADD_TRIGGERS,
-    NOTE_LIST_PATTERN,
-    OPINION_CONTEXT_PATTERNS,
     OPINION_TRIGGERS,
-    PANAM_STRIP_PREFIX_PATTERN,
-    SUMMARY_CONTEXT_PATTERN,
     SUMMARY_TRIGGERS,
-    TODO_LIST_PATTERN,
 )
 from panam_router import (
     decide_file_response_mode,
@@ -207,87 +200,6 @@ async def handle_basic_panam_message(
     await message.reply(answer, mention_author=False)
     panam_memory.add_message(message.channel.id, "user", message.content or basic_prompt)
     panam_memory.add_message(message.channel.id, "assistant", answer)
-
-
-def should_skip_recent_text_content(content: str) -> bool:
-    request_text = None
-    if is_panam_addressed(content):
-        request_text = re.sub(
-            PANAM_STRIP_PREFIX_PATTERN,
-            "",
-            content,
-            flags=re.IGNORECASE,
-        ).strip()
-
-    normalized = normalize_text(request_text or content)
-    if not normalized or normalized == "panam":
-        return True
-
-    return (
-        is_natural_attachment_analyze_request(normalized)
-        or parse_natural_intent(normalized) is not None
-    )
-
-
-def is_file_router_candidate(text: str) -> bool:
-    return has_explicit_file_output_request(text) or has_explicit_file_action_request(text)
-
-
-def parse_natural_intent(text: str) -> Optional[tuple[str, Optional[str]]]:
-    for pattern in HELP_PATTERNS:
-        if re.match(pattern, text, re.IGNORECASE):
-            return "help", None
-
-    if re.match(NOTE_ADD_PREVIOUS_PATTERN, text, re.IGNORECASE):
-        return "note_add_previous", None
-
-    for pattern in OPINION_CONTEXT_PATTERNS:
-        if re.match(pattern, text, re.IGNORECASE):
-            return "ask_previous", None
-
-    if re.match(SUMMARY_CONTEXT_PATTERN, text, re.IGNORECASE):
-        return "summary_previous", None
-
-    for intent, pattern in NATURAL_INTENT_PATTERNS:
-        match = re.match(pattern, text, re.IGNORECASE)
-        if match:
-            return intent, match.group(1).strip()
-
-    if re.match(NOTE_LIST_PATTERN, text, re.IGNORECASE):
-        return "note_list", None
-
-    if re.match(TODO_LIST_PATTERN, text, re.IGNORECASE):
-        return "todo_list", None
-
-    return None
-
-
-def get_natural_action_name(request_text: str, original_content: str) -> str | None:
-    file_decision = decide_file_response_mode(request_text)
-    if is_file_router_candidate(request_text):
-        return get_natural_file_action_name(file_decision)
-
-    if is_general_attachment_context_request(request_text) and has_explicit_file_action_request(request_text):
-        return "natural_attachment_context"
-
-    if is_natural_attachment_analyze_request(request_text) and has_explicit_file_action_request(request_text):
-        return "analyze_attachment"
-
-    intent = parse_natural_intent(request_text)
-    if intent is not None:
-        intent_name, _ = intent
-        if intent_name in ("ask_previous", "ask"):
-            return "ask"
-        if intent_name in ("summary_previous", "summary"):
-            return "summary"
-        if intent_name in ("note_add_previous", "note_add"):
-            return "note_add"
-        return intent_name
-
-    if extract_basic_panam_prompt(original_content) is not None:
-        return "ask"
-
-    return None
 
 
 class DiscordAIBot(discord.Client):
