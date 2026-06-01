@@ -58,6 +58,10 @@ from panam_discord_responses import (
     send_followup_chunks,
     split_discord_message,
 )
+from panam_discord_text_history import (
+    find_previous_message_content,
+    find_recent_text_message,
+)
 from panam_file_responses import build_file_job_success_message
 from panam_file_context import (
     clear_last_file_context,
@@ -239,36 +243,6 @@ async def analyze_selected_attachment(file: discord.Attachment, question: str) -
     return shorten_for_discord(answer)
 
 
-async def find_previous_message_content(
-    message: discord.Message,
-    prefer_same_author: bool = True,
-) -> Optional[str]:
-    history = getattr(message.channel, "history", None)
-    if history is None:
-        return None
-
-    fallback_content = None
-
-    async for previous_message in history(limit=30, before=message.created_at):
-        if previous_message.author.bot:
-            continue
-
-        previous_content = (previous_message.content or "").strip()
-        if not previous_content:
-            continue
-
-        if not prefer_same_author:
-            return previous_content
-
-        if previous_message.author.id == message.author.id:
-            return previous_content
-
-        if fallback_content is None:
-            fallback_content = previous_content
-
-    return fallback_content
-
-
 async def handle_basic_panam_message(
     message: discord.Message,
     basic_prompt: str,
@@ -288,44 +262,24 @@ async def handle_basic_panam_message(
     panam_memory.add_message(message.channel.id, "assistant", answer)
 
 
-async def find_recent_text_message(channel) -> str | None:
-    history = getattr(channel, "history", None)
-    if history is None:
-        return None
+def should_skip_recent_text_content(content: str) -> bool:
+    request_text = None
+    if is_panam_addressed(content):
+        request_text = re.sub(
+            PANAM_STRIP_PREFIX_PATTERN,
+            "",
+            content,
+            flags=re.IGNORECASE,
+        ).strip()
 
-    async for message in history(limit=15):
-        if message.author.bot:
-            continue
+    normalized = normalize_text(request_text or content)
+    if not normalized or normalized == "panam":
+        return True
 
-        content = (message.content or "").strip()
-        if not content:
-            continue
-
-        if content.startswith("/"):
-            continue
-
-        request_text = None
-        if is_panam_addressed(content):
-            request_text = re.sub(
-                PANAM_STRIP_PREFIX_PATTERN,
-                "",
-                content,
-                flags=re.IGNORECASE,
-            ).strip()
-
-        normalized = normalize_text(request_text or content)
-        if not normalized or normalized == "panam":
-            continue
-
-        if (
-            is_natural_attachment_analyze_request(normalized)
-            or parse_natural_intent(normalized) is not None
-        ):
-            continue
-
-        return content
-
-    return None
+    return (
+        is_natural_attachment_analyze_request(normalized)
+        or parse_natural_intent(normalized) is not None
+    )
 
 
 def is_natural_analyze_request(content: str) -> bool:
@@ -1399,7 +1353,10 @@ class DiscordAIBot(discord.Client):
                 return
 
             if intent_name == "note_add_previous":
-                previous_content = await find_recent_text_message(message.channel)
+                previous_content = await find_recent_text_message(
+                    message.channel,
+                    should_skip_content=should_skip_recent_text_content,
+                )
                 if previous_content is None:
                     await message.channel.send(
                         "Nemám co uložit. Napiš text poznámky nebo to pošli pod zprávu, kterou si mám zapamatovat."
@@ -1424,7 +1381,10 @@ class DiscordAIBot(discord.Client):
                     value = inline_note
 
                 if is_context_reference(value):
-                    previous_content = await find_recent_text_message(message.channel)
+                    previous_content = await find_recent_text_message(
+                        message.channel,
+                        should_skip_content=should_skip_recent_text_content,
+                    )
                     if previous_content is None:
                         await message.channel.send(
                             "Nemám co uložit. Napiš text poznámky nebo to pošli pod zprávu, kterou si mám zapamatovat."
@@ -1492,7 +1452,10 @@ class DiscordAIBot(discord.Client):
                         await message.reply(answer, mention_author=False)
                         return
 
-                    previous_content = await find_recent_text_message(message.channel)
+                    previous_content = await find_recent_text_message(
+                        message.channel,
+                        should_skip_content=should_skip_recent_text_content,
+                    )
                     if previous_content is None:
                         selected_file = await find_recent_supported_attachment(message.channel)
                         if selected_file is not None:
@@ -1531,7 +1494,10 @@ class DiscordAIBot(discord.Client):
                     await message.reply(answer, mention_author=False)
                     return
 
-                previous_content = await find_recent_text_message(message.channel)
+                previous_content = await find_recent_text_message(
+                    message.channel,
+                    should_skip_content=should_skip_recent_text_content,
+                )
                 if previous_content is None:
                     selected_file = await find_recent_supported_attachment(message.channel)
                     if selected_file is not None:
@@ -1575,7 +1541,10 @@ class DiscordAIBot(discord.Client):
                     return
 
                 if is_context_reference(value):
-                    previous_content = await find_recent_text_message(message.channel)
+                    previous_content = await find_recent_text_message(
+                        message.channel,
+                        should_skip_content=should_skip_recent_text_content,
+                    )
                     if previous_content is None:
                         await message.channel.send(
                             "Nemám co shrnout. Pošli text, přílohu, nebo to napiš hned pod zprávu, kterou chceš shrnout."
@@ -1603,7 +1572,10 @@ class DiscordAIBot(discord.Client):
                     await message.reply(answer, mention_author=False)
                     return
 
-                previous_content = await find_recent_text_message(message.channel)
+                previous_content = await find_recent_text_message(
+                    message.channel,
+                    should_skip_content=should_skip_recent_text_content,
+                )
                 if previous_content is None:
                     await message.channel.send(
                         "Nemám co shrnout. Pošli text, přílohu, nebo to napiš hned pod zprávu, kterou chceš shrnout."
