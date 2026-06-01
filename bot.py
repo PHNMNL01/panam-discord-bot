@@ -8,6 +8,10 @@ from discord import app_commands
 from dotenv import load_dotenv
 
 from panam_discord_analyze_command import handle_analyze_command
+from panam_discord_basic_commands import (
+    handle_help_command,
+    handle_ping_command,
+)
 from panam_discord_channel_commands import (
     handle_channel_summary_command,
     handle_search_messages_command,
@@ -35,12 +39,8 @@ from panam_discord_file_commands import (
     handle_transform_excel_command,
 )
 from panam_discord_file_job_test import handle_file_job_test_command
-from panam_discord_help import get_help_text
 from panam_discord_memory_command import handle_memory_clear_command
 from panam_discord_message_router import handle_discord_message
-from panam_discord_responses import (
-    split_discord_message,
-)
 from panam_discord_read_file import handle_read_file_command
 
 
@@ -178,7 +178,7 @@ async def ping(interaction: discord.Interaction) -> None:
         )
         return
 
-    await interaction.response.send_message("Panam je online.")
+    await handle_ping_command(interaction)
 
 
 @bot.tree.command(
@@ -194,10 +194,7 @@ async def help_command(interaction: discord.Interaction) -> None:
         )
         return
 
-    help_chunks = split_discord_message(get_help_text())
-    await interaction.response.send_message(help_chunks[0])
-    for chunk in help_chunks[1:]:
-        await interaction.followup.send(chunk)
+    await handle_help_command(interaction)
 
 
 @bot.tree.command(
