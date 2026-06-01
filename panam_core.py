@@ -1,7 +1,12 @@
 from dataclasses import dataclass
 from pathlib import Path
 
-from panam_ai import ask_panam, ask_panam_talk, summarize_text
+from panam_ai import (
+    ask_panam,
+    ask_panam_talk,
+    summarize_channel_messages,
+    summarize_text,
+)
 
 
 @dataclass
@@ -24,3 +29,7 @@ async def handle_talk(model: str, message: str) -> PanamResponse:
 
 async def handle_summary(model: str, text: str) -> PanamResponse:
     return PanamResponse(text=await summarize_text(model, text))
+
+
+async def handle_channel_summary(model: str, channel_text: str) -> PanamResponse:
+    return PanamResponse(text=await summarize_channel_messages(model, channel_text))

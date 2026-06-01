@@ -37,7 +37,6 @@ from panam_ai import (
     extract_structured_data,
     process_document_text,
     shorten_for_discord,
-    summarize_channel_messages,
     transform_docx_text,
 )
 from panam_phrases import (
@@ -3684,7 +3683,8 @@ async def channel_summary(
             for message in messages
         )
 
-        answer = await summarize_channel_messages(OPENAI_MODEL, channel_text)
+        response = await panam_core.handle_channel_summary(OPENAI_MODEL, channel_text)
+        answer = response.text
         await interaction.followup.send(answer)
 
     except Exception:
