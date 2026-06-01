@@ -3,7 +3,6 @@ import asyncio
 import logging
 import logging.handlers
 import re
-import unicodedata
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
@@ -45,6 +44,15 @@ from panam_discord_history import (
     find_recent_supported_attachment,
     find_recent_xlsx_attachment,
 )
+from panam_discord_message_helpers import (
+    extract_basic_panam_prompt,
+    extract_inline_content_after_trigger,
+    extract_panam_request,
+    is_context_reference,
+    is_panam_addressed,
+    normalize_natural_text,
+    normalize_text,
+)
 from panam_discord_responses import (
     send_channel_chunks,
     send_followup_chunks,
@@ -69,7 +77,6 @@ from panam_phrases import (
     ATTACHMENT_ANALYZE_PATTERNS,
     ATTACHMENT_SUBJECTS,
     BASIC_PANAM_EMPTY_RESPONSE,
-    CONTEXT_REFERENCES,
     GENERIC_ATTACHMENT_PATTERNS,
     GENERIC_IMAGE_PHRASES,
     HELP_PATTERNS,
@@ -80,8 +87,6 @@ from panam_phrases import (
     NOTE_LIST_PATTERN,
     OPINION_CONTEXT_PATTERNS,
     OPINION_TRIGGERS,
-    PANAM_OPINION_MENTION_PATTERN,
-    PANAM_PREFIX_PATTERN,
     PANAM_STRIP_PREFIX_PATTERN,
     SUMMARY_CONTEXT_PATTERN,
     SUMMARY_TRIGGERS,
@@ -264,42 +269,6 @@ async def find_previous_message_content(
     return fallback_content
 
 
-def extract_panam_request(
-    message: discord.Message,
-    bot_user: discord.ClientUser,
-) -> Optional[str]:
-    content = (message.content or "").strip()
-    mention_patterns = (
-        f"<@{bot_user.id}>",
-        f"<@!{bot_user.id}>",
-    )
-
-    for mention in mention_patterns:
-        if content.startswith(mention):
-            return content[len(mention):].strip(" \t\n\r,.:;!-")
-
-    match = re.match(PANAM_PREFIX_PATTERN, content, re.IGNORECASE)
-    if match:
-        return match.group(1).strip()
-
-    if re.match(
-        PANAM_OPINION_MENTION_PATTERN,
-        content,
-        re.IGNORECASE,
-    ):
-        return content
-
-    return None
-
-
-def extract_basic_panam_prompt(content: str) -> str | None:
-    match = re.match(PANAM_PREFIX_PATTERN, content.strip(), re.IGNORECASE)
-    if not match:
-        return None
-
-    return match.group(1).strip()
-
-
 async def handle_basic_panam_message(
     message: discord.Message,
     basic_prompt: str,
@@ -317,52 +286,6 @@ async def handle_basic_panam_message(
     await message.reply(answer, mention_author=False)
     panam_memory.add_message(message.channel.id, "user", message.content or basic_prompt)
     panam_memory.add_message(message.channel.id, "assistant", answer)
-
-
-def normalize_natural_text(text: str) -> str:
-    normalized = unicodedata.normalize("NFKD", text.lower())
-    without_diacritics = "".join(
-        character
-        for character in normalized
-        if not unicodedata.combining(character)
-    )
-    return re.sub(r"\s+", " ", without_diacritics).strip(" \t\n\r,.:;!-?")
-
-
-def normalize_text(text: str) -> str:
-    return normalize_natural_text(text)
-
-
-def is_panam_addressed(content: str) -> bool:
-    text = normalize_text(content)
-    return (
-        text.startswith("panam")
-        or text.startswith("hey panam")
-        or re.search(r"\bpanam\b", text) is not None
-    )
-
-
-def is_context_reference(text: str) -> bool:
-    normalized = normalize_text(text)
-    return normalized in CONTEXT_REFERENCES
-
-
-def extract_inline_content_after_trigger(content: str, trigger_phrases: list[str]) -> str:
-    text = content.strip()
-    text = re.sub(PANAM_STRIP_PREFIX_PATTERN, "", text, flags=re.IGNORECASE)
-
-    for phrase in trigger_phrases:
-        pattern = rf"^{re.escape(phrase)}\b\s*(.*)$"
-        match = re.match(pattern, text, re.IGNORECASE)
-        if not match:
-            continue
-
-        value = match.group(1).strip()
-        if is_context_reference(value):
-            return ""
-        return value
-
-    return ""
 
 
 async def find_recent_text_message(channel) -> str | None:
