@@ -10,8 +10,6 @@ from dotenv import load_dotenv
 import panam_memory
 import panam_core
 from panam_discord_attachments import (
-    MAX_DOCUMENT_SIZE_BYTES,
-    SUPPORTED_DOCUMENT_EXTENSIONS,
     get_attachment_kind,
     get_safe_attachment_info,
     find_supported_attachment_in_message,
@@ -34,11 +32,11 @@ from panam_discord_channel_tools import (
     build_channel_summary_text,
     search_recent_channel_messages,
 )
-from panam_discord_file_jobs import (
-    run_docx_transform_file_job,
-    run_human_document_file_job,
-    run_spreadsheet_transform_file_job,
-    run_structured_data_file_job,
+from panam_discord_file_commands import (
+    handle_extract_data_command,
+    handle_process_file_command,
+    handle_transform_docx_command,
+    handle_transform_excel_command,
 )
 from panam_discord_file_job_test import handle_file_job_test_command
 from panam_discord_help import get_help_text
@@ -1320,28 +1318,11 @@ async def transform_docx(
         )
         return
 
-    if file.size > MAX_DOCUMENT_SIZE_BYTES:
-        await interaction.response.send_message(
-            "Ten soubor je moc velky. Zatim beru max 20 MB.",
-            ephemeral=True,
-        )
-        return
-
-    extension = get_file_extension(file.filename)
-    if extension != ".docx":
-        await interaction.response.send_message(
-            "Tenhle command podporuje jen DOCX soubory.",
-            ephemeral=True,
-        )
-        return
-
-    await interaction.response.defer(thinking=True)
-    await run_docx_transform_file_job(
+    await handle_transform_docx_command(
         OPENAI_MODEL,
         interaction,
         file,
         instruction,
-        "slash_command",
     )
 
 
@@ -1366,27 +1347,10 @@ async def transform_excel(
         )
         return
 
-    if file.size > MAX_DOCUMENT_SIZE_BYTES:
-        await interaction.response.send_message(
-            "Ten soubor je moc velky. Zatim beru max 20 MB.",
-            ephemeral=True,
-        )
-        return
-
-    extension = get_file_extension(file.filename)
-    if extension != ".xlsx":
-        await interaction.response.send_message(
-            "Tenhle command podporuje jen XLSX soubory.",
-            ephemeral=True,
-        )
-        return
-
-    await interaction.response.defer(thinking=True)
-    await run_spreadsheet_transform_file_job(
+    await handle_transform_excel_command(
         interaction,
         file,
         instruction,
-        "slash_command",
     )
 
 
@@ -1413,38 +1377,12 @@ async def process_file(
         )
         return
 
-    if file.size > MAX_DOCUMENT_SIZE_BYTES:
-        await interaction.response.send_message(
-            "Ten soubor je moc velky. Zatim beru max 20 MB.",
-            ephemeral=True,
-        )
-        return
-
-    extension = get_file_extension(file.filename)
-    if extension not in SUPPORTED_DOCUMENT_EXTENSIONS:
-        await interaction.response.send_message(
-            "Tenhle command podporuje dokumenty TXT, MD, CSV, JSON, PDF, DOCX nebo XLSX.",
-            ephemeral=True,
-        )
-        return
-
-    normalized_output_format = output_format.lower().strip(".")
-    if normalized_output_format not in {"md", "txt", "docx"}:
-        await interaction.response.send_message(
-            "Podporovane output_format jsou jen md, txt nebo docx.",
-            ephemeral=True,
-        )
-        return
-
-    await interaction.response.defer(thinking=True)
-    await run_human_document_file_job(
+    await handle_process_file_command(
         OPENAI_MODEL,
         interaction,
         file,
         instruction,
-        normalized_output_format,
-        "slash_command",
-        "process_file",
+        output_format,
     )
 
 
@@ -1471,38 +1409,12 @@ async def extract_data(
         )
         return
 
-    if file.size > MAX_DOCUMENT_SIZE_BYTES:
-        await interaction.response.send_message(
-            "Ten soubor je moc velky. Zatim beru max 20 MB.",
-            ephemeral=True,
-        )
-        return
-
-    extension = get_file_extension(file.filename)
-    if extension not in SUPPORTED_DOCUMENT_EXTENSIONS:
-        await interaction.response.send_message(
-            "Tenhle command podporuje dokumenty TXT, MD, CSV, JSON, PDF, DOCX nebo XLSX.",
-            ephemeral=True,
-        )
-        return
-
-    normalized_output_format = output_format.lower().strip(".")
-    if normalized_output_format not in {"json", "csv", "md", "xlsx"}:
-        await interaction.response.send_message(
-            "Podporovane output_format jsou jen json, csv, md nebo xlsx.",
-            ephemeral=True,
-        )
-        return
-
-    await interaction.response.defer(thinking=True)
-    await run_structured_data_file_job(
+    await handle_extract_data_command(
         OPENAI_MODEL,
         interaction,
         file,
         instruction,
-        normalized_output_format,
-        "slash_command",
-        "extract_data",
+        output_format,
     )
 
 
