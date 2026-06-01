@@ -33,13 +33,11 @@ from panam_ai import (
     analyze_image,
     analyze_document_text,
     ask_panam,
-    ask_panam_talk,
     classify_file_request_intent,
     extract_structured_data,
     process_document_text,
     shorten_for_discord,
     summarize_channel_messages,
-    summarize_text,
     transform_docx_text,
 )
 from panam_phrases import (
@@ -3162,13 +3160,15 @@ class DiscordAIBot(discord.Client):
                         )
                         return
 
-                    await send_channel_chunks(
-                        message,
-                        await summarize_text(OPENAI_MODEL, previous_content),
+                    response = await panam_core.handle_summary(
+                        OPENAI_MODEL,
+                        previous_content,
                     )
+                    await send_channel_chunks(message, response.text)
                     return
 
-                await send_channel_chunks(message, await summarize_text(OPENAI_MODEL, value))
+                response = await panam_core.handle_summary(OPENAI_MODEL, value)
+                await send_channel_chunks(message, response.text)
                 return
 
             if intent_name == "summary_previous":
@@ -3188,17 +3188,16 @@ class DiscordAIBot(discord.Client):
                     )
                     return
 
-                await send_channel_chunks(
-                    message,
-                    await summarize_text(OPENAI_MODEL, previous_content),
+                response = await panam_core.handle_summary(
+                    OPENAI_MODEL,
+                    previous_content,
                 )
+                await send_channel_chunks(message, response.text)
                 return
 
             if intent_name == "talk" and value:
-                await send_channel_chunks(
-                    message,
-                    await ask_panam_talk(OPENAI_MODEL, value),
-                )
+                response = await panam_core.handle_talk(OPENAI_MODEL, value)
+                await send_channel_chunks(message, response.text)
                 return
 
             basic_prompt = extract_basic_panam_prompt(message.content or "")
@@ -3713,7 +3712,8 @@ async def summary(interaction: discord.Interaction, text: str) -> None:
     await interaction.response.defer(thinking=True)
 
     try:
-        answer = await summarize_text(OPENAI_MODEL, text)
+        response = await panam_core.handle_summary(OPENAI_MODEL, text)
+        answer = response.text
         await interaction.followup.send(answer)
 
     except Exception:
@@ -4740,7 +4740,8 @@ async def panam_talk(interaction: discord.Interaction, message: str) -> None:
     await interaction.response.defer(thinking=True)
 
     try:
-        answer = await ask_panam_talk(OPENAI_MODEL, message)
+        response = await panam_core.handle_talk(OPENAI_MODEL, message)
+        answer = response.text
         await send_followup_chunks(interaction, answer)
 
     except Exception:
