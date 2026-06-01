@@ -29,8 +29,13 @@ from panam_discord_attachments import (
     get_safe_attachment_info,
     find_image_attachment_in_message,
     find_supported_attachment_in_message,
-    is_supported_image_attachment,
     read_attachment_bytes,
+)
+from panam_discord_history import (
+    find_recent_docx_attachment,
+    find_recent_image_attachment,
+    find_recent_supported_attachment,
+    find_recent_xlsx_attachment,
 )
 from panam_file_responses import build_file_job_success_message
 from panam_file_context import (
@@ -116,7 +121,7 @@ ALLOWED_CHANNEL_IDS = [
     for channel_id in os.getenv("ALLOWED_CHANNEL_IDS", "").split(",")
     if channel_id.strip()
 ]
-OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4.1-mini")
+OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-5.4-mini")
 COMMAND_STATUSES: dict[int, str] = {}
 CREATIVE_SPREADSHEET_FALLBACK_MESSAGE = (
     "Tohle je moc volná úprava. Původní Excel neupravuju a data si nedomýšlím. "
@@ -304,70 +309,6 @@ def split_discord_message(text: str, limit: int = 1900) -> list[str]:
         chunks.append(remaining)
 
     return chunks
-
-
-async def find_recent_image_attachment(channel) -> discord.Attachment | None:
-    history = getattr(channel, "history", None)
-    if history is None:
-        return None
-
-    async for message in history(limit=15):
-        if message.author.bot:
-            continue
-
-        for attachment in message.attachments:
-            if is_supported_image_attachment(attachment):
-                return attachment
-
-    return None
-
-
-async def find_recent_supported_attachment(channel) -> discord.Attachment | None:
-    history = getattr(channel, "history", None)
-    if history is None:
-        return None
-
-    async for message in history(limit=15):
-        if message.author.bot:
-            continue
-
-        for attachment in message.attachments:
-            if get_attachment_kind(attachment) is not None:
-                return attachment
-
-    return None
-
-
-async def find_recent_xlsx_attachment(channel) -> discord.Attachment | None:
-    history = getattr(channel, "history", None)
-    if history is None:
-        return None
-
-    async for message in history(limit=15):
-        if message.author.bot:
-            continue
-
-        for attachment in message.attachments:
-            if get_file_extension(attachment.filename) == ".xlsx":
-                return attachment
-
-    return None
-
-
-async def find_recent_docx_attachment(channel) -> discord.Attachment | None:
-    history = getattr(channel, "history", None)
-    if history is None:
-        return None
-
-    async for message in history(limit=15):
-        if message.author.bot:
-            continue
-
-        for attachment in message.attachments:
-            if get_file_extension(attachment.filename) == ".docx":
-                return attachment
-
-    return None
 
 
 async def analyze_selected_attachment(file: discord.Attachment, question: str) -> str:
