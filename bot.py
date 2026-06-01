@@ -96,7 +96,6 @@ ALLOWED_CHANNEL_IDS = [
     if channel_id.strip()
 ]
 OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4.1-mini")
-TODOS_FILE = BASE_DIR / "todos.json"
 SUPPORTED_IMAGE_EXTENSIONS = (".png", ".jpg", ".jpeg", ".webp", ".gif")
 SUPPORTED_DOCUMENT_EXTENSIONS = (".txt", ".md", ".csv", ".pdf", ".docx", ".xlsx")
 MAX_IMAGE_SIZE_BYTES = 20 * 1024 * 1024
@@ -278,24 +277,6 @@ logger.info("Panam bot startuje.")
 
 if not DISCORD_BOT_TOKEN:
     raise RuntimeError("Chybí DISCORD_BOT_TOKEN v .env souboru.")
-
-
-def load_todos() -> list[dict]:
-    if not TODOS_FILE.exists():
-        return []
-
-    with TODOS_FILE.open("r", encoding="utf-8") as todos_file:
-        todos = json.load(todos_file)
-
-    if not isinstance(todos, list):
-        return []
-
-    return todos
-
-
-def save_todos(todos: list[dict]) -> None:
-    with TODOS_FILE.open("w", encoding="utf-8") as todos_file:
-        json.dump(todos, todos_file, ensure_ascii=False, indent=2)
 
 
 def get_author_name(author) -> str:
@@ -633,46 +614,6 @@ async def send_followup_chunks(interaction: discord.Interaction, text: str) -> N
 async def send_channel_chunks(message: discord.Message, text: str) -> None:
     for chunk in split_discord_message(text):
         await message.channel.send(chunk)
-
-
-def create_todo(text: str, author, channel_id: int) -> int:
-    todos = load_todos()
-    next_id = max(
-        (todo.get("id", 0) for todo in todos if isinstance(todo.get("id"), int)),
-        default=0,
-    ) + 1
-
-    todos.append(
-        {
-            "id": next_id,
-            "text": text,
-            "done": False,
-            "author_id": author.id,
-            "author_name": get_author_name(author),
-            "channel_id": channel_id,
-            "created_at": datetime.now(timezone.utc).isoformat(),
-            "completed_at": None,
-        }
-    )
-    save_todos(todos)
-
-    return next_id
-
-
-def format_todo_list_response() -> str:
-    todos = load_todos()
-    active_todos = [todo for todo in todos if not todo.get("done")]
-    if not active_todos:
-        return "Nemáš žádné aktivní úkoly."
-
-    lines = ["Aktivní úkoly:"]
-    for todo in active_todos[:15]:
-        todo_id = todo.get("id", "?")
-        text = todo.get("text", "")
-        author_name = todo.get("author_name", "neznámý autor")
-        lines.append(f"#{todo_id} - {text} ({author_name})")
-
-    return shorten_for_discord("\n".join(lines))
 
 
 def get_help_text() -> str:
@@ -2977,8 +2918,13 @@ class DiscordAIBot(discord.Client):
                 return
 
             if intent_name == "todo_add" and value:
-                todo_id = create_todo(value, message.author, message.channel.id)
-                await message.channel.send(f"Úkol #{todo_id} uložený.")
+                response = await panam_core.handle_todo_add(
+                    value,
+                    message.author.id,
+                    get_author_name(message.author),
+                    message.channel.id,
+                )
+                await message.channel.send(response.text)
                 return
 
             if intent_name == "note_search" and value:
@@ -2992,7 +2938,8 @@ class DiscordAIBot(discord.Client):
                 return
 
             if intent_name == "todo_list":
-                await message.channel.send(format_todo_list_response())
+                response = await panam_core.handle_todo_list()
+                await message.channel.send(response.text)
                 return
 
             if intent_name == "ask" and value:
@@ -3317,31 +3264,13 @@ async def todo_add(interaction: discord.Interaction, text: str) -> None:
         return
 
     try:
-        todos = load_todos()
-        next_id = max(
-            (todo.get("id", 0) for todo in todos if isinstance(todo.get("id"), int)),
-            default=0,
-        ) + 1
-
-        todos.append(
-            {
-                "id": next_id,
-                "text": text,
-                "done": False,
-                "author_id": interaction.user.id,
-                "author_name": getattr(
-                    interaction.user,
-                    "display_name",
-                    interaction.user.name,
-                ),
-                "channel_id": interaction.channel_id,
-                "created_at": datetime.now(timezone.utc).isoformat(),
-                "completed_at": None,
-            }
+        response = await panam_core.handle_todo_add(
+            text,
+            interaction.user.id,
+            get_author_name(interaction.user),
+            interaction.channel_id,
         )
-        save_todos(todos)
-
-        await interaction.response.send_message(f"Úkol #{next_id} uložený.")
+        await interaction.response.send_message(response.text)
 
     except Exception:
         mark_command_status(interaction, "error")
@@ -3365,24 +3294,8 @@ async def todo_list(interaction: discord.Interaction) -> None:
         return
 
     try:
-        todos = load_todos()
-        active_todos = [todo for todo in todos if not todo.get("done")]
-
-        if not active_todos:
-            await interaction.response.send_message("Nemáš žádné aktivní úkoly.")
-            return
-
-        lines = ["Aktivní úkoly:"]
-        for todo in active_todos[:15]:
-            todo_id = todo.get("id", "?")
-            text = todo.get("text", "")
-            author_name = todo.get("author_name", "neznámý autor")
-            lines.append(f"#{todo_id} - {text} ({author_name})")
-
-        answer = "\n".join(lines)
-        answer = shorten_for_discord(answer)
-
-        await interaction.response.send_message(answer)
+        response = await panam_core.handle_todo_list()
+        await interaction.response.send_message(response.text)
 
     except Exception:
         mark_command_status(interaction, "error")
@@ -3407,18 +3320,8 @@ async def todo_done(interaction: discord.Interaction, todo_id: int) -> None:
         return
 
     try:
-        todos = load_todos()
-        todo = next((item for item in todos if item.get("id") == todo_id), None)
-
-        if todo is None:
-            await interaction.response.send_message("Takový úkol jsem nenašla.")
-            return
-
-        todo["done"] = True
-        todo["completed_at"] = datetime.now(timezone.utc).isoformat()
-        save_todos(todos)
-
-        await interaction.response.send_message(f"Úkol #{todo_id} je hotový.")
+        response = await panam_core.handle_todo_done(todo_id)
+        await interaction.response.send_message(response.text)
 
     except Exception:
         mark_command_status(interaction, "error")
