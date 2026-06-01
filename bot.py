@@ -1,5 +1,4 @@
 import os
-import asyncio
 import logging
 import logging.handlers
 import re
@@ -21,7 +20,6 @@ from panam_discord_attachments import (
     SUPPORTED_DOCUMENT_EXTENSIONS,
     get_attachment_kind,
     get_safe_attachment_info,
-    find_image_attachment_in_message,
     find_supported_attachment_in_message,
     read_attachment_bytes,
 )
@@ -40,7 +38,6 @@ from panam_discord_file_jobs import (
 from panam_discord_help import get_help_text
 from panam_discord_history import (
     find_recent_docx_attachment,
-    find_recent_image_attachment,
     find_recent_supported_attachment,
     find_recent_xlsx_attachment,
 )
@@ -59,7 +56,6 @@ from panam_discord_responses import (
     split_discord_message,
 )
 from panam_discord_text_history import (
-    find_previous_message_content,
     find_recent_text_message,
 )
 from panam_file_responses import build_file_job_success_message
