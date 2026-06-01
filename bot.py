@@ -33,6 +33,10 @@ from panam_discord_context import (
     log_slash_command,
     mark_command_status,
 )
+from panam_discord_channel_tools import (
+    build_channel_summary_text,
+    search_recent_channel_messages,
+)
 from panam_discord_file_jobs import (
     run_docx_transform_file_job,
     run_human_document_file_job,
@@ -1097,54 +1101,18 @@ async def search_messages(
 
     try:
         channel = interaction.channel
-        history = getattr(channel, "history", None)
-        if history is None:
+        answer = await search_recent_channel_messages(channel, query, limit)
+        if answer is None:
             await interaction.followup.send(
                 "Něco se pokazilo při vyhledávání zpráv."
             )
             return
 
-        query_lower = query.lower()
-        search_limit = min(max(limit, 1), 300)
-        matches = []
-
-        async for message in history(limit=search_limit):
-            if message.author.bot:
-                continue
-
-            content = message.content or ""
-            content_lower = content.lower()
-            if query_lower not in content_lower:
-                continue
-
-            match_index = content_lower.find(query_lower)
-            start = max(match_index - 45, 0)
-            end = min(match_index + len(query) + 90, len(content))
-            excerpt = content[start:end].replace("\n", " ").strip()
-
-            if start > 0:
-                excerpt = "…" + excerpt
-            if end < len(content):
-                excerpt = excerpt + "…"
-
-            created_at = message.created_at.astimezone(timezone.utc).strftime(
-                "%Y-%m-%d %H:%M UTC"
-            )
-            author_name = getattr(message.author, "display_name", message.author.name)
-            matches.append(
-                f"{len(matches) + 1}. [{created_at}] {author_name}: {excerpt}"
-            )
-
-            if len(matches) >= 10:
-                break
-
-        if not matches:
+        if answer == "":
             await interaction.followup.send("Nic jsem nenašla.")
             return
 
-        answer = "Nalezené zprávy:\n" + "\n".join(matches)
         answer = shorten_for_discord(answer)
-
         await interaction.followup.send(answer)
 
     except Exception:
@@ -1176,49 +1144,16 @@ async def channel_summary(
 
     try:
         channel = interaction.channel
-        history = getattr(channel, "history", None)
-        if history is None:
+        channel_text = await build_channel_summary_text(channel, limit)
+        if channel_text is None:
             await interaction.followup.send(
                 "Něco se pokazilo při načítání zpráv."
             )
             return
 
-        summary_limit = min(max(limit, 1), 200)
-        messages = []
-
-        async for message in history(limit=summary_limit):
-            if message.author.bot:
-                continue
-
-            content = (message.content or "").strip()
-            if not content:
-                continue
-
-            created_at = message.created_at.astimezone(timezone.utc).strftime(
-                "%Y-%m-%d %H:%M UTC"
-            )
-            author_name = getattr(message.author, "display_name", message.author.name)
-            messages.append(
-                {
-                    "author": author_name,
-                    "created_at": created_at,
-                    "content": content,
-                }
-            )
-
-        if not messages:
+        if channel_text == "":
             await interaction.followup.send("Nemám tu co shrnout.")
             return
-
-        messages.reverse()
-        channel_text = "\n".join(
-            (
-                f"Autor: {message['author']}\n"
-                f"Čas: {message['created_at']}\n"
-                f"Text: {message['content']}"
-            )
-            for message in messages
-        )
 
         response = await panam_core.handle_channel_summary(OPENAI_MODEL, channel_text)
         answer = response.text
