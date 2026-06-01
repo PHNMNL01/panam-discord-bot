@@ -12,7 +12,7 @@ Projekt je zatim prakticky PoC, ale uz ma oddelenou AI vrstvu, prirozene fraze, 
 - ukladat a hledat lokalni poznamky
 - spravovat jednoduchy todo list
 - analyzovat obrazky a dokumenty
-- cist TXT, MD, CSV, PDF, DOCX a XLSX
+- cist TXT, MD, CSV, JSON, PDF, DOCX a XLSX
 - vytvaret lidske vystupni dokumenty jako MD, TXT nebo DOCX
 - tezit strukturovana data do JSON, CSV, Markdownu nebo XLSX
 - reagovat na prirozene fraze typu `Panam shrn to`

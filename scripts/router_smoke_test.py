@@ -6,7 +6,7 @@ import sys
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_ROOT))
 
-from panam_router import decide_file_response_mode
+from panam_router import decide_file_response_mode, has_explicit_file_output_request
 
 
 if hasattr(sys.stdout, "reconfigure"):
@@ -18,7 +18,16 @@ TEST_CASES = [
     ("Panam udelej z toho DOCX", "human_document", "docx", None),
     ("Panam priprav z toho Word dokument", "human_document", "docx", None),
     ("Panam dej mi to do Excelu", "structured_data", "xlsx", None),
+    ("Panam dej mi to excelu pls", "structured_data", "xlsx", None),
+    ("Panam dej mi to do excelu pls", "structured_data", "xlsx", None),
+    ("Panam udelej mi z toho excel pls", "structured_data", "xlsx", None),
+    ("Panam udelej z toho excel", "structured_data", "xlsx", None),
+    ("Panam udelej mi z toho excel", "structured_data", "xlsx", None),
+    ("Panam preved to do excelu", "structured_data", "xlsx", None),
+    ("Panam dej mi z toho xlsx", "structured_data", "xlsx", None),
+    ("Panam dej mi to do xlsx", "structured_data", "xlsx", None),
     ("Panam udelej z toho tabulku", "structured_data", "xlsx", None),
+    ("Panam udelej markdown tabulku", "structured_data", "md", None),
     ("Panam udelej z toho soubor csv", "structured_data", "csv", None),
     ("Panam vrat JSON", "structured_data", "json", None),
     ("Panam dej mi to do souboru", "human_document", "md", None),
@@ -129,6 +138,17 @@ TEST_CASES = [
     ),
 ]
 
+EXPLICIT_FILE_OUTPUT_CASES = [
+    "Panam dej mi to excelu pls",
+    "Panam dej mi to do excelu pls",
+    "Panam udelej z toho excel",
+    "Panam udelej mi z toho excel",
+    "Panam preved to do excelu",
+    "Panam dej mi z toho xlsx",
+    "Panam dej mi to do xlsx",
+    "Panam udelej z toho tabulku",
+]
+
 
 def strip_panam_prefix(text: str) -> str:
     return re.sub(r"^(?:hey\s+)?panam\b[\s,.:;!-]*", "", text, flags=re.IGNORECASE)
@@ -167,6 +187,17 @@ def main() -> int:
         print(f"  expected: {format_result(expected_mode, expected_output_format)}")
         print(f"  actual: {format_result(actual_mode, actual_output_format)}")
         print(f"  raw: {result}")
+
+    for input_text in EXPLICIT_FILE_OUTPUT_CASES:
+        request_text = strip_panam_prefix(input_text)
+        if has_explicit_file_output_request(request_text):
+            print(f"PASS: {input_text} -> explicit_file_output_request")
+            continue
+
+        failures += 1
+        print(f"FAIL: {input_text}")
+        print("  expected: explicit_file_output_request")
+        print("  actual: no explicit file output request")
 
     return 1 if failures else 0
 

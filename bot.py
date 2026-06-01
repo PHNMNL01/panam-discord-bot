@@ -193,7 +193,7 @@ async def analyze_selected_attachment(file: discord.Attachment, question: str) -
     attachment_kind = get_attachment_kind(file)
     if attachment_kind is None:
         raise AttachmentAnalysisUserError(
-            "Tenhle typ souboru zatím neumím přečíst. Podporuju obrázky PNG, JPG, JPEG, WEBP, GIF a dokumenty TXT, MD, CSV, PDF, DOCX, XLSX."
+            "Tenhle typ souboru zatím neumím přečíst. Podporuju obrázky PNG, JPG, JPEG, WEBP, GIF a dokumenty TXT, MD, CSV, JSON, PDF, DOCX, XLSX."
         )
 
     if file.size > MAX_IMAGE_SIZE_BYTES:
@@ -252,7 +252,7 @@ def get_help_text() -> str:
         "`Panam ukaž todo`, `Panam ukaž úkoly`\n\n"
         "4. Přílohy a soubory\n"
         "Obrázky: `.png`, `.jpg`, `.jpeg`, `.webp`, `.gif`. "
-        "Dokumenty: `.txt`, `.md`, `.csv`, `.pdf`, `.docx`, `.xlsx` do 20 MB.\n"
+        "Dokumenty: `.txt`, `.md`, `.csv`, `.json`, `.pdf`, `.docx`, `.xlsx` do 20 MB.\n"
         "`/analyze` nebo `Panam co je v tom souboru?` odpoví do chatu.\n"
         "`/read_file` přečte dokument. `/process_file` vytvoří `.md`/`.txt`/`.docx`.\n"
         "`/extract_data` vytěží `json`, `csv`, `md` nebo `xlsx`.\n\n"
@@ -785,7 +785,7 @@ async def handle_natural_file_request(
 
     if get_attachment_kind(file) != "document":
         await message.reply(
-            "Vystupni soubory zatim umim tvorit jen z dokumentu TXT, MD, CSV, PDF, DOCX nebo XLSX.",
+            "Vystupni soubory zatim umim tvorit jen z dokumentu TXT, MD, CSV, JSON, PDF, DOCX nebo XLSX.",
             mention_author=False,
         )
         return
@@ -797,7 +797,7 @@ async def handle_natural_file_request(
 
     if extension not in SUPPORTED_DOCUMENT_EXTENSIONS:
         await message.reply(
-            "Tenhle rezim podporuje dokumenty TXT, MD, CSV, PDF, DOCX nebo XLSX.",
+            "Tenhle rezim podporuje dokumenty TXT, MD, CSV, JSON, PDF, DOCX nebo XLSX.",
             mention_author=False,
         )
         return
@@ -2232,7 +2232,7 @@ async def analyze(
 
 @bot.tree.command(
     name="read_file",
-    description="Přečti TXT, MD, CSV, PDF, DOCX nebo XLSX přílohu pomocí AI."
+    description="Přečti TXT, MD, CSV, JSON, PDF, DOCX nebo XLSX přílohu pomocí AI."
 )
 @app_commands.describe(
     file="Dokument k přečtení",
@@ -2261,7 +2261,7 @@ async def read_file(
     extension = get_file_extension(file.filename)
     if extension not in SUPPORTED_DOCUMENT_EXTENSIONS:
         await interaction.response.send_message(
-            "Tenhle typ dokumentu zatím neumím přečíst. Pošli mi prosím TXT, MD, CSV, PDF, DOCX nebo XLSX.",
+            "Tenhle typ dokumentu zatím neumím přečíst. Pošli mi prosím TXT, MD, CSV, JSON, PDF, DOCX nebo XLSX.",
             ephemeral=True,
         )
         return
@@ -2358,7 +2358,7 @@ async def file_job_test(
     extension = get_file_extension(file.filename)
     if extension not in SUPPORTED_DOCUMENT_EXTENSIONS:
         await interaction.response.send_message(
-            "File job test zatim podporuje dokumenty TXT, MD, CSV, PDF, DOCX nebo XLSX.",
+            "File job test zatim podporuje dokumenty TXT, MD, CSV, JSON, PDF, DOCX nebo XLSX.",
             ephemeral=True,
         )
         return
@@ -2587,7 +2587,7 @@ async def process_file(
     extension = get_file_extension(file.filename)
     if extension not in SUPPORTED_DOCUMENT_EXTENSIONS:
         await interaction.response.send_message(
-            "Tenhle command podporuje dokumenty TXT, MD, CSV, PDF, DOCX nebo XLSX.",
+            "Tenhle command podporuje dokumenty TXT, MD, CSV, JSON, PDF, DOCX nebo XLSX.",
             ephemeral=True,
         )
         return
@@ -2645,7 +2645,7 @@ async def extract_data(
     extension = get_file_extension(file.filename)
     if extension not in SUPPORTED_DOCUMENT_EXTENSIONS:
         await interaction.response.send_message(
-            "Tenhle command podporuje dokumenty TXT, MD, CSV, PDF, DOCX nebo XLSX.",
+            "Tenhle command podporuje dokumenty TXT, MD, CSV, JSON, PDF, DOCX nebo XLSX.",
             ephemeral=True,
         )
         return

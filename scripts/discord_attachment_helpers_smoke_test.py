@@ -23,11 +23,13 @@ class FakeMessage:
 def main() -> None:
     png = FakeAttachment("image.png")
     txt = FakeAttachment("notes.txt")
+    json_file = FakeAttachment("data.json")
     xlsx = FakeAttachment("data.xlsx", size=456)
     unsupported = FakeAttachment("archive.zip")
 
     assert panam_discord_attachments.get_attachment_kind(png) == "image"
     assert panam_discord_attachments.get_attachment_kind(txt) == "document"
+    assert panam_discord_attachments.get_attachment_kind(json_file) == "document"
     assert panam_discord_attachments.get_attachment_kind(xlsx) == "document"
     assert panam_discord_attachments.get_attachment_kind(unsupported) is None
 
@@ -35,6 +37,7 @@ def main() -> None:
     assert panam_discord_attachments.is_supported_image_attachment(txt) is False
 
     assert panam_discord_attachments.is_supported_document_attachment(txt) is True
+    assert panam_discord_attachments.is_supported_document_attachment(json_file) is True
     assert panam_discord_attachments.is_supported_document_attachment(xlsx) is True
     assert panam_discord_attachments.is_supported_document_attachment(png) is False
 
