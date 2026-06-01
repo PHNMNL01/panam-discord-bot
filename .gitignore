@@ -2,7 +2,7 @@
 .venv/
 __pycache__/
 *.pyc
-.todos.json
-.notes.json
+todos.json
+notes.json
 logs/
 runtime/
