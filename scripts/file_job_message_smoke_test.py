@@ -2,9 +2,10 @@ from pathlib import Path
 import sys
 
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(PROJECT_ROOT))
 
-from bot import build_file_job_success_message
+from panam_file_responses import build_file_job_success_message
 
 
 def assert_common_parts(message: str, output_type: str) -> None:
@@ -14,6 +15,10 @@ def assert_common_parts(message: str, output_type: str) -> None:
 
 
 def main() -> None:
+    source = (PROJECT_ROOT / "panam_file_responses.py").read_text(encoding="utf-8")
+    assert "import discord" not in source
+    assert "from discord" not in source
+
     spreadsheet_message = build_file_job_success_message(
         "xlsx",
         "spreadsheet_transform",
