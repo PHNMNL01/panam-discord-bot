@@ -96,7 +96,6 @@ ALLOWED_CHANNEL_IDS = [
     if channel_id.strip()
 ]
 OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4.1-mini")
-NOTES_FILE = BASE_DIR / "notes.json"
 TODOS_FILE = BASE_DIR / "todos.json"
 SUPPORTED_IMAGE_EXTENSIONS = (".png", ".jpg", ".jpeg", ".webp", ".gif")
 SUPPORTED_DOCUMENT_EXTENSIONS = (".txt", ".md", ".csv", ".pdf", ".docx", ".xlsx")
@@ -279,24 +278,6 @@ logger.info("Panam bot startuje.")
 
 if not DISCORD_BOT_TOKEN:
     raise RuntimeError("Chybí DISCORD_BOT_TOKEN v .env souboru.")
-
-
-def load_notes() -> list[dict]:
-    if not NOTES_FILE.exists():
-        return []
-
-    with NOTES_FILE.open("r", encoding="utf-8") as notes_file:
-        notes = json.load(notes_file)
-
-    if not isinstance(notes, list):
-        return []
-
-    return notes
-
-
-def save_notes(notes: list[dict]) -> None:
-    with NOTES_FILE.open("w", encoding="utf-8") as notes_file:
-        json.dump(notes, notes_file, ensure_ascii=False, indent=2)
 
 
 def load_todos() -> list[dict]:
@@ -652,60 +633,6 @@ async def send_followup_chunks(interaction: discord.Interaction, text: str) -> N
 async def send_channel_chunks(message: discord.Message, text: str) -> None:
     for chunk in split_discord_message(text):
         await message.channel.send(chunk)
-
-
-def create_note(text: str, author, channel_id: int) -> None:
-    notes = load_notes()
-    notes.append(
-        {
-            "text": text,
-            "author_id": author.id,
-            "author_name": get_author_name(author),
-            "channel_id": channel_id,
-            "created_at": datetime.now(timezone.utc).isoformat(),
-        }
-    )
-    save_notes(notes)
-
-
-def format_note_list_response() -> str:
-    notes = load_notes()
-    if not notes:
-        return "Zatím nemám žádné poznámky."
-
-    lines = ["Poslední poznámky:"]
-    for index, note in enumerate(reversed(notes[-10:]), start=1):
-        author_name = note.get("author_name", "neznámý autor")
-        created_at = note.get("created_at", "neznámý čas")
-        note_text = note.get("text", "")
-        lines.append(f"{index}. [{created_at}] {author_name}: {note_text}")
-
-    return shorten_for_discord("\n".join(lines))
-
-
-def format_note_search_response(query: str) -> str:
-    notes = load_notes()
-    if not notes:
-        return "Zatím nemám žádné poznámky."
-
-    query_lower = query.lower()
-    matches = [
-        note
-        for note in notes
-        if query_lower in str(note.get("text", "")).lower()
-    ][-10:]
-
-    if not matches:
-        return "Nic jsem nenašla."
-
-    lines = ["Nalezené poznámky:"]
-    for index, note in enumerate(reversed(matches), start=1):
-        author_name = note.get("author_name", "neznámý autor")
-        created_at = note.get("created_at", "neznámý čas")
-        note_text = note.get("text", "")
-        lines.append(f"{index}. [{created_at}] {author_name}: {note_text}")
-
-    return shorten_for_discord("\n".join(lines))
 
 
 def create_todo(text: str, author, channel_id: int) -> int:
@@ -3006,8 +2933,13 @@ class DiscordAIBot(discord.Client):
                     )
                     return
 
-                create_note(previous_content, message.author, message.channel.id)
-                await message.channel.send("Poznámka uložená.")
+                response = await panam_core.handle_note_add(
+                    previous_content,
+                    message.author.id,
+                    get_author_name(message.author),
+                    message.channel.id,
+                )
+                await message.channel.send(response.text)
                 return
 
             if intent_name == "note_add" and value:
@@ -3026,12 +2958,22 @@ class DiscordAIBot(discord.Client):
                         )
                         return
 
-                    create_note(previous_content, message.author, message.channel.id)
-                    await message.channel.send("Poznámka uložená.")
+                    response = await panam_core.handle_note_add(
+                        previous_content,
+                        message.author.id,
+                        get_author_name(message.author),
+                        message.channel.id,
+                    )
+                    await message.channel.send(response.text)
                     return
 
-                create_note(value, message.author, message.channel.id)
-                await message.channel.send("Poznámka uložená.")
+                response = await panam_core.handle_note_add(
+                    value,
+                    message.author.id,
+                    get_author_name(message.author),
+                    message.channel.id,
+                )
+                await message.channel.send(response.text)
                 return
 
             if intent_name == "todo_add" and value:
@@ -3040,11 +2982,13 @@ class DiscordAIBot(discord.Client):
                 return
 
             if intent_name == "note_search" and value:
-                await message.channel.send(format_note_search_response(value))
+                response = await panam_core.handle_note_search(value)
+                await message.channel.send(response.text)
                 return
 
             if intent_name == "note_list":
-                await message.channel.send(format_note_list_response())
+                response = await panam_core.handle_note_list()
+                await message.channel.send(response.text)
                 return
 
             if intent_name == "todo_list":
@@ -3291,23 +3235,13 @@ async def note_add(interaction: discord.Interaction, text: str) -> None:
         return
 
     try:
-        notes = load_notes()
-        notes.append(
-            {
-                "text": text,
-                "author_id": interaction.user.id,
-                "author_name": getattr(
-                    interaction.user,
-                    "display_name",
-                    interaction.user.name,
-                ),
-                "channel_id": interaction.channel_id,
-                "created_at": datetime.now(timezone.utc).isoformat(),
-            }
+        response = await panam_core.handle_note_add(
+            text,
+            interaction.user.id,
+            get_author_name(interaction.user),
+            interaction.channel_id,
         )
-        save_notes(notes)
-
-        await interaction.response.send_message("Poznámka uložená.")
+        await interaction.response.send_message(response.text)
 
     except Exception:
         mark_command_status(interaction, "error")
@@ -3331,23 +3265,8 @@ async def note_list(interaction: discord.Interaction) -> None:
         return
 
     try:
-        notes = load_notes()
-
-        if not notes:
-            await interaction.response.send_message("Zatím nemám žádné poznámky.")
-            return
-
-        lines = ["Poslední poznámky:"]
-        for index, note in enumerate(reversed(notes[-10:]), start=1):
-            author_name = note.get("author_name", "neznámý autor")
-            created_at = note.get("created_at", "neznámý čas")
-            note_text = note.get("text", "")
-            lines.append(f"{index}. [{created_at}] {author_name}: {note_text}")
-
-        answer = "\n".join(lines)
-        answer = shorten_for_discord(answer)
-
-        await interaction.response.send_message(answer)
+        response = await panam_core.handle_note_list()
+        await interaction.response.send_message(response.text)
 
     except Exception:
         mark_command_status(interaction, "error")
@@ -3372,34 +3291,8 @@ async def note_search(interaction: discord.Interaction, query: str) -> None:
         return
 
     try:
-        notes = load_notes()
-
-        if not notes:
-            await interaction.response.send_message("Zatím nemám žádné poznámky.")
-            return
-
-        query_lower = query.lower()
-        matches = [
-            note
-            for note in notes
-            if query_lower in str(note.get("text", "")).lower()
-        ][-10:]
-
-        if not matches:
-            await interaction.response.send_message("Nic jsem nenašla.")
-            return
-
-        lines = ["Nalezené poznámky:"]
-        for index, note in enumerate(reversed(matches), start=1):
-            author_name = note.get("author_name", "neznámý autor")
-            created_at = note.get("created_at", "neznámý čas")
-            note_text = note.get("text", "")
-            lines.append(f"{index}. [{created_at}] {author_name}: {note_text}")
-
-        answer = "\n".join(lines)
-        answer = shorten_for_discord(answer)
-
-        await interaction.response.send_message(answer)
+        response = await panam_core.handle_note_search(query)
+        await interaction.response.send_message(response.text)
 
     except Exception:
         mark_command_status(interaction, "error")
