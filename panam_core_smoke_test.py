@@ -5,6 +5,10 @@ import panam_core
 
 def main() -> None:
     assert hasattr(panam_core, "PanamResponse")
+    assert hasattr(panam_core, "handle_chat")
+    assert hasattr(panam_core, "handle_talk")
+    assert hasattr(panam_core, "handle_summary")
+    assert hasattr(panam_core, "handle_channel_summary")
 
     source = Path("panam_core.py").read_text(encoding="utf-8")
     assert "import discord" not in source
