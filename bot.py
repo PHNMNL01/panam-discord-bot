@@ -5,7 +5,6 @@ import logging.handlers
 import json
 import re
 import unicodedata
-from functools import wraps
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
@@ -30,6 +29,15 @@ from panam_discord_attachments import (
     find_image_attachment_in_message,
     find_supported_attachment_in_message,
     read_attachment_bytes,
+)
+from panam_discord_context import (
+    get_context_int,
+    get_safe_context,
+    log_action,
+    log_attachment_info,
+    log_slash_command,
+    mark_command_status,
+    mark_source_error,
 )
 from panam_discord_history import (
     find_recent_docx_attachment,
@@ -128,7 +136,6 @@ ALLOWED_CHANNEL_IDS = [
     if channel_id.strip()
 ]
 OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-5.4-mini")
-COMMAND_STATUSES: dict[int, str] = {}
 CREATIVE_SPREADSHEET_FALLBACK_MESSAGE = (
     "Tohle je moc volná úprava. Původní Excel neupravuju a data si nedomýšlím. "
     "Umím bezpečně udělat nový XLSX třeba: odstranit prázdné řádky, filtrovat řádky podle sloupce, "
@@ -166,87 +173,6 @@ def setup_logging() -> None:
         root_logger.addHandler(file_handler)
 
 
-def get_safe_user_name(user) -> str:
-    return str(getattr(user, "display_name", getattr(user, "name", "unknown")))
-
-
-def get_safe_context(source) -> dict[str, str | int | None]:
-    user = getattr(source, "user", None) or getattr(source, "author", None)
-    channel_id = getattr(source, "channel_id", None)
-    if channel_id is None:
-        channel = getattr(source, "channel", None)
-        channel_id = getattr(channel, "id", None)
-
-    guild_id = getattr(source, "guild_id", None)
-    if guild_id is None:
-        guild = getattr(source, "guild", None)
-        guild_id = getattr(guild, "id", None)
-
-    return {
-        "user_id": getattr(user, "id", None),
-        "user_name": get_safe_user_name(user) if user is not None else "unknown",
-        "channel_id": channel_id,
-        "guild_id": guild_id,
-    }
-
-
-def get_context_int(context: dict[str, str | int | None], key: str) -> int:
-    value = context.get(key)
-    if isinstance(value, int):
-        return value
-    if isinstance(value, str) and value.isdecimal():
-        return int(value)
-    return 0
-
-
-def log_attachment_info(action_type: str, action_name: str, source, file: discord.Attachment) -> None:
-    context = get_safe_context(source)
-    attachment = get_safe_attachment_info(file)
-    logger.info(
-        "action_type=%s action=%s user_id=%s user_name=%s channel_id=%s guild_id=%s filename=%s extension=%s size=%s file_type=%s",
-        action_type,
-        action_name,
-        context["user_id"],
-        context["user_name"],
-        context["channel_id"],
-        context["guild_id"],
-        attachment.get("filename"),
-        attachment.get("extension"),
-        attachment.get("size"),
-        attachment.get("file_type"),
-    )
-
-
-def log_action(
-    action_type: str,
-    action_name: str,
-    status: str,
-    source,
-    **details,
-) -> None:
-    context = get_safe_context(source)
-    detail_text = " ".join(
-        f"{key}={value}"
-        for key, value in details.items()
-        if value is not None
-    )
-    logger.info(
-        "action_type=%s action=%s status=%s user_id=%s user_name=%s channel_id=%s guild_id=%s%s",
-        action_type,
-        action_name,
-        status,
-        context["user_id"],
-        context["user_name"],
-        context["channel_id"],
-        context["guild_id"],
-        f" {detail_text}" if detail_text else "",
-    )
-
-
-def mark_command_status(interaction: discord.Interaction, status: str) -> None:
-    COMMAND_STATUSES[interaction.id] = status
-
-
 def is_interaction_allowed(interaction: discord.Interaction, command_name: str) -> bool:
     if ALLOWED_CHANNEL_IDS and str(interaction.channel_id) not in ALLOWED_CHANNEL_IDS:
         log_action("slash_command", command_name, "denied", interaction)
@@ -254,32 +180,6 @@ def is_interaction_allowed(interaction: discord.Interaction, command_name: str) 
         return False
 
     return True
-
-
-def log_slash_command(command_name: str):
-    def decorator(func):
-        @wraps(func)
-        async def wrapper(interaction: discord.Interaction, *args, **kwargs):
-            log_action("slash_command", command_name, "started", interaction)
-            try:
-                result = await func(interaction, *args, **kwargs)
-            except Exception:
-                COMMAND_STATUSES.pop(interaction.id, None)
-                log_action("slash_command", command_name, "error", interaction)
-                logger.exception("Neosetrena chyba pri zpracovani /%s", command_name)
-                raise
-
-            status = COMMAND_STATUSES.pop(interaction.id, None)
-            if status is None:
-                log_action("slash_command", command_name, "success", interaction)
-            elif status == "error":
-                log_action("slash_command", command_name, "error", interaction)
-
-            return result
-
-        return wrapper
-
-    return decorator
 
 
 setup_logging()
@@ -742,11 +642,6 @@ def get_natural_file_action_name(decision: dict) -> str:
     if mode == "unsupported_direct_edit":
         return "unsupported_direct_edit"
     return "chat_answer"
-
-
-def mark_source_error(source) -> None:
-    if isinstance(source, discord.Interaction):
-        mark_command_status(source, "error")
 
 
 async def run_human_document_file_job(
