@@ -16,12 +16,28 @@ import panam_memory
 import panam_core
 from panam_discord_attachments import (
     MAX_DOCUMENT_SIZE_BYTES,
-    MAX_IMAGE_SIZE_BYTES,
     SUPPORTED_DOCUMENT_EXTENSIONS,
     get_attachment_kind,
     get_safe_attachment_info,
     find_supported_attachment_in_message,
     read_attachment_bytes,
+)
+from panam_discord_attachment_analysis import (
+    AttachmentAnalysisUserError,
+    analyze_selected_attachment,
+    get_attachment_context_question,
+    get_context_attachment_question,
+    get_natural_analyze_question,
+    get_natural_attachment_analyze_question,
+    is_attachment_content_request,
+    is_attachment_error_request,
+    is_attachment_look_request,
+    is_attachment_summary_request,
+    is_context_attachment_request,
+    is_general_attachment_context_request,
+    is_generic_natural_attachment_request,
+    is_natural_analyze_request,
+    is_natural_attachment_analyze_request,
 )
 from panam_discord_context import (
     log_action,
@@ -67,20 +83,14 @@ from panam_file_context import (
     set_last_router_decision,
 )
 from panam_ai import (
-    analyze_image,
     analyze_document_text,
     ask_panam,
     classify_file_request_intent,
     shorten_for_discord,
 )
 from panam_phrases import (
-    ATTACHMENT_ANALYZE_PATTERNS,
-    ATTACHMENT_SUBJECTS,
     BASIC_PANAM_EMPTY_RESPONSE,
-    GENERIC_ATTACHMENT_PATTERNS,
-    GENERIC_IMAGE_PHRASES,
     HELP_PATTERNS,
-    IMAGE_ANALYZE_TRIGGERS,
     NATURAL_INTENT_PATTERNS,
     NOTE_ADD_PREVIOUS_PATTERN,
     NOTE_ADD_TRIGGERS,
@@ -108,7 +118,6 @@ from panam_router import (
     validate_ai_file_intent,
 )
 from panam_text_extraction import (
-    TextExtractionUserError as AttachmentAnalysisUserError,
     extract_text_from_attachment,
     extract_text_from_docx,
     extract_text_from_pdf,
@@ -195,50 +204,6 @@ def get_author_name(author) -> str:
     return getattr(author, "display_name", author.name)
 
 
-async def analyze_selected_attachment(file: discord.Attachment, question: str) -> str:
-    attachment_kind = get_attachment_kind(file)
-    if attachment_kind is None:
-        raise AttachmentAnalysisUserError(
-            "Tenhle typ souboru zatím neumím přečíst. Podporuju obrázky PNG, JPG, JPEG, WEBP, GIF a dokumenty TXT, MD, CSV, JSON, PDF, DOCX, XLSX."
-        )
-
-    if file.size > MAX_IMAGE_SIZE_BYTES:
-        raise AttachmentAnalysisUserError(
-            "Ten soubor je moc velký. Zatím beru max 20 MB."
-        )
-
-    if attachment_kind == "image":
-        answer = await analyze_image(OPENAI_MODEL, file.url, question)
-        return shorten_for_discord(answer)
-
-    data = await read_attachment_bytes(file)
-    document_text = extract_text_from_attachment(file.filename, data)
-
-    if not document_text.strip():
-        if get_file_extension(file.filename) == ".xlsx":
-            raise AttachmentAnalysisUserError(
-                "Z toho Excelu se mi nepodarilo vytahnout zadna data."
-            )
-
-        if get_file_extension(file.filename) == ".pdf":
-            raise AttachmentAnalysisUserError(
-                "Z toho PDF se mi nepodařilo vytáhnout žádný text. Možná je to sken nebo obrázkové PDF."
-            )
-
-        raise AttachmentAnalysisUserError(
-            "Z toho dokumentu se mi nepodařilo vytáhnout žádný text."
-        )
-
-    document_text = trim_document_text(document_text)
-    answer = await analyze_document_text(
-        OPENAI_MODEL,
-        document_text,
-        question,
-        file.filename,
-    )
-    return shorten_for_discord(answer)
-
-
 async def handle_basic_panam_message(
     message: discord.Message,
     basic_prompt: str,
@@ -276,138 +241,6 @@ def should_skip_recent_text_content(content: str) -> bool:
         is_natural_attachment_analyze_request(normalized)
         or parse_natural_intent(normalized) is not None
     )
-
-
-def is_natural_analyze_request(content: str) -> bool:
-    text = normalize_natural_text(content)
-    return any(phrase in text for phrase in IMAGE_ANALYZE_TRIGGERS)
-
-
-def is_natural_attachment_analyze_request(content: str) -> bool:
-    if is_natural_analyze_request(content):
-        return True
-
-    text = normalize_natural_text(content)
-    subject_pattern = "|".join(re.escape(subject) for subject in ATTACHMENT_SUBJECTS)
-
-    return any(
-        re.match(
-            pattern_template.format(subject_pattern=subject_pattern),
-            text,
-            re.IGNORECASE,
-        )
-        for pattern_template in ATTACHMENT_ANALYZE_PATTERNS
-    )
-
-
-def is_generic_natural_attachment_request(content: str) -> bool:
-    if is_natural_analyze_request(content):
-        text = normalize_natural_text(content)
-        return text in GENERIC_IMAGE_PHRASES
-
-    text = normalize_natural_text(content)
-    subject_pattern = "|".join(re.escape(subject) for subject in ATTACHMENT_SUBJECTS)
-    return any(
-        re.match(
-            pattern_template.format(subject_pattern=subject_pattern),
-            text,
-            re.IGNORECASE,
-        )
-        for pattern_template in GENERIC_ATTACHMENT_PATTERNS
-    )
-
-
-def get_natural_analyze_question(content: str) -> str:
-    text = normalize_natural_text(content)
-    default_question = "Popiš, co je na obrázku."
-    if text in GENERIC_IMAGE_PHRASES:
-        return default_question
-
-    return content.strip() or default_question
-
-
-def get_natural_attachment_analyze_question(content: str) -> str:
-    default_question = "Analyzuj tuto přílohu a stručně popiš, co obsahuje."
-    if is_generic_natural_attachment_request(content):
-        return default_question
-
-    return content.strip() or default_question
-
-
-def is_attachment_summary_request(text: str) -> bool:
-    normalized = normalize_natural_text(text)
-    return re.search(r"\b(?:shrn|precti)\b", normalized) is not None
-
-
-def is_attachment_error_request(text: str) -> bool:
-    normalized = normalize_natural_text(text)
-    return any(
-        phrase in normalized
-        for phrase in (
-            "chyba",
-            "spatne",
-            "problem",
-            "najdi chybu",
-            "co je tam spatne",
-            "co je na tom spatne",
-        )
-    )
-
-
-def is_attachment_content_request(text: str) -> bool:
-    normalized = normalize_natural_text(text)
-    return any(
-        re.match(pattern, normalized) is not None
-        for pattern in (
-            r"^co\s+je\s+(?:v|ve|na)\s+(?:tom|toto|tohle).*$",
-            r"^co\s+je\s+(?:v|ve)\s+(?:teto|te|ta)\s+priloze.*$",
-            r"^co\s+tam\s+je.*$",
-            r"^co\s+vidis.*$",
-            r"^co\s+obsahuje(?:\s+(?:to|toto|tohle|tahle\s+priloha|ta\s+priloha))?.*$",
-        )
-    )
-
-
-def is_attachment_look_request(text: str) -> bool:
-    normalized = normalize_natural_text(text)
-    return any(
-        re.match(pattern, normalized) is not None
-        for pattern in (
-            r"^(?:koukni|mrkni)\s+na\s+(?:to|toto|tohle).*$",
-            r"^podivej\s+se\s+na\s+(?:to|toto|tohle).*$",
-            r"^analyzuj\s+(?:to|toto|tohle).*$",
-        )
-    )
-
-
-def is_general_attachment_context_request(text: str) -> bool:
-    return (
-        is_attachment_summary_request(text)
-        or is_attachment_error_request(text)
-        or is_attachment_content_request(text)
-        or is_attachment_look_request(text)
-    )
-
-
-def get_attachment_context_question(text: str, attachment_kind: str) -> str:
-    if attachment_kind == "image" and is_attachment_error_request(text):
-        return "Podívej se na obrázek a řekni, jaká chyba je tam vidět. Navrhni krátce další postup."
-
-    if attachment_kind == "document" and is_attachment_summary_request(text):
-        return "Shrň tuto přílohu."
-
-    if attachment_kind == "document" and is_attachment_error_request(text):
-        return "Najdi v dokumentu možné chyby nebo problémové části a stručně je vysvětli."
-
-    return "Analyzuj tuto přílohu a stručně popiš, co obsahuje."
-
-
-def is_context_attachment_request(text: str) -> bool:
-    return is_general_attachment_context_request(text)
-
-
-def get_context_attachment_question(text: str) -> str:
-    return get_attachment_context_question(text, "document")
 
 
 def is_file_router_candidate(text: str) -> bool:
@@ -569,7 +402,7 @@ async def handle_natural_file_request(
                 message.content or "",
                 get_attachment_kind(file) or "document",
             )
-            answer = await analyze_selected_attachment(file, question)
+            answer = await analyze_selected_attachment(OPENAI_MODEL, file, question)
             await message.reply(answer, mention_author=False)
             set_last_file_context(
                 message.channel.id,
@@ -1205,7 +1038,11 @@ class DiscordAIBot(discord.Client):
             try:
                 attachment_kind = get_attachment_kind(selected_file) or "document"
                 question = get_attachment_context_question(request_text, attachment_kind)
-                answer = await analyze_selected_attachment(selected_file, question)
+                answer = await analyze_selected_attachment(
+                    OPENAI_MODEL,
+                    selected_file,
+                    question,
+                )
                 await message.reply(answer, mention_author=False)
                 set_last_file_context(
                     message.channel.id,
@@ -1292,7 +1129,11 @@ class DiscordAIBot(discord.Client):
                     return
 
                 question = get_natural_attachment_analyze_question(request_text)
-                answer = await analyze_selected_attachment(selected_file, question)
+                answer = await analyze_selected_attachment(
+                    OPENAI_MODEL,
+                    selected_file,
+                    question,
+                )
                 await message.reply(answer, mention_author=False)
                 log_action(
                     "natural_message",
@@ -1442,6 +1283,7 @@ class DiscordAIBot(discord.Client):
                     selected_file = find_supported_attachment_in_message(message)
                     if selected_file is not None:
                         answer = await analyze_selected_attachment(
+                            OPENAI_MODEL,
                             selected_file,
                             "Co si o této příloze myslíš?",
                         )
@@ -1456,6 +1298,7 @@ class DiscordAIBot(discord.Client):
                         selected_file = await find_recent_supported_attachment(message.channel)
                         if selected_file is not None:
                             answer = await analyze_selected_attachment(
+                                OPENAI_MODEL,
                                 selected_file,
                                 "Co si o této příloze myslíš?",
                             )
@@ -1484,6 +1327,7 @@ class DiscordAIBot(discord.Client):
                 selected_file = find_supported_attachment_in_message(message)
                 if selected_file is not None:
                     answer = await analyze_selected_attachment(
+                        OPENAI_MODEL,
                         selected_file,
                         "Co si o této příloze myslíš?",
                     )
@@ -1498,6 +1342,7 @@ class DiscordAIBot(discord.Client):
                     selected_file = await find_recent_supported_attachment(message.channel)
                     if selected_file is not None:
                         answer = await analyze_selected_attachment(
+                            OPENAI_MODEL,
                             selected_file,
                             "Co si o této příloze myslíš?",
                         )
@@ -1530,6 +1375,7 @@ class DiscordAIBot(discord.Client):
                 selected_file = find_supported_attachment_in_message(message)
                 if selected_file is not None:
                     answer = await analyze_selected_attachment(
+                        OPENAI_MODEL,
                         selected_file,
                         "Shrň tuto přílohu.",
                     )
@@ -1562,6 +1408,7 @@ class DiscordAIBot(discord.Client):
                 selected_file = find_supported_attachment_in_message(message)
                 if selected_file is not None:
                     answer = await analyze_selected_attachment(
+                        OPENAI_MODEL,
                         selected_file,
                         "Shrň tuto přílohu.",
                     )
@@ -2061,7 +1908,7 @@ async def analyze(
     log_attachment_info("slash_command", "analyze", interaction, selected_file)
 
     try:
-        answer = await analyze_selected_attachment(selected_file, question)
+        answer = await analyze_selected_attachment(OPENAI_MODEL, selected_file, question)
         await interaction.followup.send(answer)
         set_last_file_context(
             interaction.channel_id,
