@@ -7,8 +7,11 @@ import discord
 from discord import app_commands
 from dotenv import load_dotenv
 
-import panam_core
 from panam_discord_analyze_command import handle_analyze_command
+from panam_discord_channel_commands import (
+    handle_channel_summary_command,
+    handle_search_messages_command,
+)
 from panam_discord_context import (
     log_action,
     log_slash_command,
@@ -25,10 +28,6 @@ from panam_discord_core_commands import (
     handle_todo_done_command,
     handle_todo_list_command,
 )
-from panam_discord_channel_tools import (
-    build_channel_summary_text,
-    search_recent_channel_messages,
-)
 from panam_discord_file_commands import (
     handle_extract_data_command,
     handle_process_file_command,
@@ -43,9 +42,6 @@ from panam_discord_responses import (
     split_discord_message,
 )
 from panam_discord_read_file import handle_read_file_command
-from panam_ai import (
-    shorten_for_discord,
-)
 
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -352,30 +348,11 @@ async def search_messages(
         )
         return
 
-    await interaction.response.defer(thinking=True)
-
-    try:
-        channel = interaction.channel
-        answer = await search_recent_channel_messages(channel, query, limit)
-        if answer is None:
-            await interaction.followup.send(
-                "Něco se pokazilo při vyhledávání zpráv."
-            )
-            return
-
-        if answer == "":
-            await interaction.followup.send("Nic jsem nenašla.")
-            return
-
-        answer = shorten_for_discord(answer)
-        await interaction.followup.send(answer)
-
-    except Exception:
-        mark_command_status(interaction, "error")
-        logger.exception("Chyba při zpracování /search_messages")
-        await interaction.followup.send(
-            "Něco se pokazilo při vyhledávání zpráv."
-        )
+    await handle_search_messages_command(
+        interaction,
+        query,
+        limit,
+    )
 
 
 @bot.tree.command(
@@ -395,31 +372,11 @@ async def channel_summary(
         )
         return
 
-    await interaction.response.defer(thinking=True)
-
-    try:
-        channel = interaction.channel
-        channel_text = await build_channel_summary_text(channel, limit)
-        if channel_text is None:
-            await interaction.followup.send(
-                "Něco se pokazilo při načítání zpráv."
-            )
-            return
-
-        if channel_text == "":
-            await interaction.followup.send("Nemám tu co shrnout.")
-            return
-
-        response = await panam_core.handle_channel_summary(OPENAI_MODEL, channel_text)
-        answer = response.text
-        await interaction.followup.send(answer)
-
-    except Exception:
-        mark_command_status(interaction, "error")
-        logger.exception("Chyba při zpracování /channel_summary")
-        await interaction.followup.send(
-            "Něco se pokazilo při shrnování kanálu."
-        )
+    await handle_channel_summary_command(
+        OPENAI_MODEL,
+        interaction,
+        limit,
+    )
 
 
 @bot.tree.command(
