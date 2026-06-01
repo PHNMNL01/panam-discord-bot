@@ -1,14 +1,12 @@
 import os
 import logging
 import logging.handlers
-from datetime import datetime, timezone
 from pathlib import Path
 
 import discord
 from discord import app_commands
 from dotenv import load_dotenv
 
-import panam_files
 import panam_memory
 import panam_core
 from panam_discord_attachments import (
@@ -42,6 +40,7 @@ from panam_discord_file_jobs import (
     run_spreadsheet_transform_file_job,
     run_structured_data_file_job,
 )
+from panam_discord_file_job_test import handle_file_job_test_command
 from panam_discord_help import get_help_text
 from panam_discord_history import (
     find_recent_docx_attachment,
@@ -75,7 +74,6 @@ from panam_discord_read_file import handle_read_file_command
 from panam_discord_text_history import (
     find_recent_text_message,
 )
-from panam_file_responses import build_file_job_success_message
 from panam_file_context import (
     clear_last_file_context,
     clear_last_router_decision,
@@ -106,11 +104,7 @@ from panam_router import (
     is_meta_router_or_behavior_discussion,
     matches_last_file_reference,
 )
-from panam_text_extraction import (
-    extract_text_from_attachment,
-    get_file_extension,
-    trim_document_text,
-)
+from panam_text_extraction import get_file_extension
 
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -1298,119 +1292,11 @@ async def file_job_test(
         )
         return
 
-    if file.size > MAX_DOCUMENT_SIZE_BYTES:
-        await interaction.response.send_message(
-            "Ten soubor je moc velky. Zatim beru max 20 MB.",
-            ephemeral=True,
-        )
-        return
-
-    extension = get_file_extension(file.filename)
-    if extension not in SUPPORTED_DOCUMENT_EXTENSIONS:
-        await interaction.response.send_message(
-            "File job test zatim podporuje dokumenty TXT, MD, CSV, JSON, PDF, DOCX nebo XLSX.",
-            ephemeral=True,
-        )
-        return
-
-    normalized_output_format = "md" if output_format.lower().strip(".") == "md" else "txt"
-    output_extension = f".{normalized_output_format}"
-    job = None
-    await interaction.response.defer(thinking=True)
-
-    try:
-        job = panam_files.create_file_job(
-            user_id=interaction.user.id,
-            channel_id=interaction.channel_id or 0,
-            action="file_job_test",
-        )
-        log_action(
-            "slash_command",
-            "file_job_test",
-            "started",
-            interaction,
-            job_id=job.job_id,
-            filename=Path(file.filename).name,
-            extension=extension,
-            size=file.size,
-        )
-
-        input_path = await panam_files.save_attachment_to_job(file, job)
-        data = input_path.read_bytes()
-        extracted_text = extract_text_from_attachment(input_path.name, data)
-        if not extracted_text.strip():
-            extracted_text = "Z dokumentu se nepodarilo vytahnout zadny text."
-        else:
-            extracted_text = trim_document_text(extracted_text)
-        panam_files.write_work_text(job, "extracted_text.txt", extracted_text)
-
-        output_content = (
-            "# Panam file job test\n\n"
-            f"- job_id: `{job.job_id}`\n"
-            f"- input: `{input_path.name}`\n\n"
-            "## Extracted text\n\n"
-            f"{extracted_text}\n"
-        )
-        if output_extension == ".txt":
-            output_content = (
-                "Panam file job test\n\n"
-                f"job_id: {job.job_id}\n"
-                f"input: {input_path.name}\n\n"
-                "Extracted text\n\n"
-                f"{extracted_text}\n"
-            )
-
-        output_path = panam_files.write_output_text(
-            job,
-            f"file_job_test_output{output_extension}",
-            output_content,
-        )
-        job.status = "success"
-        job.finished_at = datetime.now(timezone.utc).isoformat()
-        panam_files.write_job_metadata(job)
-
-        await interaction.followup.send(
-            build_file_job_success_message(
-                normalized_output_format,
-                "file_job_test",
-            ),
-            file=discord.File(output_path),
-        )
-        log_action(
-            "slash_command",
-            "file_job_test",
-            "success",
-            interaction,
-            job_id=job.job_id,
-            filename=Path(file.filename).name,
-            extension=extension,
-            size=file.size,
-        )
-
-    except Exception:
-        mark_command_status(interaction, "error")
-        if job is not None:
-            job.status = "error"
-            job.finished_at = datetime.now(timezone.utc).isoformat()
-            panam_files.write_job_metadata(job)
-            log_action(
-                "slash_command",
-                "file_job_test",
-                "error",
-                interaction,
-                job_id=job.job_id,
-                filename=Path(file.filename).name,
-                extension=extension,
-                size=file.size,
-            )
-        logger.exception("Chyba pri zpracovani /file_job_test")
-        await interaction.followup.send(
-            "Neco se pokazilo pri testu file-job pipeline."
-        )
-
-    finally:
-        if job is not None:
-            panam_files.cleanup_job(job)
+    await handle_file_job_test_command(
+        interaction,
+        file,
+        output_format,
+    )
 
 
 @bot.tree.command(
