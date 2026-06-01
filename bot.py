@@ -20,6 +20,7 @@ import panam_docx_transform
 import panam_excel
 import panam_files
 import panam_memory
+import panam_core
 import panam_spreadsheet
 from panam_file_context import (
     clear_last_file_context,
@@ -871,7 +872,8 @@ async def handle_basic_panam_message(
         return
 
     history = panam_memory.get_messages(message.channel.id)
-    answer = await ask_panam(OPENAI_MODEL, basic_prompt, history=history)
+    response = await panam_core.handle_chat(OPENAI_MODEL, basic_prompt, history=history)
+    answer = response.text
     await message.reply(answer, mention_author=False)
     panam_memory.add_message(message.channel.id, "user", message.content or basic_prompt)
     panam_memory.add_message(message.channel.id, "assistant", answer)
@@ -4709,7 +4711,8 @@ async def ask(interaction: discord.Interaction, question: str) -> None:
     await interaction.response.defer(thinking=True)
 
     try:
-        answer = await ask_panam(OPENAI_MODEL, question)
+        response = await panam_core.handle_chat(OPENAI_MODEL, question)
+        answer = response.text
         await interaction.followup.send(answer)
 
     except Exception:
