@@ -7,7 +7,7 @@ from panam_text_extraction import get_file_extension
 
 
 SUPPORTED_IMAGE_EXTENSIONS = (".png", ".jpg", ".jpeg", ".webp", ".gif")
-SUPPORTED_DOCUMENT_EXTENSIONS = (".txt", ".md", ".csv", ".pdf", ".docx", ".xlsx")
+SUPPORTED_DOCUMENT_EXTENSIONS = (".txt", ".md", ".csv", ".json", ".pdf", ".docx", ".xlsx")
 MAX_IMAGE_SIZE_BYTES = 20 * 1024 * 1024
 MAX_DOCUMENT_SIZE_BYTES = 20 * 1024 * 1024
 

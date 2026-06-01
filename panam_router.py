@@ -324,6 +324,11 @@ def has_explicit_file_output_request(text: str) -> bool:
     patterns = (
         r"\bdo\s+(?:souboru|excelu|xlsx|csv|jsonu?|markdownu|txt|docx|wordu?)\b",
         r"\bdo\s+tabulky\b",
+        r"\bdej(?:\s+\w+){0,4}\s+to\s+(?:do\s+)?(?:excelu|xlsx)\b",
+        r"\bdej(?:\s+\w+){0,4}\s+z\s+toho\s+(?:excel|xlsx)\b",
+        r"\b(?:udelej|vytvor|priprav|preved)(?:\s+mi)?\s+z\s+toho\s+(?:excel|xlsx)\b",
+        r"\bpreved(?:\s+mi)?\s+to\s+do\s+(?:excelu|xlsx)\b",
+        r"\bz\s+toho\s+(?:excel|xlsx)\b",
         r"\b(?:udelej|vytvor|priprav|preved|dej)\b.*\b(?:tabulku|tabulkove)\b",
         r"\b(?:udelej|vytvor|priprav|preved|dej|zpracuj)\b.*\b(?:docx|wordu?|word\s+dokument)\b",
         r"\bjako\s+soubor\b",
@@ -385,8 +390,10 @@ def has_structured_data_request(text: str) -> bool:
     structured_output_patterns = (
         r"\bdo\s+(?:excelu|xlsx|csv|jsonu?|tabulky)\b",
         r"\bvrat\s+json\b",
+        r"\bz\s+toho\s+(?:excel|xlsx)\b",
+        r"\bdej(?:\s+\w+){0,4}\s+z\s+toho\s+(?:excel|xlsx)\b",
         r"\bdej(?:\s+\w+){0,4}\s+do\s+(?:excelu|xlsx|csv|jsonu?)\b",
-        r"\b(?:udelej|vytvor|priprav|preved|dej|uloz)\b.*\b(?:tabulku|tabulkove|xlsx|excelu|csv|jsonu?)\b",
+        r"\b(?:udelej|vytvor|priprav|preved|dej|uloz)\b.*\b(?:tabulku|tabulkove|xlsx|excelu?|csv|jsonu?)\b",
         r"\b(?:soubor|vystup)\s+(?:xlsx|excel|csv|jsonu?)\b",
         r"\b(?:xlsx|excel|csv|jsonu?)\s+(?:soubor|vystup)\b",
     )

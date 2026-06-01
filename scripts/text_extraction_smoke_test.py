@@ -22,6 +22,12 @@ def main() -> None:
     )
     assert plain_text == "Ahoj Panam", plain_text
 
+    json_text = panam_text_extraction.extract_text_from_attachment(
+        "data.json",
+        b'{"items":[{"name":"test"}]}',
+    )
+    assert json_text == '{"items":[{"name":"test"}]}', json_text
+
     long_text = "x" * (panam_text_extraction.MAX_DOCUMENT_TEXT_LENGTH + 100)
     trimmed_text = panam_text_extraction.trim_document_text(long_text)
     assert len(trimmed_text) <= panam_text_extraction.MAX_DOCUMENT_TEXT_LENGTH
