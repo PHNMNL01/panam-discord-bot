@@ -15,6 +15,17 @@ from panam_discord_context import (
     log_slash_command,
     mark_command_status,
 )
+from panam_discord_core_commands import (
+    handle_ask_command,
+    handle_note_add_command,
+    handle_note_list_command,
+    handle_note_search_command,
+    handle_panam_talk_command,
+    handle_summary_command,
+    handle_todo_add_command,
+    handle_todo_done_command,
+    handle_todo_list_command,
+)
 from panam_discord_channel_tools import (
     build_channel_summary_text,
     search_recent_channel_messages,
@@ -29,7 +40,6 @@ from panam_discord_file_job_test import handle_file_job_test_command
 from panam_discord_help import get_help_text
 from panam_discord_message_router import handle_discord_message
 from panam_discord_responses import (
-    send_followup_chunks,
     split_discord_message,
 )
 from panam_discord_read_file import handle_read_file_command
@@ -105,10 +115,6 @@ logger.info("Panam bot startuje.")
 
 if not DISCORD_BOT_TOKEN:
     raise RuntimeError("Chybí DISCORD_BOT_TOKEN v .env souboru.")
-
-
-def get_author_name(author) -> str:
-    return getattr(author, "display_name", author.name)
 
 
 class DiscordAIBot(discord.Client):
@@ -245,22 +251,7 @@ async def note_add(interaction: discord.Interaction, text: str) -> None:
         )
         return
 
-    try:
-        channel_id = interaction.channel_id or 0
-        response = await panam_core.handle_note_add(
-            text,
-            interaction.user.id,
-            get_author_name(interaction.user),
-            channel_id,
-        )
-        await interaction.response.send_message(response.text)
-
-    except Exception:
-        mark_command_status(interaction, "error")
-        logger.exception("Chyba při zpracování /note_add")
-        await interaction.response.send_message(
-            "Něco se pokazilo při ukládání poznámky."
-        )
+    await handle_note_add_command(interaction, text)
 
 
 @bot.tree.command(
@@ -276,16 +267,7 @@ async def note_list(interaction: discord.Interaction) -> None:
         )
         return
 
-    try:
-        response = await panam_core.handle_note_list()
-        await interaction.response.send_message(response.text)
-
-    except Exception:
-        mark_command_status(interaction, "error")
-        logger.exception("Chyba při zpracování /note_list")
-        await interaction.response.send_message(
-            "Něco se pokazilo při načítání poznámek."
-        )
+    await handle_note_list_command(interaction)
 
 
 @bot.tree.command(
@@ -302,16 +284,7 @@ async def note_search(interaction: discord.Interaction, query: str) -> None:
         )
         return
 
-    try:
-        response = await panam_core.handle_note_search(query)
-        await interaction.response.send_message(response.text)
-
-    except Exception:
-        mark_command_status(interaction, "error")
-        logger.exception("Chyba při zpracování /note_search")
-        await interaction.response.send_message(
-            "Něco se pokazilo při vyhledávání poznámek."
-        )
+    await handle_note_search_command(interaction, query)
 
 
 @bot.tree.command(
@@ -328,22 +301,7 @@ async def todo_add(interaction: discord.Interaction, text: str) -> None:
         )
         return
 
-    try:
-        channel_id = interaction.channel_id or 0
-        response = await panam_core.handle_todo_add(
-            text,
-            interaction.user.id,
-            get_author_name(interaction.user),
-            channel_id,
-        )
-        await interaction.response.send_message(response.text)
-
-    except Exception:
-        mark_command_status(interaction, "error")
-        logger.exception("Chyba při zpracování /todo_add")
-        await interaction.response.send_message(
-            "Něco se pokazilo při ukládání úkolu."
-        )
+    await handle_todo_add_command(interaction, text)
 
 
 @bot.tree.command(
@@ -359,16 +317,7 @@ async def todo_list(interaction: discord.Interaction) -> None:
         )
         return
 
-    try:
-        response = await panam_core.handle_todo_list()
-        await interaction.response.send_message(response.text)
-
-    except Exception:
-        mark_command_status(interaction, "error")
-        logger.exception("Chyba při zpracování /todo_list")
-        await interaction.response.send_message(
-            "Něco se pokazilo při načítání úkolů."
-        )
+    await handle_todo_list_command(interaction)
 
 
 @bot.tree.command(
@@ -385,16 +334,7 @@ async def todo_done(interaction: discord.Interaction, todo_id: int) -> None:
         )
         return
 
-    try:
-        response = await panam_core.handle_todo_done(todo_id)
-        await interaction.response.send_message(response.text)
-
-    except Exception:
-        mark_command_status(interaction, "error")
-        logger.exception("Chyba při zpracování /todo_done")
-        await interaction.response.send_message(
-            "Něco se pokazilo při dokončování úkolu."
-        )
+    await handle_todo_done_command(interaction, todo_id)
 
 
 @bot.tree.command(
@@ -502,19 +442,7 @@ async def summary(interaction: discord.Interaction, text: str) -> None:
         )
         return
 
-    await interaction.response.defer(thinking=True)
-
-    try:
-        response = await panam_core.handle_summary(OPENAI_MODEL, text)
-        answer = response.text
-        await interaction.followup.send(answer)
-
-    except Exception:
-        mark_command_status(interaction, "error")
-        logger.exception("Chyba při zpracování /summary")
-        await interaction.followup.send(
-            "Něco se pokazilo při shrnování textu. Mrkni do konzole na chybu."
-        )
+    await handle_summary_command(OPENAI_MODEL, interaction, text)
 
 
 @bot.tree.command(
@@ -738,19 +666,7 @@ async def ask(interaction: discord.Interaction, question: str) -> None:
         )
         return
 
-    await interaction.response.defer(thinking=True)
-
-    try:
-        response = await panam_core.handle_chat(OPENAI_MODEL, question)
-        answer = response.text
-        await interaction.followup.send(answer)
-
-    except Exception:
-        mark_command_status(interaction, "error")
-        logger.exception("Chyba při zpracování /ask")
-        await interaction.followup.send(
-            "Něco se pokazilo při volání AI. Mrkni do konzole na chybu."
-        )
+    await handle_ask_command(OPENAI_MODEL, interaction, question)
 
 
 @bot.tree.command(
@@ -767,19 +683,7 @@ async def panam_talk(interaction: discord.Interaction, message: str) -> None:
         )
         return
 
-    await interaction.response.defer(thinking=True)
-
-    try:
-        response = await panam_core.handle_talk(OPENAI_MODEL, message)
-        answer = response.text
-        await send_followup_chunks(interaction, answer)
-
-    except Exception:
-        mark_command_status(interaction, "error")
-        logger.exception("Chyba při zpracování /panam_talk")
-        await interaction.followup.send(
-            "Něco se pokazilo při talk režimu. Mrkni do konzole na chybu."
-        )
+    await handle_panam_talk_command(OPENAI_MODEL, interaction, message)
 
 
 if __name__ == "__main__":
