@@ -37,6 +37,12 @@ from panam_discord_history import (
     find_recent_supported_attachment,
     find_recent_xlsx_attachment,
 )
+from panam_discord_responses import (
+    send_channel_chunks,
+    send_followup_chunks,
+    send_source_message,
+    split_discord_message,
+)
 from panam_file_responses import build_file_job_success_message
 from panam_file_context import (
     clear_last_file_context,
@@ -288,29 +294,6 @@ def get_author_name(author) -> str:
     return getattr(author, "display_name", author.name)
 
 
-def split_discord_message(text: str, limit: int = 1900) -> list[str]:
-    if not text:
-        return [""]
-
-    chunks = []
-    remaining = text.strip()
-
-    while len(remaining) > limit:
-        split_at = remaining.rfind("\n", 0, limit + 1)
-        if split_at <= 0:
-            split_at = remaining.rfind(" ", 0, limit + 1)
-        if split_at <= 0:
-            split_at = limit
-
-        chunks.append(remaining[:split_at].rstrip())
-        remaining = remaining[split_at:].lstrip()
-
-    if remaining:
-        chunks.append(remaining)
-
-    return chunks
-
-
 async def analyze_selected_attachment(file: discord.Attachment, question: str) -> str:
     attachment_kind = get_attachment_kind(file)
     if attachment_kind is None:
@@ -353,16 +336,6 @@ async def analyze_selected_attachment(file: discord.Attachment, question: str) -
         file.filename,
     )
     return shorten_for_discord(answer)
-
-
-async def send_followup_chunks(interaction: discord.Interaction, text: str) -> None:
-    for chunk in split_discord_message(text):
-        await interaction.followup.send(chunk)
-
-
-async def send_channel_chunks(message: discord.Message, text: str) -> None:
-    for chunk in split_discord_message(text):
-        await message.channel.send(chunk)
 
 
 def get_help_text() -> str:
@@ -769,20 +742,6 @@ def get_natural_file_action_name(decision: dict) -> str:
     if mode == "unsupported_direct_edit":
         return "unsupported_direct_edit"
     return "chat_answer"
-
-
-async def send_source_message(source, text: str, file_path: Path | None = None) -> None:
-    if isinstance(source, discord.Interaction):
-        if file_path is None:
-            await source.followup.send(text)
-        else:
-            await source.followup.send(text, file=discord.File(file_path))
-        return
-
-    if file_path is None:
-        await source.reply(text, mention_author=False)
-    else:
-        await source.reply(text, file=discord.File(file_path), mention_author=False)
 
 
 def mark_source_error(source) -> None:
