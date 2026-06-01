@@ -21,6 +21,17 @@ import panam_files
 import panam_memory
 import panam_core
 import panam_spreadsheet
+from panam_discord_attachments import (
+    MAX_DOCUMENT_SIZE_BYTES,
+    MAX_IMAGE_SIZE_BYTES,
+    SUPPORTED_DOCUMENT_EXTENSIONS,
+    get_attachment_kind,
+    get_safe_attachment_info,
+    find_image_attachment_in_message,
+    find_supported_attachment_in_message,
+    is_supported_image_attachment,
+    read_attachment_bytes,
+)
 from panam_file_responses import build_file_job_success_message
 from panam_file_context import (
     clear_last_file_context,
@@ -106,10 +117,6 @@ ALLOWED_CHANNEL_IDS = [
     if channel_id.strip()
 ]
 OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4.1-mini")
-SUPPORTED_IMAGE_EXTENSIONS = (".png", ".jpg", ".jpeg", ".webp", ".gif")
-SUPPORTED_DOCUMENT_EXTENSIONS = (".txt", ".md", ".csv", ".pdf", ".docx", ".xlsx")
-MAX_IMAGE_SIZE_BYTES = 20 * 1024 * 1024
-MAX_DOCUMENT_SIZE_BYTES = 20 * 1024 * 1024
 COMMAND_STATUSES: dict[int, str] = {}
 CREATIVE_SPREADSHEET_FALLBACK_MESSAGE = (
     "Tohle je moc volná úprava. Původní Excel neupravuju a data si nedomýšlím. "
@@ -179,19 +186,6 @@ def get_context_int(context: dict[str, str | int | None], key: str) -> int:
     if isinstance(value, str) and value.isdecimal():
         return int(value)
     return 0
-
-
-def get_safe_attachment_info(file: discord.Attachment | None) -> dict[str, str | int | None]:
-    if file is None:
-        return {}
-
-    extension = get_file_extension(file.filename)
-    return {
-        "filename": Path(file.filename).name,
-        "extension": extension,
-        "size": file.size,
-        "file_type": get_attachment_kind(file),
-    }
 
 
 def log_attachment_info(action_type: str, action_name: str, source, file: discord.Attachment) -> None:
@@ -310,47 +304,6 @@ def split_discord_message(text: str, limit: int = 1900) -> list[str]:
         chunks.append(remaining)
 
     return chunks
-
-
-def is_supported_image_attachment(attachment: discord.Attachment) -> bool:
-    return get_file_extension(attachment.filename) in SUPPORTED_IMAGE_EXTENSIONS
-
-
-def is_supported_document_attachment(attachment: discord.Attachment) -> bool:
-    return get_file_extension(attachment.filename) in SUPPORTED_DOCUMENT_EXTENSIONS
-
-
-def get_attachment_kind(file: discord.Attachment) -> str | None:
-    extension = get_file_extension(file.filename)
-    if extension in SUPPORTED_IMAGE_EXTENSIONS:
-        return "image"
-    if extension in SUPPORTED_DOCUMENT_EXTENSIONS:
-        return "document"
-    return None
-
-
-def find_image_attachment_in_message(
-    message: discord.Message,
-) -> discord.Attachment | None:
-    for attachment in message.attachments:
-        if is_supported_image_attachment(attachment):
-            return attachment
-
-    return None
-
-
-def find_supported_attachment_in_message(
-    message: discord.Message,
-) -> discord.Attachment | None:
-    for attachment in message.attachments:
-        if get_attachment_kind(attachment) is not None:
-            return attachment
-
-    return None
-
-
-async def read_attachment_bytes(file: discord.Attachment) -> bytes:
-    return await file.read()
 
 
 async def find_recent_image_attachment(channel) -> discord.Attachment | None:
