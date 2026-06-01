@@ -1,0 +1,52 @@
+flowchart TD
+    Entry["bot.py<br/>tenky entrypoint"] --> Runner["panam_discord_runner.py<br/>DiscordAIBot, slash commandy, on_message, run_discord_bot"]
+
+    Runner --> Basic["panam_discord_basic_commands.py<br/>/ping, /help"]
+    Runner --> Memory["panam_discord_memory_command.py<br/>/memory_clear"]
+    Runner --> CoreCmd["panam_discord_core_commands.py<br/>/ask, /summary, /panam_talk, notes, todos"]
+    Runner --> ChannelCmd["panam_discord_channel_commands.py<br/>/search_messages, /channel_summary"]
+    Runner --> AnalyzeCmd["panam_discord_analyze_command.py<br/>/analyze"]
+    Runner --> ReadFileCmd["panam_discord_read_file.py<br/>/read_file"]
+    Runner --> FileCmd["panam_discord_file_commands.py<br/>/process_file, /extract_data, /transform_docx, /transform_excel"]
+    Runner --> FileJobTest["panam_discord_file_job_test.py<br/>/file_job_test"]
+    Runner --> MsgRouter["panam_discord_message_router.py<br/>natural message flow"]
+
+    Basic --> Help["panam_discord_help.py"]
+    Basic --> Responses["panam_discord_responses.py"]
+    Memory --> MemoryCore["panam_memory.py"]
+    Memory --> FileContext["panam_file_context.py"]
+    CoreCmd --> Core["panam_core.py"]
+    ChannelCmd --> ChannelTools["panam_discord_channel_tools.py"]
+    ChannelCmd --> Core
+
+    MsgRouter --> MsgHelpers["panam_discord_message_helpers.py"]
+    MsgRouter --> TextHistory["panam_discord_text_history.py"]
+    MsgRouter --> NaturalIntents["panam_discord_natural_intents.py"]
+    MsgRouter --> NaturalFiles["panam_discord_natural_file_orchestrator.py"]
+    MsgRouter --> AttachmentAnalysis["panam_discord_attachment_analysis.py"]
+    MsgRouter --> History["panam_discord_history.py"]
+    MsgRouter --> Core
+
+    NaturalIntents --> Phrases["panam_phrases.py"]
+    NaturalIntents --> Router["panam_router.py"]
+    NaturalFiles --> Router
+    NaturalFiles --> FileJobs["panam_discord_file_jobs.py"]
+    FileCmd --> FileJobs
+    ReadFileCmd --> TextExtraction["panam_text_extraction.py"]
+    AnalyzeCmd --> AttachmentAnalysis
+    AttachmentAnalysis --> Attachments["panam_discord_attachments.py"]
+    AttachmentAnalysis --> AI["panam_ai.py"]
+
+    FileJobs --> Files["panam_files.py<br/>runtime/jobs"]
+    FileJobs --> TextExtraction
+    FileJobs --> AI
+    FileJobs --> Docx["panam_docx.py"]
+    FileJobs --> DocxTransform["panam_docx_transform.py"]
+    FileJobs --> Excel["panam_excel.py"]
+    FileJobs --> Spreadsheet["panam_spreadsheet.py"]
+    FileJobs --> FileResponses["panam_file_responses.py"]
+    FileJobs --> FileContext
+
+    Core --> AI
+    Core --> Notes["panam_notes.py"]
+    Core --> Todos["panam_todos.py"]
