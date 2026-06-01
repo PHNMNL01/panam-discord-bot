@@ -6,3 +6,4 @@ todos.json
 notes.json
 logs/
 runtime/
+.gitignore
