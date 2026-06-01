@@ -22,9 +22,9 @@ from panam_discord_attachment_analysis import (
     is_general_attachment_context_request,
     is_natural_attachment_analyze_request,
 )
+from panam_discord_analyze_command import handle_analyze_command
 from panam_discord_context import (
     log_action,
-    log_attachment_info,
     log_slash_command,
     mark_command_status,
 )
@@ -1204,40 +1204,12 @@ async def analyze(
         )
         return
 
-    await interaction.response.defer(thinking=True)
-
-    selected_file = file
-    if selected_file is None:
-        selected_file = await find_recent_supported_attachment(interaction.channel)
-
-    if selected_file is None:
-        await interaction.followup.send(
-            "Nevidím žádnou podporovanou přílohu ani v commandu, ani v předchozí zprávě."
-        )
-        return
-
-    log_attachment_info("slash_command", "analyze", interaction, selected_file)
-
-    try:
-        answer = await analyze_selected_attachment(OPENAI_MODEL, selected_file, question)
-        await interaction.followup.send(answer)
-        set_last_file_context(
-            interaction.channel_id,
-            Path(selected_file.filename).name,
-            get_file_extension(selected_file.filename),
-            "chat_answer",
-            file_summary=answer,
-        )
-
-    except AttachmentAnalysisUserError as error:
-        await interaction.followup.send(str(error))
-
-    except Exception:
-        mark_command_status(interaction, "error")
-        logger.exception("Chyba při zpracování /analyze")
-        await interaction.followup.send(
-            "Něco se pokazilo při analýze přílohy. Mrkni do konzole na chybu."
-        )
+    await handle_analyze_command(
+        OPENAI_MODEL,
+        interaction,
+        file,
+        question,
+    )
 
 
 @bot.tree.command(
