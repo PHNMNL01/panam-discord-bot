@@ -9,20 +9,18 @@
 <body>
   <main class="shell">
     <section class="hero">
-      <p class="eyebrow">Panam adapter preview</p>
-      <h1>Panam Web</h1>
-      <p class="intro">
-        Základní webový chat nad Panam core. Zatím jen textové příkazy, bez uploadů a souborů.
-      </p>
+      <div>
+        <p class="eyebrow">Panam adapter preview</p>
+        <h1>Panam Web</h1>
+        <p class="intro">
+          Základní webový chat nad Panam core. Ve webu už nemusíš psát „Panam“ před každý příkaz.
+        </p>
+      </div>
+      <button id="clear-chat" class="clear-button" type="button">Vyčistit chat</button>
     </section>
 
     <section class="chat-panel" aria-label="Panam chat">
-      <div id="chat-log" class="chat-log" aria-live="polite">
-        <div class="message panam">
-          <div class="message-name">Panam</div>
-          <div class="message-text">Jsem online ve web scaffold režimu. Zkus třeba „Panam help“.</div>
-        </div>
-      </div>
+      <div id="chat-log" class="chat-log" aria-live="polite"></div>
 
       <form id="chat-form" class="composer">
         <label for="message" class="sr-only">Zpráva pro Panam</label>
@@ -35,6 +33,16 @@
         ></textarea>
         <button type="submit">Odeslat</button>
       </form>
+
+      <div class="examples" aria-label="Příklady příkazů">
+        <span>Příklady:</span>
+        <button type="button">Jak se máš?</button>
+        <button type="button">Shrň mi tento text...</button>
+        <button type="button">Přidej todo dodělat web UI</button>
+        <button type="button">Ukaž todo</button>
+        <button type="button">Přidej poznámku Panam web v1 funguje</button>
+        <button type="button">Ukaž poznámky</button>
+      </div>
     </section>
   </main>
 
@@ -42,10 +50,39 @@
     const chatForm = document.querySelector("#chat-form");
     const chatLog = document.querySelector("#chat-log");
     const messageInput = document.querySelector("#message");
+    const clearButton = document.querySelector("#clear-chat");
+    const exampleButtons = document.querySelectorAll(".examples button");
 
-    function appendMessage(role, text) {
+    const welcomeText = "Jsem online ve web režimu. Zkus třeba „help“ nebo „ukaž todo“. ";
+
+    function createAvatar() {
+      const avatar = document.createElement("div");
+      avatar.className = "avatar";
+
+      const fallback = document.createElement("span");
+      fallback.textContent = "P";
+
+      const image = document.createElement("img");
+      image.src = "/static/panam_avatar.png";
+      image.alt = "";
+      image.onerror = () => {
+        image.remove();
+        avatar.classList.add("avatar-fallback");
+      };
+
+      avatar.append(fallback, image);
+      return avatar;
+    }
+
+    function appendMessage(role, text, options = {}) {
+      const row = document.createElement("div");
+      row.className = `message-row ${role}`;
+
       const message = document.createElement("div");
       message.className = `message ${role}`;
+      if (options.loading) {
+        message.classList.add("loading");
+      }
 
       const name = document.createElement("div");
       name.className = "message-name";
@@ -56,8 +93,21 @@
       body.textContent = text;
 
       message.append(name, body);
-      chatLog.append(message);
+
+      if (role === "panam") {
+        row.append(createAvatar(), message);
+      } else {
+        row.append(message);
+      }
+
+      chatLog.append(row);
       chatLog.scrollTop = chatLog.scrollHeight;
+      return row;
+    }
+
+    function resetChatLog() {
+      chatLog.replaceChildren();
+      appendMessage("panam", welcomeText);
     }
 
     async function sendMessage() {
@@ -70,6 +120,8 @@
       messageInput.value = "";
       messageInput.focus();
 
+      const loadingMessage = appendMessage("panam", "Panam přemýšlí...", { loading: true });
+
       try {
         const response = await fetch("/api/chat", {
           method: "POST",
@@ -77,8 +129,10 @@
           body: JSON.stringify({ message }),
         });
         const data = await response.json();
+        loadingMessage.remove();
         appendMessage("panam", data.answer || data.error || "Panam nevrátila odpověď.");
       } catch (error) {
+        loadingMessage.remove();
         appendMessage("panam", "Spojení s Panam web adapterem selhalo.");
       }
     }
@@ -94,6 +148,28 @@
         sendMessage();
       }
     });
+
+    clearButton.addEventListener("click", async () => {
+      clearButton.disabled = true;
+      try {
+        await fetch("/api/clear", { method: "POST" });
+        resetChatLog();
+      } catch (error) {
+        appendMessage("panam", "Chat se nepodařilo vyčistit.");
+      } finally {
+        clearButton.disabled = false;
+        messageInput.focus();
+      }
+    });
+
+    exampleButtons.forEach((button) => {
+      button.addEventListener("click", () => {
+        messageInput.value = button.textContent;
+        messageInput.focus();
+      });
+    });
+
+    resetChatLog();
   </script>
 </body>
 </html>

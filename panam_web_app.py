@@ -28,6 +28,11 @@ def index():
     return render_template("index.html")
 
 
+@app.get("/health")
+def health():
+    return jsonify({"status": "ok", "service": "panam-web"})
+
+
 @app.post("/api/chat")
 def chat():
     data = request.get_json(silent=True) or {}
@@ -45,6 +50,12 @@ def chat():
         return jsonify({"error": "Panam web odpověď se nepodařila vytvořit."}), 500
 
     return jsonify({"answer": answer})
+
+
+@app.post("/api/clear")
+def clear():
+    message = panam_web_adapter.clear_web_chat_memory()
+    return jsonify({"status": "ok", "message": message})
 
 
 if __name__ == "__main__":

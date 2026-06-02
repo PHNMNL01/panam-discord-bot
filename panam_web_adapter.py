@@ -10,15 +10,20 @@ WEB_CHANNEL_ID = 1001
 
 
 WEB_HELP_TEXT = """Panam web scaffold commands:
-- Panam help
-- Panam rekni mi <dotaz>
-- Panam talk <tema>
-- Panam shrn <text>
-- Panam pridej poznamku <text>
-- Panam ukaz poznamky
-- Panam najdi poznamku <dotaz>
-- Panam pridej todo <text>
-- Panam ukaz todo"""
+- help
+- rekni mi <dotaz>
+- talk <tema>
+- shrn <text>
+- pridej poznamku <text>
+- ukaz poznamky
+- najdi poznamku <dotaz>
+- pridej todo <text>
+- ukaz todo"""
+
+
+def clear_web_chat_memory() -> str:
+    panam_memory.clear_channel_memory(WEB_CHANNEL_ID)
+    return "Chat vyčištěn."
 
 
 async def _handle_ask(model: str, user_text: str, raw_text: str) -> str:
@@ -30,7 +35,7 @@ async def _handle_ask(model: str, user_text: str, raw_text: str) -> str:
 
 
 async def handle_web_message(model: str, message: str) -> str:
-    command = parse_panam_command(message)
+    command = parse_panam_command(message, assume_addressed=True)
     command_text = command.text or ""
 
     if command.intent == "empty":
