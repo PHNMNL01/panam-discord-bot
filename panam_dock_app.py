@@ -7,6 +7,7 @@ from dotenv import load_dotenv
 from flask import Flask, jsonify, render_template, request
 
 import panam_process_manager
+import panam_test_runner
 
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -25,6 +26,10 @@ logger = logging.getLogger("panam.dock")
 
 def _service_statuses_json() -> list[dict]:
     return [asdict(status) for status in panam_process_manager.get_all_service_statuses()]
+
+
+def _test_result_json(result: panam_test_runner.PanamTestResult) -> dict:
+    return panam_test_runner.result_to_dict(result)
 
 
 def _is_local_request() -> bool:
@@ -70,6 +75,11 @@ def api_status():
     )
 
 
+@app.get("/api/tests")
+def api_tests():
+    return jsonify({"status": "ok", "tests": panam_test_runner.get_available_tests()})
+
+
 @app.post("/api/service/<service_name>/start")
 def api_start_service(service_name: str):
     if not _is_authorized_post():
@@ -92,6 +102,49 @@ def api_start_service(service_name: str):
         status.pid,
     )
     return jsonify({"status": "ok", "service": asdict(status)})
+
+
+@app.post("/api/tests/<test_name>/run")
+def api_run_test(test_name: str):
+    if not _is_authorized_post():
+        logger.warning("Dock test run denied for test=%s remote=%s", test_name, request.remote_addr)
+        return jsonify({"error": "Unauthorized"}), 401
+
+    try:
+        result = panam_test_runner.run_smoke_test(test_name)
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 404
+
+    logger.info(
+        "Dock test run test=%s passed=%s duration=%.3f",
+        result.name,
+        result.passed,
+        result.duration_seconds,
+    )
+    return jsonify({"status": "ok", "result": _test_result_json(result)})
+
+
+@app.post("/api/tests/run-all")
+def api_run_all_tests():
+    if not _is_authorized_post():
+        logger.warning("Dock run-all tests denied remote=%s", request.remote_addr)
+        return jsonify({"error": "Unauthorized"}), 401
+
+    results = panam_test_runner.run_all_smoke_tests()
+    passed = all(result.passed for result in results)
+
+    logger.info(
+        "Dock run-all tests count=%s passed=%s",
+        len(results),
+        passed,
+    )
+    return jsonify(
+        {
+            "status": "ok",
+            "passed": passed,
+            "results": [_test_result_json(result) for result in results],
+        }
+    )
 
 
 @app.post("/api/service/<service_name>/stop")

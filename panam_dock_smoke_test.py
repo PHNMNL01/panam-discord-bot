@@ -61,10 +61,12 @@ def main() -> None:
     client = panam_dock_app.app.test_client()
     health_response = client.get("/health")
     status_response = client.get("/api/status")
+    tests_response = client.get("/api/tests")
 
     assert health_response.status_code == 200, health_response.status_code
     assert health_response.get_json() == {"status": "ok", "service": "panam-dock"}
     assert status_response.status_code == 200, status_response.status_code
+    assert tests_response.status_code == 200, tests_response.status_code
 
     status_json = status_response.get_json()
     assert status_json["status"] == "ok", status_json
@@ -72,6 +74,11 @@ def main() -> None:
     assert api_service_names == {"bot", "web"}, api_service_names
     assert all("state" in service for service in status_json["services"]), status_json
     assert all("status_detail" in service for service in status_json["services"]), status_json
+
+    tests_json = tests_response.get_json()
+    assert tests_json["status"] == "ok", tests_json
+    assert isinstance(tests_json["tests"], list), tests_json
+    assert {test["name"] for test in tests_json["tests"]} >= {"dock", "router"}, tests_json
 
     print("panam_dock_smoke_test ok")
 
