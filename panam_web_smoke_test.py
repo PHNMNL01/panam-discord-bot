@@ -35,6 +35,11 @@ def main() -> None:
     assert_command("shrň toto je dlouhý text", "summary", assume_addressed=True)
     assert_command("jak se máš?", "ask", assume_addressed=True)
     assert_command("Panam help", "help", assume_addressed=True)
+    assert_command("shrn to", "summary_previous", assume_addressed=True)
+    assert_command("shrň toto", "summary_previous", assume_addressed=True)
+    assert_command("Panam shrn to", "summary_previous", assume_addressed=True)
+    assert_command("shrn toto je dlouhy text", "summary", assume_addressed=True)
+    assert_command("vysvetli to", "ask_previous", assume_addressed=True)
     print("panam_web_smoke_test ok")
 
 
