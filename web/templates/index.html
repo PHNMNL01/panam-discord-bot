@@ -1,0 +1,99 @@
+<!doctype html>
+<html lang="cs">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Panam Web</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='panam.css') }}">
+</head>
+<body>
+  <main class="shell">
+    <section class="hero">
+      <p class="eyebrow">Panam adapter preview</p>
+      <h1>Panam Web</h1>
+      <p class="intro">
+        Základní webový chat nad Panam core. Zatím jen textové příkazy, bez uploadů a souborů.
+      </p>
+    </section>
+
+    <section class="chat-panel" aria-label="Panam chat">
+      <div id="chat-log" class="chat-log" aria-live="polite">
+        <div class="message panam">
+          <div class="message-name">Panam</div>
+          <div class="message-text">Jsem online ve web scaffold režimu. Zkus třeba „Panam help“.</div>
+        </div>
+      </div>
+
+      <form id="chat-form" class="composer">
+        <label for="message" class="sr-only">Zpráva pro Panam</label>
+        <textarea
+          id="message"
+          name="message"
+          rows="3"
+          placeholder="Napiš zprávu pro Panam..."
+          autocomplete="off"
+        ></textarea>
+        <button type="submit">Odeslat</button>
+      </form>
+    </section>
+  </main>
+
+  <script>
+    const chatForm = document.querySelector("#chat-form");
+    const chatLog = document.querySelector("#chat-log");
+    const messageInput = document.querySelector("#message");
+
+    function appendMessage(role, text) {
+      const message = document.createElement("div");
+      message.className = `message ${role}`;
+
+      const name = document.createElement("div");
+      name.className = "message-name";
+      name.textContent = role === "user" ? "Ty" : "Panam";
+
+      const body = document.createElement("div");
+      body.className = "message-text";
+      body.textContent = text;
+
+      message.append(name, body);
+      chatLog.append(message);
+      chatLog.scrollTop = chatLog.scrollHeight;
+    }
+
+    async function sendMessage() {
+      const message = messageInput.value.trim();
+      if (!message) {
+        return;
+      }
+
+      appendMessage("user", message);
+      messageInput.value = "";
+      messageInput.focus();
+
+      try {
+        const response = await fetch("/api/chat", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ message }),
+        });
+        const data = await response.json();
+        appendMessage("panam", data.answer || data.error || "Panam nevrátila odpověď.");
+      } catch (error) {
+        appendMessage("panam", "Spojení s Panam web adapterem selhalo.");
+      }
+    }
+
+    chatForm.addEventListener("submit", (event) => {
+      event.preventDefault();
+      sendMessage();
+    });
+
+    messageInput.addEventListener("keydown", (event) => {
+      if (event.key === "Enter" && event.ctrlKey) {
+        event.preventDefault();
+        sendMessage();
+      }
+    });
+  </script>
+</body>
+</html>
