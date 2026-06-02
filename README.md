@@ -56,6 +56,12 @@ ALLOWED_CHANNEL_IDS=
 OPENAI_MODEL=gpt-5.4-mini
 OPENAI_PROMPT_ID=
 OPENAI_PROMPT_VERSION=
+PANAM_DOCK_ADMIN_TOKEN=
+PANAM_DOCK_PORT=5051
+PANAM_WEB_HOST=127.0.0.1
+PANAM_WEB_PORT=5050
+PANAM_WEB_DEBUG=1
+PANAM_WEB_USE_RELOADER=1
 ```
 
 Promenne:
@@ -66,6 +72,12 @@ Promenne:
 - `ALLOWED_CHANNEL_IDS` - volitelny seznam channel ID oddelenych carkou. Kdyz je prazdny, bot muze odpovidat vsude.
 - `OPENAI_MODEL` - model pro OpenAI volani, fallback je `gpt-5.4-mini`.
 - `OPENAI_PROMPT_ID` a `OPENAI_PROMPT_VERSION` - volitelny OpenAI Prompt Management prompt pro beznou osobnost Panam.
+- `PANAM_DOCK_ADMIN_TOKEN` - volitelny admin token pro Panam Dock POST akce.
+- `PANAM_DOCK_PORT` - port Panam Docku, default `5051`.
+- `PANAM_WEB_HOST` - host Panam Webu, default `127.0.0.1`.
+- `PANAM_WEB_PORT` - port Panam Webu, default `5050`.
+- `PANAM_WEB_DEBUG` - zapina Flask debug pri rucnim spusteni webu, default `1`.
+- `PANAM_WEB_USE_RELOADER` - zapina Flask reloader pri rucnim spusteni webu, default `1`.
 
 `.env` nikdy nedavej do gitu ani do chatu.
 
@@ -81,6 +93,22 @@ python bot.py
 ```
 
 `bot.py` pouze zavola `run_discord_bot()` z `panam_discord_runner.py`.
+
+Panam Web:
+
+```powershell
+python panam_web_app.py
+```
+
+Web bezi defaultne na `http://127.0.0.1:5050`, ma route `/health`, jednoduchou chat route `/api/chat` a mazani web pameti pres `/api/clear`.
+
+Panam Dock:
+
+```powershell
+python panam_dock_app.py
+```
+
+Dock bezi defaultne na `http://127.0.0.1:5051`. Slouzi jen jako lokalni admin panel pro status/start/stop povolenych sluzeb `bot.py` a `panam_web_app.py`.
 
 ## Slash Commandy
 
@@ -161,27 +189,57 @@ Formaty:
 
 Panam si umi pamatovat posledni souborovy kontext podle kanalu a poznat odkazy na soubor podle nazvu, napr. `requirements do csv` nebo `co bylo v requirements?`.
 
-## Panam web scaffold
+## Panam Web
 
-`panam_web_app.py` je placeholder startér pro budoucí Flask web appku. Flask UI a routy budou přidány až v dalším kroku.
+`panam_web_app.py` je samostatna Flask web appka pro lokalni webovy chat s Panam. Pouziva template `web/templates/index.html`, staticke soubory ve `web/static/` a adapter `panam_web_adapter.py`, ktery vola sdileny `panam_core.py` bez Discord zavislosti.
 
-`panam_web_adapter.py` převádí jednoduché web zprávy na volání společného `panam_core.py` a používá interní web user/channel identitu.
+Routy:
 
-`panam_command_router.py` je sdílený command parser pro budoucí adaptéry. Neimportuje Discord ani Flask a zatím řeší jen textové příkazy.
+- `GET /` - webove UI.
+- `GET /health` - vraci `{"status":"ok","service":"panam-web"}`.
+- `POST /api/chat` - posle zpravu do web adapteru.
+- `POST /api/clear` - smaze webovou konverzacni pamet.
 
-Soubory, uploady a webové zpracování příloh zatím nejsou cílem tohoto scaffoldingu.
+Pri rucnim spusteni ma web defaultne Flask debug a reloader zapnuty:
+
+```powershell
+python panam_web_app.py
+```
+
+Dock spousti web jako subprocess s `PANAM_STARTED_BY_DOCK=1`, `PANAM_WEB_DEBUG=0` a `PANAM_WEB_USE_RELOADER=0`. To je dulezite hlavne na Windows, aby se nededily Werkzeug reloader socket/env hodnoty a PID soubor odpovidal skutecnemu spravovanemu procesu.
 
 ## Panam Dock
 
-`panam_dock_app.py` je samostatny lokalni admin panel pro spravu procesu Panam. Spousti se pres:
+`panam_dock_app.py` je samostatny lokalni admin panel pro spravu procesu Panam. Bezi pouze na `127.0.0.1` a je oddeleny od Panam Webu, aby mohl zapinat a vypinat i `panam_web_app.py`.
+
+Spousti se pres:
 
 ```powershell
 python panam_dock_app.py
 ```
 
-Dock bezi na `http://127.0.0.1:5051` a umi zobrazit status, spustit a zastavit pouze povolene sluzby `bot.py` a `panam_web_app.py`. Neni urceny pro verejne vystaveni.
+Dock bezi na `http://127.0.0.1:5051` a umi zobrazit status, spustit a zastavit pouze povolene sluzby:
+
+- `bot` -> `bot.py`
+- `web` -> `panam_web_app.py`
+
+Dock neni urceny pro verejne vystaveni.
 
 Admin token nastav v `.env` pres `PANAM_DOCK_ADMIN_TOKEN`. Pokud token neni nastaveny, POST akce jsou povolene jen pro lokalni requesty z `127.0.0.1`. Port lze zmenit pres `PANAM_DOCK_PORT`.
+
+Procesy spravuje `panam_process_manager.py`:
+
+- validuje service name proti pevnemu allowlistu `bot` a `web`
+- pouziva `subprocess.Popen`
+- uklada PID soubory do `runtime/pids/`
+- zapisuje process logy do `logs/panam_bot_process.log` a `logs/panam_web_process.log`
+- u webu overuje skutecny stav pres `http://127.0.0.1:5050/health`, ne jen podle PID
+- pri startu child procesu sanitizuje Flask/Werkzeug reloader env promenne (`WERKZEUG_RUN_MAIN`, `WERKZEUG_SERVER_FD`, `FLASK_RUN_FROM_CLI`, `WERKZEUG_DEBUG_PIN`)
+- na Windows pouziva `taskkill /PID <pid> /T /F` pro stop celeho stromu procesu
+
+UI zobrazuje `RUNNING`, `STOPPED` nebo `ERROR` vcetne `status_detail`, aby web s zivym procesem, ale nefunkcnim health endpointem nevypadal jako zdrave bezici sluzba.
+
+`panam_test_runner.py` obsahuje bezpecny allowlist smoke testu. Nespousti libovolne prikazy, ale jen pevne pojmenovane test soubory pres aktualni Python interpreter.
 
 ## Podporovane Prilohy
 
@@ -303,6 +361,17 @@ File pipeline:
 - `panam_excel.py` - tvorba XLSX z dat.
 - `panam_spreadsheet.py` - deterministicke XLSX transformace.
 
+Web a dock:
+
+- `panam_web_app.py` - Flask web UI a API pro lokalni Panam Web.
+- `panam_web_adapter.py` - adapter mezi web chatem a sdilenym `panam_core.py`.
+- `panam_command_router.py` - sdileny textovy command parser pro adaptery.
+- `panam_dock_app.py` - lokalni Flask admin dock pro spravu procesu.
+- `panam_process_manager.py` - allowlist subprocess manager pro `bot.py` a `panam_web_app.py`.
+- `panam_test_runner.py` - allowlist runner smoke testu bez libovolnych prikazu.
+- `web/templates/index.html` a `web/static/` - Panam Web UI.
+- `web_admin/templates/dock.html` a `web_admin/static/` - Panam Dock UI.
+
 ## Testy
 
 Zakladni smoke testy:
@@ -314,7 +383,12 @@ python scripts/discord_runner_smoke_test.py
 python scripts/discord_basic_commands_smoke_test.py
 python scripts/discord_message_router_smoke_test.py
 python scripts/router_smoke_test.py
+python panam_web_smoke_test.py
+python panam_web_flask_smoke_test.py
+python panam_dock_smoke_test.py
 ```
+
+Dock smoke test nestartuje realny `bot.py` ani `panam_web_app.py`. Kontroluje importy, `/health`, `/api/status`, stavova pole sluzeb a sanitizaci child env pro Panam Web.
 
 Docx/XLSX testy v tomto workspace typicky pouzivaji `.venv`, protoze systemovy Python nemusi mit `docx`:
 
