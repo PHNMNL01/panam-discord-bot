@@ -1,0 +1,479 @@
+<!doctype html>
+<html lang="cs">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Panam Dock - Smoke Tests</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='dock.css') }}">
+</head>
+<body>
+  <main class="dock-shell">
+    <header class="dock-header">
+      <div>
+        <p class="eyebrow">Local Admin</p>
+        <h1>Smoke Tests</h1>
+        <p class="notice">Allowlistovane testy pro lokalni kontrolu Panam.</p>
+      </div>
+      <nav class="dock-nav" aria-label="Dock navigation">
+        <a class="{{ 'active' if active_page == 'dashboard' else '' }}" href="/">Dashboard</a>
+        <a class="{{ 'active' if active_page == 'tests' else '' }}" href="/tests">Smoke Tests</a>
+        <a class="{{ 'active' if active_page == 'logs' else '' }}" href="/logs">Logs</a>
+      </nav>
+    </header>
+
+    {% if token_warning %}
+      <section class="warning" id="token-warning">{{ token_warning }}</section>
+    {% endif %}
+
+    <section class="token-panel">
+      <label for="dock-token">Admin token</label>
+      <div class="token-row">
+        <input id="dock-token" type="password" autocomplete="off" placeholder="PANAM_DOCK_ADMIN_TOKEN">
+        <button class="secondary-button" type="button" data-action="save-token">Save</button>
+        <button class="secondary-button" type="button" data-action="clear-token">Clear</button>
+        <button class="secondary-button" type="button" data-action="refresh">Refresh</button>
+      </div>
+    </section>
+
+    <section class="tests-layout">
+      <div class="tests-main">
+        <section class="run-status idle" id="run-status-panel">
+          <div class="run-status-main">
+            <p class="eyebrow">Run Status</p>
+            <h2 id="run-status-title">Idle</h2>
+            <p id="run-status-summary">No smoke test is running.</p>
+          </div>
+          <div class="run-status-meta">
+            <span class="run-status-badge idle" id="run-status-badge">IDLE</span>
+            <span id="run-status-duration">-</span>
+          </div>
+        </section>
+
+        <section class="dock-section">
+          <div class="section-heading">
+            <div>
+              <p class="eyebrow">Last result</p>
+              <h2>Latest Run</h2>
+            </div>
+            <button class="secondary-button" type="button" data-action="toggle-latest-details">Hide latest details</button>
+          </div>
+          <p class="latest-summary" id="latest-summary">Last run: none</p>
+          <div class="test-results" id="test-results">
+            <article class="result-card empty-state">No test run yet.</article>
+          </div>
+        </section>
+
+        <section class="dock-section">
+          <div class="section-heading">
+            <div>
+              <p class="eyebrow">Smoke Tests</p>
+              <h2>Allowlist</h2>
+            </div>
+            <button type="button" data-action="run-all-tests">Run all safe tests</button>
+          </div>
+          <div class="test-grid" id="test-grid"></div>
+        </section>
+      </div>
+
+      <aside class="history-panel">
+        <div class="section-heading">
+          <div>
+            <p class="eyebrow">History</p>
+            <h2>Test history</h2>
+          </div>
+          <button class="secondary-button" type="button" data-action="clear-history">Clear history</button>
+        </div>
+        <div class="history-list" id="history-list"></div>
+      </aside>
+    </section>
+
+    <p class="status-line" id="status-line">Ready.</p>
+  </main>
+
+  <script>
+    const tokenInput = document.querySelector("#dock-token");
+    const testGrid = document.querySelector("#test-grid");
+    const testResults = document.querySelector("#test-results");
+    const historyList = document.querySelector("#history-list");
+    const statusLine = document.querySelector("#status-line");
+    const runStatusPanel = document.querySelector("#run-status-panel");
+    const runStatusTitle = document.querySelector("#run-status-title");
+    const runStatusSummary = document.querySelector("#run-status-summary");
+    const runStatusBadge = document.querySelector("#run-status-badge");
+    const runStatusDuration = document.querySelector("#run-status-duration");
+    const latestSummaryEl = document.querySelector("#latest-summary");
+    const latestToggleButton = document.querySelector('[data-action="toggle-latest-details"]');
+    const storedToken = localStorage.getItem("panamDockToken");
+    let latestResults = [];
+    let latestSummary = null;
+    let isRunning = false;
+    let latestDetailsVisible = true;
+    let collapseTimer = null;
+    let latestStatusByTest = {};
+
+    if (storedToken) {
+      tokenInput.value = storedToken;
+    }
+
+    function setStatus(message) {
+      statusLine.textContent = message;
+    }
+
+    function getTokenHeaders() {
+      const token = tokenInput.value.trim();
+      return token ? {"X-Panam-Dock-Token": token} : {};
+    }
+
+    function escapeHtml(value) {
+      return String(value ?? "")
+        .replaceAll("&", "&amp;")
+        .replaceAll("<", "&lt;")
+        .replaceAll(">", "&gt;")
+        .replaceAll('"', "&quot;")
+        .replaceAll("'", "&#039;");
+    }
+
+    function renderTests(tests) {
+      testGrid.innerHTML = tests.map((test) => {
+        const existsClass = test.exists ? "exists" : "missing";
+        const existsText = test.exists ? "exists" : "missing";
+        const disabled = test.exists && !isRunning ? "" : "disabled";
+        const latestStatus = latestStatusByTest[test.name];
+        const latestBadge = latestStatus
+          ? `<span class="result-pill ${latestStatus}">${latestStatus.toUpperCase()}</span>`
+          : "";
+
+        return `
+          <article class="test-card" data-test="${escapeHtml(test.name)}">
+            <div class="service-title-row">
+              <h3>${escapeHtml(test.label)}</h3>
+              <div class="card-badges">
+                ${latestBadge}
+                <span class="test-state ${existsClass}">${existsText}</span>
+              </div>
+            </div>
+            <dl>
+              <div><dt>Name</dt><dd>${escapeHtml(test.name)}</dd></div>
+              <div><dt>Path</dt><dd>${escapeHtml(test.path)}</dd></div>
+            </dl>
+            <div class="actions">
+              <button type="button" data-action="run-test" data-test="${escapeHtml(test.name)}" ${disabled}>Run</button>
+            </div>
+          </article>
+        `;
+      }).join("");
+    }
+
+    function renderTestResult(result) {
+      const statusClass = result.passed ? "pass" : "fail";
+      const statusText = result.passed ? "PASS" : "FAIL";
+      const flags = [
+        result.timed_out ? "timeout" : "",
+        result.missing ? "missing" : "",
+        result.error ? `error: ${result.error}` : "",
+      ].filter(Boolean).join(" | ");
+
+      return `
+        <article class="result-card latest-card ${statusClass}">
+          <div class="result-header">
+            <div>
+              <h3>${escapeHtml(result.label || result.test_label)}</h3>
+              <p>${escapeHtml(result.name || result.test_name)} ${result.path ? "- " + escapeHtml(result.path) : ""}</p>
+            </div>
+            <span class="result-pill ${statusClass}">${statusText}</span>
+          </div>
+          <dl>
+            <div><dt>Return</dt><dd>${result.returncode === null ? "-" : escapeHtml(result.returncode)}</dd></div>
+            <div><dt>Duration</dt><dd>${Number(result.duration_seconds || 0).toFixed(2)}s</dd></div>
+          </dl>
+          ${flags ? `<p class="result-flags">${escapeHtml(flags)}</p>` : ""}
+          <div class="output-grid">
+            <div>
+              <h4>stdout</h4>
+              <pre>${escapeHtml(result.stdout || "")}</pre>
+            </div>
+            <div>
+              <h4>stderr</h4>
+              <pre>${escapeHtml(result.stderr || "")}</pre>
+            </div>
+          </div>
+        </article>
+      `;
+    }
+
+    function renderTestResults(results) {
+      latestResults = results || [];
+      latestStatusByTest = {};
+      latestResults.forEach((result) => {
+        const name = result.name || result.test_name;
+        if (name && name !== "run_all") {
+          latestStatusByTest[name] = result.passed ? "pass" : "fail";
+        }
+      });
+      testResults.innerHTML = results.map(renderTestResult).join("");
+      applyLatestDetailsVisibility();
+      refreshTests().catch((error) => setStatus(error.message));
+    }
+
+    function setButtonsDisabled(disabled) {
+      document
+        .querySelectorAll('[data-action="run-test"], [data-action="run-all-tests"], [data-action="clear-history"]')
+        .forEach((button) => {
+          button.disabled = disabled || (button.dataset.action === "run-test" && button.closest(".test-card")?.querySelector(".test-state.missing"));
+        });
+    }
+
+    function clearCollapseTimer() {
+      if (collapseTimer) {
+        clearTimeout(collapseTimer);
+        collapseTimer = null;
+      }
+    }
+
+    function applyLatestDetailsVisibility() {
+      testResults.classList.toggle("collapsed", !latestDetailsVisible);
+      latestToggleButton.textContent = latestDetailsVisible ? "Hide latest details" : "Show latest details";
+    }
+
+    function setLatestDetailsVisible(visible) {
+      latestDetailsVisible = visible;
+      applyLatestDetailsVisibility();
+    }
+
+    function updateRunStatus(state, options = {}) {
+      const statusClass = state === "done" ? (options.passed ? "pass" : "fail") : state;
+      runStatusPanel.className = `run-status ${statusClass}`;
+      runStatusBadge.className = `run-status-badge ${statusClass}`;
+      runStatusBadge.textContent = state === "done" ? (options.passed ? "PASS" : "FAIL") : state.toUpperCase();
+      runStatusTitle.textContent = options.title || state;
+      runStatusSummary.textContent = options.summary || "";
+      runStatusDuration.textContent = options.duration === undefined ? "-" : `${Number(options.duration || 0).toFixed(2)}s`;
+    }
+
+    function summarizeResults(results, mode, label) {
+      const total = results.length;
+      const passed = results.filter((result) => result.passed).length;
+      const failed = total - passed;
+      const duration = results.reduce((sum, result) => sum + Number(result.duration_seconds || 0), 0);
+      const ok = failed === 0;
+      const name = mode === "run_all" ? "Run all safe tests" : label;
+
+      return {
+        mode,
+        label: name,
+        passed: ok,
+        passedCount: passed,
+        failedCount: failed,
+        total,
+        duration,
+        text: `Last run: ${ok ? "PASS" : "FAIL"}, ${passed}/${total}, ${duration.toFixed(2)}s`,
+      };
+    }
+
+    function renderLatestSummary(summary) {
+      latestSummary = summary;
+      latestSummaryEl.textContent = summary ? summary.text : "Last run: none";
+    }
+
+    function scheduleAutoCollapse(summary) {
+      clearCollapseTimer();
+      if (!summary || !summary.passed) {
+        return;
+      }
+      collapseTimer = setTimeout(() => {
+        setLatestDetailsVisible(false);
+        collapseTimer = null;
+      }, 60000);
+    }
+
+    function startRunStatus(title, summary) {
+      clearCollapseTimer();
+      isRunning = true;
+      setLatestDetailsVisible(true);
+      setButtonsDisabled(true);
+      updateRunStatus("running", {
+        title,
+        summary,
+      });
+      setStatus(summary);
+    }
+
+    function finishRunStatus(summary, results) {
+      isRunning = false;
+      setButtonsDisabled(false);
+      renderLatestSummary(summary);
+      renderTestResults(results);
+      updateRunStatus("done", {
+        passed: summary.passed,
+        title: summary.label,
+        summary: `${summary.passedCount}/${summary.total} passed, ${summary.failedCount} failed`,
+        duration: summary.duration,
+      });
+      scheduleAutoCollapse(summary);
+    }
+
+    function renderHistory(history) {
+      if (!history.length) {
+        historyList.innerHTML = `<article class="history-item empty-state">No history yet.</article>`;
+        return;
+      }
+
+      historyList.innerHTML = history.map((item) => {
+        const statusClass = item.passed ? "pass" : "fail";
+        const summary = item.mode === "run_all"
+          ? `${item.passed_count || 0} passed / ${item.failed_count || 0} failed`
+          : `return ${item.returncode === null ? "-" : item.returncode}`;
+
+        return `
+          <article class="history-item ${statusClass}">
+            <div class="history-row">
+              <strong>${escapeHtml(item.test_label || item.test_name)}</strong>
+              <span class="result-pill ${statusClass}">${item.passed ? "PASS" : "FAIL"}</span>
+            </div>
+            <p>${escapeHtml(item.mode)} - ${escapeHtml(summary)} - ${Number(item.duration_seconds || 0).toFixed(2)}s</p>
+            <time>${escapeHtml(item.started_at)}</time>
+          </article>
+        `;
+      }).join("");
+    }
+
+    async function refreshTests() {
+      const response = await fetch("/api/tests");
+      const data = await response.json();
+      if (!response.ok) {
+        throw new Error(data.error || "Tests request failed.");
+      }
+      renderTests(data.tests || []);
+      setButtonsDisabled(isRunning);
+    }
+
+    async function refreshHistory() {
+      const response = await fetch("/api/tests/history");
+      const data = await response.json();
+      if (!response.ok) {
+        throw new Error(data.error || "History request failed.");
+      }
+      renderHistory(data.history || []);
+    }
+
+    async function refreshPage() {
+      await Promise.all([refreshTests(), refreshHistory()]);
+      setStatus("Tests refreshed.");
+    }
+
+    async function runTest(testName) {
+      startRunStatus(testName, `Running ${testName}...`);
+      try {
+        const response = await fetch(`/api/tests/${testName}/run`, {
+          method: "POST",
+          headers: getTokenHeaders(),
+        });
+        const data = await response.json();
+        if (!response.ok) {
+          isRunning = false;
+          setButtonsDisabled(false);
+          updateRunStatus("error", { title: testName, summary: data.error || "Test run failed." });
+          throw new Error(data.error || "Test run failed.");
+        }
+        const summary = summarizeResults([data.result], "single", data.result.label || testName);
+        finishRunStatus(summary, [data.result]);
+        await refreshHistory();
+        setStatus(`${testName}: ${data.result.passed ? "PASS" : "FAIL"}`);
+      } catch (error) {
+        isRunning = false;
+        setButtonsDisabled(false);
+        updateRunStatus("error", { title: testName, summary: error.message });
+        throw error;
+      }
+    }
+
+    async function runAllTests() {
+      startRunStatus("Run all safe tests", "Running all safe tests...");
+      try {
+        const response = await fetch("/api/tests/run-all", {
+          method: "POST",
+          headers: getTokenHeaders(),
+        });
+        const data = await response.json();
+        if (!response.ok) {
+          isRunning = false;
+          setButtonsDisabled(false);
+          updateRunStatus("error", { title: "Run all safe tests", summary: data.error || "Run all tests failed." });
+          throw new Error(data.error || "Run all tests failed.");
+        }
+        const results = data.results || [];
+        const summary = summarizeResults(results, "run_all", "Run all safe tests");
+        const summaryResult = {
+          label: "Run all safe tests",
+          name: "run_all",
+          path: "allowlist",
+          passed: summary.passed,
+          returncode: null,
+          duration_seconds: summary.duration,
+          stdout: `${summary.passedCount} passed\n${summary.failedCount} failed\n${summary.total} total`,
+          stderr: "",
+          timed_out: results.some((result) => result.timed_out),
+          missing: results.some((result) => result.missing),
+          error: null,
+        };
+        finishRunStatus(summary, [summaryResult, ...results]);
+        await refreshHistory();
+        setStatus(`All tests: ${data.passed ? "PASS" : "FAIL"}`);
+      } catch (error) {
+        isRunning = false;
+        setButtonsDisabled(false);
+        updateRunStatus("error", { title: "Run all safe tests", summary: error.message });
+        throw error;
+      }
+    }
+
+    async function clearHistory() {
+      const response = await fetch("/api/tests/history/clear", {
+        method: "POST",
+        headers: getTokenHeaders(),
+      });
+      const data = await response.json();
+      if (!response.ok) {
+        throw new Error(data.error || "Clear history failed.");
+      }
+      renderHistory([]);
+      setStatus("History cleared.");
+    }
+
+    document.addEventListener("click", async (event) => {
+      const button = event.target.closest("button");
+      if (!button) {
+        return;
+      }
+
+      const action = button.dataset.action;
+
+      try {
+        if (action === "refresh") {
+          await refreshPage();
+        } else if (action === "save-token") {
+          localStorage.setItem("panamDockToken", tokenInput.value.trim());
+          setStatus("Token saved locally.");
+        } else if (action === "clear-token") {
+          tokenInput.value = "";
+          localStorage.removeItem("panamDockToken");
+          setStatus("Token cleared.");
+        } else if (action === "run-test") {
+          await runTest(button.dataset.test);
+        } else if (action === "run-all-tests") {
+          await runAllTests();
+        } else if (action === "clear-history") {
+          await clearHistory();
+        } else if (action === "toggle-latest-details") {
+          clearCollapseTimer();
+          setLatestDetailsVisible(!latestDetailsVisible);
+        }
+      } catch (error) {
+        setStatus(error.message);
+      }
+    });
+
+    refreshPage().catch((error) => setStatus(error.message));
+  </script>
+</body>
+</html>

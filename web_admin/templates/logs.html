@@ -1,0 +1,186 @@
+<!doctype html>
+<html lang="cs">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Panam Dock - Logs</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='dock.css') }}">
+</head>
+<body>
+  <main class="dock-shell">
+    <header class="dock-header">
+      <div>
+        <p class="eyebrow">Local Admin</p>
+        <h1>Logs</h1>
+        <p class="notice">Bezpecny viewer pouze pro allowlistovane logy.</p>
+      </div>
+      <nav class="dock-nav" aria-label="Dock navigation">
+        <a class="{{ 'active' if active_page == 'dashboard' else '' }}" href="/">Dashboard</a>
+        <a class="{{ 'active' if active_page == 'tests' else '' }}" href="/tests">Smoke Tests</a>
+        <a class="{{ 'active' if active_page == 'logs' else '' }}" href="/logs">Logs</a>
+      </nav>
+    </header>
+
+    {% if token_warning %}
+      <section class="warning" id="token-warning">{{ token_warning }}</section>
+    {% endif %}
+
+    <section class="token-panel">
+      <label for="dock-token">Admin token</label>
+      <div class="token-row">
+        <input id="dock-token" type="password" autocomplete="off" placeholder="PANAM_DOCK_ADMIN_TOKEN">
+        <button class="secondary-button" type="button" data-action="save-token">Save</button>
+        <button class="secondary-button" type="button" data-action="clear-token">Clear</button>
+        <select id="line-count" aria-label="Line count">
+          <option value="100">100 lines</option>
+          <option value="300" selected>300 lines</option>
+          <option value="1000">1000 lines</option>
+        </select>
+        <button class="secondary-button" type="button" data-action="refresh-log">Refresh</button>
+      </div>
+    </section>
+
+    <section class="logs-layout">
+      <aside class="log-list" id="log-list"></aside>
+      <section class="log-viewer">
+        <div class="section-heading">
+          <div>
+            <p class="eyebrow">Log Tail</p>
+            <h2 id="log-title">Select log</h2>
+          </div>
+          <span class="test-state missing" id="log-state">missing</span>
+        </div>
+        <dl class="log-meta">
+          <div><dt>Path</dt><dd id="log-path">-</dd></div>
+          <div><dt>Size</dt><dd id="log-size">-</dd></div>
+          <div><dt>Loaded</dt><dd id="log-loaded">-</dd></div>
+        </dl>
+        <p class="result-flags" id="log-message"></p>
+        <pre class="log-content" id="log-content"></pre>
+      </section>
+    </section>
+
+    <p class="status-line" id="status-line">Ready.</p>
+  </main>
+
+  <script>
+    const tokenInput = document.querySelector("#dock-token");
+    const lineCount = document.querySelector("#line-count");
+    const logList = document.querySelector("#log-list");
+    const statusLine = document.querySelector("#status-line");
+    const logTitle = document.querySelector("#log-title");
+    const logState = document.querySelector("#log-state");
+    const logPath = document.querySelector("#log-path");
+    const logSize = document.querySelector("#log-size");
+    const logLoaded = document.querySelector("#log-loaded");
+    const logMessage = document.querySelector("#log-message");
+    const logContent = document.querySelector("#log-content");
+    const storedToken = localStorage.getItem("panamDockToken");
+    let currentLogName = null;
+
+    if (storedToken) {
+      tokenInput.value = storedToken;
+    }
+
+    function setStatus(message) {
+      statusLine.textContent = message;
+    }
+
+    function getTokenHeaders() {
+      const token = tokenInput.value.trim();
+      return token ? {"X-Panam-Dock-Token": token} : {};
+    }
+
+    function escapeHtml(value) {
+      return String(value || "")
+        .replaceAll("&", "&amp;")
+        .replaceAll("<", "&lt;")
+        .replaceAll(">", "&gt;")
+        .replaceAll('"', "&quot;")
+        .replaceAll("'", "&#039;");
+    }
+
+    function renderLogList(logs) {
+      logList.innerHTML = logs.map((log) => `
+        <button class="log-list-item ${log.exists ? "exists" : "missing"}" type="button" data-action="select-log" data-log="${escapeHtml(log.name)}">
+          <strong>${escapeHtml(log.label)}</strong>
+          <span>${escapeHtml(log.path)}</span>
+        </button>
+      `).join("");
+
+      if (!currentLogName && logs.length) {
+        currentLogName = logs[0].name;
+      }
+    }
+
+    async function refreshLogs() {
+      const response = await fetch("/api/logs", { headers: getTokenHeaders() });
+      const data = await response.json();
+      if (!response.ok) {
+        throw new Error(data.error || "Logs request failed.");
+      }
+      renderLogList(data.logs || []);
+      if (currentLogName) {
+        await loadLog(currentLogName);
+      }
+    }
+
+    async function loadLog(logName) {
+      currentLogName = logName;
+      const lines = lineCount.value || "300";
+      const response = await fetch(`/api/logs/${logName}?lines=${lines}`, {
+        headers: getTokenHeaders(),
+      });
+      const data = await response.json();
+      if (!response.ok) {
+        throw new Error(data.error || "Log read failed.");
+      }
+
+      const log = data.log;
+      logTitle.textContent = log.label;
+      logState.textContent = log.exists ? "exists" : "missing";
+      logState.className = `test-state ${log.exists ? "exists" : "missing"}`;
+      logPath.textContent = log.path;
+      logSize.textContent = log.size === null ? "-" : `${log.size} bytes`;
+      logLoaded.textContent = new Date().toLocaleString();
+      logMessage.textContent = log.message || "";
+      logContent.textContent = log.content || "";
+      setStatus(`Loaded ${log.name}.`);
+    }
+
+    document.addEventListener("click", async (event) => {
+      const button = event.target.closest("button");
+      if (!button) {
+        return;
+      }
+
+      const action = button.dataset.action;
+
+      try {
+        if (action === "save-token") {
+          localStorage.setItem("panamDockToken", tokenInput.value.trim());
+          setStatus("Token saved locally.");
+        } else if (action === "clear-token") {
+          tokenInput.value = "";
+          localStorage.removeItem("panamDockToken");
+          setStatus("Token cleared.");
+        } else if (action === "refresh-log") {
+          await refreshLogs();
+        } else if (action === "select-log") {
+          await loadLog(button.dataset.log);
+        }
+      } catch (error) {
+        setStatus(error.message);
+      }
+    });
+
+    lineCount.addEventListener("change", () => {
+      if (currentLogName) {
+        loadLog(currentLogName).catch((error) => setStatus(error.message));
+      }
+    });
+
+    refreshLogs().catch((error) => setStatus(error.message));
+  </script>
+</body>
+</html>
