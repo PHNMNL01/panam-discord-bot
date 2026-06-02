@@ -1,0 +1,195 @@
+<!doctype html>
+<html lang="cs">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Panam Dock</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='dock.css') }}">
+</head>
+<body>
+  <main class="dock-shell">
+    <header class="dock-header">
+      <div>
+        <p class="eyebrow">Local Admin</p>
+        <h1>Panam Dock</h1>
+        <p class="notice">Dock je lokalni admin panel. Nespoustej ho verejne.</p>
+      </div>
+      <button class="secondary-button" type="button" data-action="refresh">Refresh</button>
+    </header>
+
+    {% if token_warning %}
+      <section class="warning" id="token-warning">{{ token_warning }}</section>
+    {% endif %}
+
+    <section class="token-panel">
+      <label for="dock-token">Admin token</label>
+      <div class="token-row">
+        <input id="dock-token" type="password" autocomplete="off" placeholder="PANAM_DOCK_ADMIN_TOKEN">
+        <button class="secondary-button" type="button" data-action="save-token">Save</button>
+        <button class="secondary-button" type="button" data-action="clear-token">Clear</button>
+      </div>
+      <p class="token-hint">
+        {% if token_required %}
+          POST akce vyzaduji header X-Panam-Dock-Token.
+        {% else %}
+          Token neni nastaveny, POST akce jsou povolene jen lokalne.
+        {% endif %}
+      </p>
+    </section>
+
+    <section class="service-grid" id="service-grid">
+      {% for service in services %}
+        <article class="service-card" data-service="{{ service.name }}">
+          <div class="service-title-row">
+            <h2>{{ service.label }}</h2>
+            <span class="status-pill {{ service.state }}">
+              {{ service.state }}
+            </span>
+          </div>
+          <dl>
+            <div>
+              <dt>Script</dt>
+              <dd>{{ service.script }}</dd>
+            </div>
+            <div>
+              <dt>PID</dt>
+              <dd>{{ service.pid if service.pid else '-' }}</dd>
+            </div>
+            <div>
+              <dt>Detail</dt>
+              <dd>{{ service.status_detail }}</dd>
+            </div>
+            {% if service.last_error %}
+              <div>
+                <dt>Chyba</dt>
+                <dd>{{ service.last_error }}</dd>
+              </div>
+            {% endif %}
+          </dl>
+          <div class="actions">
+            <button type="button" data-action="start" data-service="{{ service.name }}">Start</button>
+            <button class="danger-button" type="button" data-action="stop" data-service="{{ service.name }}">Stop</button>
+          </div>
+        </article>
+      {% endfor %}
+    </section>
+
+    <p class="status-line" id="status-line">Ready.</p>
+  </main>
+
+  <script>
+    const tokenInput = document.querySelector("#dock-token");
+    const serviceGrid = document.querySelector("#service-grid");
+    const statusLine = document.querySelector("#status-line");
+    const storedToken = localStorage.getItem("panamDockToken");
+
+    if (storedToken) {
+      tokenInput.value = storedToken;
+    }
+
+    function setStatus(message) {
+      statusLine.textContent = message;
+    }
+
+    function getTokenHeaders() {
+      const token = tokenInput.value.trim();
+      return token ? {"X-Panam-Dock-Token": token} : {};
+    }
+
+    function renderServices(services) {
+      serviceGrid.innerHTML = services.map((service) => {
+        const running = Boolean(service.running);
+        const pid = service.pid || "-";
+        const state = service.state || (running ? "running" : "stopped");
+        const detail = service.status_detail || state;
+        const lastError = service.last_error
+          ? `<div><dt>Chyba</dt><dd>${service.last_error}</dd></div>`
+          : "";
+
+        return `
+          <article class="service-card" data-service="${service.name}">
+            <div class="service-title-row">
+              <h2>${service.label}</h2>
+              <span class="status-pill ${state}">${state}</span>
+            </div>
+            <dl>
+              <div>
+                <dt>Script</dt>
+                <dd>${service.script}</dd>
+              </div>
+              <div>
+                <dt>PID</dt>
+                <dd>${pid}</dd>
+              </div>
+              <div>
+                <dt>Detail</dt>
+                <dd>${detail}</dd>
+              </div>
+              ${lastError}
+            </dl>
+            <div class="actions">
+              <button type="button" data-action="start" data-service="${service.name}">Start</button>
+              <button class="danger-button" type="button" data-action="stop" data-service="${service.name}">Stop</button>
+            </div>
+          </article>
+        `;
+      }).join("");
+    }
+
+    async function refreshStatus() {
+      const response = await fetch("/api/status");
+      const data = await response.json();
+
+      if (!response.ok) {
+        throw new Error(data.error || "Status request failed.");
+      }
+
+      renderServices(data.services || []);
+      setStatus("Status refreshed.");
+    }
+
+    async function serviceAction(serviceName, action) {
+      setStatus(`${action} ${serviceName}...`);
+      const response = await fetch(`/api/service/${serviceName}/${action}`, {
+        method: "POST",
+        headers: getTokenHeaders(),
+      });
+      const data = await response.json();
+
+      if (!response.ok) {
+        throw new Error(data.error || `${action} failed.`);
+      }
+
+      await refreshStatus();
+      const detail = data.service?.status_detail || "done";
+      setStatus(`${serviceName} ${action}: ${detail}`);
+    }
+
+    document.addEventListener("click", async (event) => {
+      const button = event.target.closest("button");
+      if (!button) {
+        return;
+      }
+
+      const action = button.dataset.action;
+
+      try {
+        if (action === "refresh") {
+          await refreshStatus();
+        } else if (action === "save-token") {
+          localStorage.setItem("panamDockToken", tokenInput.value.trim());
+          setStatus("Token saved locally.");
+        } else if (action === "clear-token") {
+          tokenInput.value = "";
+          localStorage.removeItem("panamDockToken");
+          setStatus("Token cleared.");
+        } else if (action === "start" || action === "stop") {
+          await serviceAction(button.dataset.service, action);
+        }
+      } catch (error) {
+        setStatus(error.message);
+      }
+    });
+  </script>
+</body>
+</html>

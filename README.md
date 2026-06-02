@@ -171,6 +171,18 @@ Panam si umi pamatovat posledni souborovy kontext podle kanalu a poznat odkazy n
 
 Soubory, uploady a webové zpracování příloh zatím nejsou cílem tohoto scaffoldingu.
 
+## Panam Dock
+
+`panam_dock_app.py` je samostatny lokalni admin panel pro spravu procesu Panam. Spousti se pres:
+
+```powershell
+python panam_dock_app.py
+```
+
+Dock bezi na `http://127.0.0.1:5051` a umi zobrazit status, spustit a zastavit pouze povolene sluzby `bot.py` a `panam_web_app.py`. Neni urceny pro verejne vystaveni.
+
+Admin token nastav v `.env` pres `PANAM_DOCK_ADMIN_TOKEN`. Pokud token neni nastaveny, POST akce jsou povolene jen pro lokalni requesty z `127.0.0.1`. Port lze zmenit pres `PANAM_DOCK_PORT`.
+
 ## Podporovane Prilohy
 
 Obrazky:
