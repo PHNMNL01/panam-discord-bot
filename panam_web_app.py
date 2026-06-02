@@ -23,6 +23,11 @@ app = Flask(
 logger = logging.getLogger("panam.web")
 
 
+def _env_bool(name: str, default: str) -> bool:
+    value = os.getenv(name, default).strip().lower()
+    return value in {"1", "true", "yes", "on"}
+
+
 @app.get("/")
 def index():
     return render_template("index.html")
@@ -59,4 +64,19 @@ def clear():
 
 
 if __name__ == "__main__":
-    app.run(host="127.0.0.1", port=5050, debug=True)
+    host = os.getenv("PANAM_WEB_HOST", "127.0.0.1")
+    port = int(os.getenv("PANAM_WEB_PORT", "5050"))
+    debug = _env_bool("PANAM_WEB_DEBUG", "1")
+    use_reloader = _env_bool("PANAM_WEB_USE_RELOADER", "1")
+    started_by_dock = _env_bool("PANAM_STARTED_BY_DOCK", "0")
+
+    if started_by_dock:
+        debug = False
+        use_reloader = False
+
+    app.run(
+        host=host,
+        port=port,
+        debug=debug,
+        use_reloader=use_reloader,
+    )
