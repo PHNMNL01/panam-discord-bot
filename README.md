@@ -161,6 +161,16 @@ Formaty:
 
 Panam si umi pamatovat posledni souborovy kontext podle kanalu a poznat odkazy na soubor podle nazvu, napr. `requirements do csv` nebo `co bylo v requirements?`.
 
+## Panam web scaffold
+
+`panam_web_app.py` je placeholder startér pro budoucí Flask web appku. Flask UI a routy budou přidány až v dalším kroku.
+
+`panam_web_adapter.py` převádí jednoduché web zprávy na volání společného `panam_core.py` a používá interní web user/channel identitu.
+
+`panam_command_router.py` je sdílený command parser pro budoucí adaptéry. Neimportuje Discord ani Flask a zatím řeší jen textové příkazy.
+
+Soubory, uploady a webové zpracování příloh zatím nejsou cílem tohoto scaffoldingu.
+
 ## Podporovane Prilohy
 
 Obrazky:
