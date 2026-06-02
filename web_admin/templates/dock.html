@@ -37,41 +37,61 @@
       </p>
     </section>
 
-    <section class="service-grid" id="service-grid">
-      {% for service in services %}
-        <article class="service-card" data-service="{{ service.name }}">
-          <div class="service-title-row">
-            <h2>{{ service.label }}</h2>
-            <span class="status-pill {{ service.state }}">
-              {{ service.state }}
-            </span>
-          </div>
-          <dl>
-            <div>
-              <dt>Script</dt>
-              <dd>{{ service.script }}</dd>
+    <section class="dock-section">
+      <div class="section-heading">
+        <div>
+          <p class="eyebrow">Services</p>
+          <h2>Process Control</h2>
+        </div>
+      </div>
+      <div class="service-grid" id="service-grid">
+        {% for service in services %}
+          <article class="service-card" data-service="{{ service.name }}">
+            <div class="service-title-row">
+              <h3>{{ service.label }}</h3>
+              <span class="status-pill {{ service.state }}">
+                {{ service.state }}
+              </span>
             </div>
-            <div>
-              <dt>PID</dt>
-              <dd>{{ service.pid if service.pid else '-' }}</dd>
-            </div>
-            <div>
-              <dt>Detail</dt>
-              <dd>{{ service.status_detail }}</dd>
-            </div>
-            {% if service.last_error %}
+            <dl>
               <div>
-                <dt>Chyba</dt>
-                <dd>{{ service.last_error }}</dd>
+                <dt>Script</dt>
+                <dd>{{ service.script }}</dd>
               </div>
-            {% endif %}
-          </dl>
-          <div class="actions">
-            <button type="button" data-action="start" data-service="{{ service.name }}">Start</button>
-            <button class="danger-button" type="button" data-action="stop" data-service="{{ service.name }}">Stop</button>
-          </div>
-        </article>
-      {% endfor %}
+              <div>
+                <dt>PID</dt>
+                <dd>{{ service.pid if service.pid else '-' }}</dd>
+              </div>
+              <div>
+                <dt>Detail</dt>
+                <dd>{{ service.status_detail }}</dd>
+              </div>
+              {% if service.last_error %}
+                <div>
+                  <dt>Chyba</dt>
+                  <dd>{{ service.last_error }}</dd>
+                </div>
+              {% endif %}
+            </dl>
+            <div class="actions">
+              <button type="button" data-action="start" data-service="{{ service.name }}">Start</button>
+              <button class="danger-button" type="button" data-action="stop" data-service="{{ service.name }}">Stop</button>
+            </div>
+          </article>
+        {% endfor %}
+      </div>
+    </section>
+
+    <section class="dock-section">
+      <div class="section-heading">
+        <div>
+          <p class="eyebrow">Smoke Tests</p>
+          <h2>Safe Test Runner</h2>
+        </div>
+        <button type="button" data-action="run-all-tests">Run all safe tests</button>
+      </div>
+      <div class="test-grid" id="test-grid"></div>
+      <div class="test-results" id="test-results"></div>
     </section>
 
     <p class="status-line" id="status-line">Ready.</p>
@@ -80,6 +100,8 @@
   <script>
     const tokenInput = document.querySelector("#dock-token");
     const serviceGrid = document.querySelector("#service-grid");
+    const testGrid = document.querySelector("#test-grid");
+    const testResults = document.querySelector("#test-results");
     const statusLine = document.querySelector("#status-line");
     const storedToken = localStorage.getItem("panamDockToken");
 
@@ -96,6 +118,15 @@
       return token ? {"X-Panam-Dock-Token": token} : {};
     }
 
+    function escapeHtml(value) {
+      return String(value || "")
+        .replaceAll("&", "&amp;")
+        .replaceAll("<", "&lt;")
+        .replaceAll(">", "&gt;")
+        .replaceAll('"', "&quot;")
+        .replaceAll("'", "&#039;");
+    }
+
     function renderServices(services) {
       serviceGrid.innerHTML = services.map((service) => {
         const running = Boolean(service.running);
@@ -103,37 +134,114 @@
         const state = service.state || (running ? "running" : "stopped");
         const detail = service.status_detail || state;
         const lastError = service.last_error
-          ? `<div><dt>Chyba</dt><dd>${service.last_error}</dd></div>`
+          ? `<div><dt>Chyba</dt><dd>${escapeHtml(service.last_error)}</dd></div>`
           : "";
 
         return `
-          <article class="service-card" data-service="${service.name}">
+          <article class="service-card" data-service="${escapeHtml(service.name)}">
             <div class="service-title-row">
-              <h2>${service.label}</h2>
-              <span class="status-pill ${state}">${state}</span>
+              <h3>${escapeHtml(service.label)}</h3>
+              <span class="status-pill ${escapeHtml(state)}">${escapeHtml(state)}</span>
             </div>
             <dl>
               <div>
                 <dt>Script</dt>
-                <dd>${service.script}</dd>
+                <dd>${escapeHtml(service.script)}</dd>
               </div>
               <div>
                 <dt>PID</dt>
-                <dd>${pid}</dd>
+                <dd>${escapeHtml(pid)}</dd>
               </div>
               <div>
                 <dt>Detail</dt>
-                <dd>${detail}</dd>
+                <dd>${escapeHtml(detail)}</dd>
               </div>
               ${lastError}
             </dl>
             <div class="actions">
-              <button type="button" data-action="start" data-service="${service.name}">Start</button>
-              <button class="danger-button" type="button" data-action="stop" data-service="${service.name}">Stop</button>
+              <button type="button" data-action="start" data-service="${escapeHtml(service.name)}">Start</button>
+              <button class="danger-button" type="button" data-action="stop" data-service="${escapeHtml(service.name)}">Stop</button>
             </div>
           </article>
         `;
       }).join("");
+    }
+
+    function renderTests(tests) {
+      testGrid.innerHTML = tests.map((test) => {
+        const existsClass = test.exists ? "exists" : "missing";
+        const existsText = test.exists ? "exists" : "missing";
+        const disabled = test.exists ? "" : "disabled";
+
+        return `
+          <article class="test-card" data-test="${escapeHtml(test.name)}">
+            <div class="service-title-row">
+              <h3>${escapeHtml(test.label)}</h3>
+              <span class="test-state ${existsClass}">${existsText}</span>
+            </div>
+            <dl>
+              <div>
+                <dt>Name</dt>
+                <dd>${escapeHtml(test.name)}</dd>
+              </div>
+              <div>
+                <dt>Path</dt>
+                <dd>${escapeHtml(test.path)}</dd>
+              </div>
+            </dl>
+            <div class="actions">
+              <button type="button" data-action="run-test" data-test="${escapeHtml(test.name)}" ${disabled}>Run</button>
+            </div>
+          </article>
+        `;
+      }).join("");
+    }
+
+    function renderTestResult(result) {
+      const statusClass = result.passed ? "pass" : "fail";
+      const statusText = result.passed ? "PASS" : "FAIL";
+      const flags = [
+        result.timed_out ? "timeout" : "",
+        result.missing ? "missing" : "",
+        result.error ? `error: ${result.error}` : "",
+      ].filter(Boolean).join(" | ");
+
+      return `
+        <article class="result-card ${statusClass}">
+          <div class="result-header">
+            <div>
+              <h3>${escapeHtml(result.label)}</h3>
+              <p>${escapeHtml(result.path)}</p>
+            </div>
+            <span class="result-pill ${statusClass}">${statusText}</span>
+          </div>
+          <dl>
+            <div>
+              <dt>Return</dt>
+              <dd>${result.returncode === null ? "-" : escapeHtml(result.returncode)}</dd>
+            </div>
+            <div>
+              <dt>Duration</dt>
+              <dd>${Number(result.duration_seconds || 0).toFixed(2)}s</dd>
+            </div>
+          </dl>
+          ${flags ? `<p class="result-flags">${escapeHtml(flags)}</p>` : ""}
+          <div class="output-grid">
+            <div>
+              <h4>stdout</h4>
+              <pre>${escapeHtml(result.stdout || "")}</pre>
+            </div>
+            <div>
+              <h4>stderr</h4>
+              <pre>${escapeHtml(result.stderr || "")}</pre>
+            </div>
+          </div>
+        </article>
+      `;
+    }
+
+    function renderTestResults(results) {
+      testResults.innerHTML = results.map(renderTestResult).join("");
     }
 
     async function refreshStatus() {
@@ -146,6 +254,17 @@
 
       renderServices(data.services || []);
       setStatus("Status refreshed.");
+    }
+
+    async function refreshTests() {
+      const response = await fetch("/api/tests");
+      const data = await response.json();
+
+      if (!response.ok) {
+        throw new Error(data.error || "Tests request failed.");
+      }
+
+      renderTests(data.tests || []);
     }
 
     async function serviceAction(serviceName, action) {
@@ -165,6 +284,38 @@
       setStatus(`${serviceName} ${action}: ${detail}`);
     }
 
+    async function runTest(testName) {
+      setStatus(`Running ${testName}...`);
+      const response = await fetch(`/api/tests/${testName}/run`, {
+        method: "POST",
+        headers: getTokenHeaders(),
+      });
+      const data = await response.json();
+
+      if (!response.ok) {
+        throw new Error(data.error || "Test run failed.");
+      }
+
+      renderTestResults([data.result]);
+      setStatus(`${testName}: ${data.result.passed ? "PASS" : "FAIL"}`);
+    }
+
+    async function runAllTests() {
+      setStatus("Running all safe tests...");
+      const response = await fetch("/api/tests/run-all", {
+        method: "POST",
+        headers: getTokenHeaders(),
+      });
+      const data = await response.json();
+
+      if (!response.ok) {
+        throw new Error(data.error || "Run all tests failed.");
+      }
+
+      renderTestResults(data.results || []);
+      setStatus(`All tests: ${data.passed ? "PASS" : "FAIL"}`);
+    }
+
     document.addEventListener("click", async (event) => {
       const button = event.target.closest("button");
       if (!button) {
@@ -175,7 +326,7 @@
 
       try {
         if (action === "refresh") {
-          await refreshStatus();
+          await Promise.all([refreshStatus(), refreshTests()]);
         } else if (action === "save-token") {
           localStorage.setItem("panamDockToken", tokenInput.value.trim());
           setStatus("Token saved locally.");
@@ -185,11 +336,17 @@
           setStatus("Token cleared.");
         } else if (action === "start" || action === "stop") {
           await serviceAction(button.dataset.service, action);
+        } else if (action === "run-test") {
+          await runTest(button.dataset.test);
+        } else if (action === "run-all-tests") {
+          await runAllTests();
         }
       } catch (error) {
         setStatus(error.message);
       }
     });
+
+    refreshTests().catch((error) => setStatus(error.message));
   </script>
 </body>
 </html>
