@@ -109,11 +109,14 @@ def _match_normalized_patterns(text: str) -> PanamCommandIntent | None:
     return None
 
 
-def parse_panam_command(text: str) -> PanamCommandIntent:
+def parse_panam_command(
+    text: str,
+    assume_addressed: bool = False,
+) -> PanamCommandIntent:
     raw_text = text or ""
     value = raw_text.strip()
     addressed = _has_panam_prefix(value)
-    request_text = strip_panam_prefix(value) if addressed else value
+    request_text = strip_panam_prefix(value) if addressed or assume_addressed else value
 
     if not request_text:
         intent = PanamCommandIntent("empty")
