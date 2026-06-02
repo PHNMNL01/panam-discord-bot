@@ -26,6 +26,48 @@ def clear_web_chat_memory() -> str:
     return "Chat vyčištěn."
 
 
+def _is_short_command(text: str) -> bool:
+    command = parse_panam_command(text, assume_addressed=True)
+    if command.intent in {
+        "empty",
+        "help",
+        "summary_previous",
+        "ask_previous",
+        "note_list",
+        "todo_list",
+    }:
+        return True
+
+    return command.intent in {"note_add", "note_search", "todo_add"} and len(
+        text.split()
+    ) <= 5
+
+
+def get_last_user_message(
+    channel_id: int,
+    exclude_text: str | None = None,
+) -> str | None:
+    excluded = (exclude_text or "").strip()
+
+    for message in reversed(panam_memory.get_messages(channel_id)):
+        if message.get("role") != "user":
+            continue
+
+        content = str(message.get("content") or "").strip()
+        if not content:
+            continue
+
+        if excluded and content == excluded:
+            continue
+
+        if _is_short_command(content):
+            continue
+
+        return content
+
+    return None
+
+
 async def _handle_ask(model: str, user_text: str, raw_text: str) -> str:
     history = panam_memory.get_messages(WEB_CHANNEL_ID)
     response = await panam_core.handle_chat(model, user_text, history=history)
@@ -53,6 +95,34 @@ async def handle_web_message(model: str, message: str) -> str:
     if command.intent == "summary":
         response = await panam_core.handle_summary(model, command_text)
         panam_memory.add_message(WEB_CHANNEL_ID, "user", command.raw_text or command_text)
+        panam_memory.add_message(WEB_CHANNEL_ID, "assistant", response.text)
+        return response.text
+
+    if command.intent == "summary_previous":
+        previous_text = get_last_user_message(WEB_CHANNEL_ID, exclude_text=command.raw_text)
+        if previous_text is None:
+            answer = "Pošli mi prosím text, který chceš stručně shrnout."
+        else:
+            response = await panam_core.handle_summary(model, previous_text)
+            answer = response.text
+
+        panam_memory.add_message(WEB_CHANNEL_ID, "user", command.raw_text)
+        panam_memory.add_message(WEB_CHANNEL_ID, "assistant", answer)
+        return answer
+
+    if command.intent == "ask_previous":
+        previous_text = get_last_user_message(WEB_CHANNEL_ID, exclude_text=command.raw_text)
+        if previous_text is None:
+            return await _handle_ask(model, command.raw_text, command.raw_text)
+
+        prompt = (
+            "Uživatel navazuje na předchozí text:\n\n"
+            f"{previous_text}\n\n"
+            f"Dotaz: {command.raw_text}"
+        )
+        history = panam_memory.get_messages(WEB_CHANNEL_ID)
+        response = await panam_core.handle_chat(model, prompt, history=history)
+        panam_memory.add_message(WEB_CHANNEL_ID, "user", command.raw_text)
         panam_memory.add_message(WEB_CHANNEL_ID, "assistant", response.text)
         return response.text
 

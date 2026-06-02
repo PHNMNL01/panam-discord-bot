@@ -109,6 +109,21 @@ def _match_normalized_patterns(text: str) -> PanamCommandIntent | None:
     return None
 
 
+def _match_context_patterns(text: str) -> PanamCommandIntent | None:
+    normalized = _normalize_text(text)
+
+    if normalized in {"shrn to", "shrn toto"}:
+        return PanamCommandIntent("summary_previous")
+
+    if normalized in {
+        "co si o tom myslis",
+        "vysvetli to",
+    }:
+        return PanamCommandIntent("ask_previous")
+
+    return None
+
+
 def parse_panam_command(
     text: str,
     assume_addressed: bool = False,
@@ -121,9 +136,13 @@ def parse_panam_command(
     if not request_text:
         intent = PanamCommandIntent("empty")
     else:
-        intent = _match_existing_patterns(request_text) or _match_normalized_patterns(
+        intent = None
+        if assume_addressed:
+            intent = _match_context_patterns(request_text)
+
+        intent = intent or _match_existing_patterns(
             request_text
-        )
+        ) or _match_normalized_patterns(request_text)
 
     if intent is None:
         intent = PanamCommandIntent("ask", request_text)
