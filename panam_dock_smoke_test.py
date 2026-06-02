@@ -59,14 +59,30 @@ def main() -> None:
     assert panam_dock_app.app is not None
 
     client = panam_dock_app.app.test_client()
+    index_response = client.get("/")
+    tests_page_response = client.get("/tests")
+    logs_page_response = client.get("/logs")
     health_response = client.get("/health")
     status_response = client.get("/api/status")
     tests_response = client.get("/api/tests")
+    history_response = client.get("/api/tests/history")
+    headers = {}
+    if panam_dock_app.ADMIN_TOKEN:
+        headers["X-Panam-Dock-Token"] = panam_dock_app.ADMIN_TOKEN
+    logs_response = client.get("/api/logs", headers=headers)
 
+    assert index_response.status_code == 200, index_response.status_code
+    assert b"data-action=\"open-web\"" in index_response.data
+    assert b"Panam Web nebezi" in index_response.data
+    assert tests_page_response.status_code == 200, tests_page_response.status_code
+    assert b"Run Status" in tests_page_response.data
+    assert logs_page_response.status_code == 200, logs_page_response.status_code
     assert health_response.status_code == 200, health_response.status_code
     assert health_response.get_json() == {"status": "ok", "service": "panam-dock"}
     assert status_response.status_code == 200, status_response.status_code
     assert tests_response.status_code == 200, tests_response.status_code
+    assert history_response.status_code == 200, history_response.status_code
+    assert logs_response.status_code == 200, logs_response.status_code
 
     status_json = status_response.get_json()
     assert status_json["status"] == "ok", status_json
@@ -79,6 +95,19 @@ def main() -> None:
     assert tests_json["status"] == "ok", tests_json
     assert isinstance(tests_json["tests"], list), tests_json
     assert {test["name"] for test in tests_json["tests"]} >= {"dock", "router"}, tests_json
+
+    history_json = history_response.get_json()
+    assert history_json["status"] == "ok", history_json
+    assert isinstance(history_json["history"], list), history_json
+
+    logs_json = logs_response.get_json()
+    assert logs_json["status"] == "ok", logs_json
+    assert {log["name"] for log in logs_json["logs"]} == {
+        "main",
+        "bot_process",
+        "web_process",
+        "dock_process",
+    }, logs_json
 
     print("panam_dock_smoke_test ok")
 

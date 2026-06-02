@@ -144,6 +144,7 @@ Dock:
 - default port je `5051`
 - neni urceny pro verejne vystaveni
 - umi spravovat jen allowlistovane sluzby `bot` a `web`
+- ma samostatne stranky `Dashboard`, `Smoke Tests` a `Logs`
 - neumi spoustet libovolne prikazy
 - neimportuje Discord
 
@@ -170,7 +171,9 @@ Procesy spravuje `panam_process_manager.py`:
 
 UI rozlisuje `RUNNING`, `STOPPED` a `ERROR`. Pokud proces existuje, ale web health check selze, Dock to ukaze jako error/detail misto falesneho running stavu.
 
-Dock ma take sekci `Smoke Tests` pro lokalni vyvoj a rychlou kontrolu po pullu nebo commitu. Testy jsou pevne allowlistovane v `panam_test_runner.py`, nejde spustit libovolny prikaz. Vysledky ukazuji `PASS`/`FAIL`, duration, return code, stdout a stderr.
+Dashboard `/` spravuje sluzby a jejich stav.
+
+Stranka `/tests` spousti smoke testy pro lokalni vyvoj a rychlou kontrolu po pullu nebo commitu. Testy jsou pevne allowlistovane v `panam_test_runner.py`, nejde spustit libovolny prikaz. Vysledky ukazuji `PASS`/`FAIL`, duration, return code, stdout a stderr. Dock uklada poslednich 50 zaznamu test historie do `runtime/dock/test_history.json`.
 
 Allowlist V1:
 
@@ -181,6 +184,13 @@ Allowlist V1:
 - `docx` -> `scripts/docx_smoke_test.py`
 - `docx_transform` -> `scripts/docx_transform_smoke_test.py`
 - `spreadsheet_transform` -> `scripts/spreadsheet_transform_smoke_test.py`
+
+Stranka `/logs` cte pouze allowlistovane logy pres `panam_log_reader.py`. Log viewer nikdy nebere cestu z requestu, pouze nazvy z allowlistu:
+
+- `main` -> `logs/panam.log`
+- `bot_process` -> `logs/panam_bot_process.log`
+- `web_process` -> `logs/panam_web_process.log`
+- `dock_process` -> `logs/panam_dock_process.log`
 
 ## Discord Adapter
 
@@ -297,7 +307,10 @@ Dock:
 - `panam_dock_app.py` - Flask Dock app.
 - `panam_process_manager.py` - allowlist subprocess manager.
 - `panam_test_runner.py` - allowlist smoke test runner.
+- `panam_log_reader.py` - allowlist log viewer helper.
 - `web_admin/templates/dock.html` - Dock UI.
+- `web_admin/templates/tests.html` - Smoke Tests UI.
+- `web_admin/templates/logs.html` - Logs UI.
 - `web_admin/static/dock.css` - Dock styl.
 
 Soubory:
@@ -320,6 +333,7 @@ Zakladni smoke testy:
 python -m py_compile bot.py panam_core.py panam_web_app.py panam_dock_app.py panam_process_manager.py
 python panam_web_smoke_test.py
 python panam_web_flask_smoke_test.py
+python panam_log_reader_smoke_test.py
 python panam_test_runner_smoke_test.py
 python panam_dock_smoke_test.py
 python scripts/router_smoke_test.py

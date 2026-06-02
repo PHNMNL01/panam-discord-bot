@@ -14,7 +14,11 @@
         <h1>Panam Dock</h1>
         <p class="notice">Dock je lokalni admin panel. Nespoustej ho verejne.</p>
       </div>
-      <button class="secondary-button" type="button" data-action="refresh">Refresh</button>
+      <nav class="dock-nav" aria-label="Dock navigation">
+        <a class="{{ 'active' if active_page == 'dashboard' else '' }}" href="/">Dashboard</a>
+        <a class="{{ 'active' if active_page == 'tests' else '' }}" href="/tests">Smoke Tests</a>
+        <a class="{{ 'active' if active_page == 'logs' else '' }}" href="/logs">Logs</a>
+      </nav>
     </header>
 
     {% if token_warning %}
@@ -27,6 +31,7 @@
         <input id="dock-token" type="password" autocomplete="off" placeholder="PANAM_DOCK_ADMIN_TOKEN">
         <button class="secondary-button" type="button" data-action="save-token">Save</button>
         <button class="secondary-button" type="button" data-action="clear-token">Clear</button>
+        <button class="secondary-button" type="button" data-action="refresh">Refresh</button>
       </div>
       <p class="token-hint">
         {% if token_required %}
@@ -76,22 +81,21 @@
             <div class="actions">
               <button type="button" data-action="start" data-service="{{ service.name }}">Start</button>
               <button class="danger-button" type="button" data-action="stop" data-service="{{ service.name }}">Stop</button>
+              {% if service.name == "web" %}
+                <button
+                  class="btn-open"
+                  type="button"
+                  data-action="open-web"
+                  title="{{ '' if service.running else 'Panam Web nebezi' }}"
+                  {{ '' if service.running else 'disabled' }}
+                >
+                  Open
+                </button>
+              {% endif %}
             </div>
           </article>
         {% endfor %}
       </div>
-    </section>
-
-    <section class="dock-section">
-      <div class="section-heading">
-        <div>
-          <p class="eyebrow">Smoke Tests</p>
-          <h2>Safe Test Runner</h2>
-        </div>
-        <button type="button" data-action="run-all-tests">Run all safe tests</button>
-      </div>
-      <div class="test-grid" id="test-grid"></div>
-      <div class="test-results" id="test-results"></div>
     </section>
 
     <p class="status-line" id="status-line">Ready.</p>
@@ -100,8 +104,6 @@
   <script>
     const tokenInput = document.querySelector("#dock-token");
     const serviceGrid = document.querySelector("#service-grid");
-    const testGrid = document.querySelector("#test-grid");
-    const testResults = document.querySelector("#test-results");
     const statusLine = document.querySelector("#status-line");
     const storedToken = localStorage.getItem("panamDockToken");
 
@@ -136,6 +138,9 @@
         const lastError = service.last_error
           ? `<div><dt>Chyba</dt><dd>${escapeHtml(service.last_error)}</dd></div>`
           : "";
+        const openButton = service.name === "web"
+          ? `<button class="btn-open" type="button" data-action="open-web" ${running ? "" : "disabled title=\"Panam Web nebezi\""}>Open</button>`
+          : "";
 
         return `
           <article class="service-card" data-service="${escapeHtml(service.name)}">
@@ -144,104 +149,19 @@
               <span class="status-pill ${escapeHtml(state)}">${escapeHtml(state)}</span>
             </div>
             <dl>
-              <div>
-                <dt>Script</dt>
-                <dd>${escapeHtml(service.script)}</dd>
-              </div>
-              <div>
-                <dt>PID</dt>
-                <dd>${escapeHtml(pid)}</dd>
-              </div>
-              <div>
-                <dt>Detail</dt>
-                <dd>${escapeHtml(detail)}</dd>
-              </div>
+              <div><dt>Script</dt><dd>${escapeHtml(service.script)}</dd></div>
+              <div><dt>PID</dt><dd>${escapeHtml(pid)}</dd></div>
+              <div><dt>Detail</dt><dd>${escapeHtml(detail)}</dd></div>
               ${lastError}
             </dl>
             <div class="actions">
               <button type="button" data-action="start" data-service="${escapeHtml(service.name)}">Start</button>
               <button class="danger-button" type="button" data-action="stop" data-service="${escapeHtml(service.name)}">Stop</button>
+              ${openButton}
             </div>
           </article>
         `;
       }).join("");
-    }
-
-    function renderTests(tests) {
-      testGrid.innerHTML = tests.map((test) => {
-        const existsClass = test.exists ? "exists" : "missing";
-        const existsText = test.exists ? "exists" : "missing";
-        const disabled = test.exists ? "" : "disabled";
-
-        return `
-          <article class="test-card" data-test="${escapeHtml(test.name)}">
-            <div class="service-title-row">
-              <h3>${escapeHtml(test.label)}</h3>
-              <span class="test-state ${existsClass}">${existsText}</span>
-            </div>
-            <dl>
-              <div>
-                <dt>Name</dt>
-                <dd>${escapeHtml(test.name)}</dd>
-              </div>
-              <div>
-                <dt>Path</dt>
-                <dd>${escapeHtml(test.path)}</dd>
-              </div>
-            </dl>
-            <div class="actions">
-              <button type="button" data-action="run-test" data-test="${escapeHtml(test.name)}" ${disabled}>Run</button>
-            </div>
-          </article>
-        `;
-      }).join("");
-    }
-
-    function renderTestResult(result) {
-      const statusClass = result.passed ? "pass" : "fail";
-      const statusText = result.passed ? "PASS" : "FAIL";
-      const flags = [
-        result.timed_out ? "timeout" : "",
-        result.missing ? "missing" : "",
-        result.error ? `error: ${result.error}` : "",
-      ].filter(Boolean).join(" | ");
-
-      return `
-        <article class="result-card ${statusClass}">
-          <div class="result-header">
-            <div>
-              <h3>${escapeHtml(result.label)}</h3>
-              <p>${escapeHtml(result.path)}</p>
-            </div>
-            <span class="result-pill ${statusClass}">${statusText}</span>
-          </div>
-          <dl>
-            <div>
-              <dt>Return</dt>
-              <dd>${result.returncode === null ? "-" : escapeHtml(result.returncode)}</dd>
-            </div>
-            <div>
-              <dt>Duration</dt>
-              <dd>${Number(result.duration_seconds || 0).toFixed(2)}s</dd>
-            </div>
-          </dl>
-          ${flags ? `<p class="result-flags">${escapeHtml(flags)}</p>` : ""}
-          <div class="output-grid">
-            <div>
-              <h4>stdout</h4>
-              <pre>${escapeHtml(result.stdout || "")}</pre>
-            </div>
-            <div>
-              <h4>stderr</h4>
-              <pre>${escapeHtml(result.stderr || "")}</pre>
-            </div>
-          </div>
-        </article>
-      `;
-    }
-
-    function renderTestResults(results) {
-      testResults.innerHTML = results.map(renderTestResult).join("");
     }
 
     async function refreshStatus() {
@@ -254,17 +174,6 @@
 
       renderServices(data.services || []);
       setStatus("Status refreshed.");
-    }
-
-    async function refreshTests() {
-      const response = await fetch("/api/tests");
-      const data = await response.json();
-
-      if (!response.ok) {
-        throw new Error(data.error || "Tests request failed.");
-      }
-
-      renderTests(data.tests || []);
     }
 
     async function serviceAction(serviceName, action) {
@@ -284,38 +193,6 @@
       setStatus(`${serviceName} ${action}: ${detail}`);
     }
 
-    async function runTest(testName) {
-      setStatus(`Running ${testName}...`);
-      const response = await fetch(`/api/tests/${testName}/run`, {
-        method: "POST",
-        headers: getTokenHeaders(),
-      });
-      const data = await response.json();
-
-      if (!response.ok) {
-        throw new Error(data.error || "Test run failed.");
-      }
-
-      renderTestResults([data.result]);
-      setStatus(`${testName}: ${data.result.passed ? "PASS" : "FAIL"}`);
-    }
-
-    async function runAllTests() {
-      setStatus("Running all safe tests...");
-      const response = await fetch("/api/tests/run-all", {
-        method: "POST",
-        headers: getTokenHeaders(),
-      });
-      const data = await response.json();
-
-      if (!response.ok) {
-        throw new Error(data.error || "Run all tests failed.");
-      }
-
-      renderTestResults(data.results || []);
-      setStatus(`All tests: ${data.passed ? "PASS" : "FAIL"}`);
-    }
-
     document.addEventListener("click", async (event) => {
       const button = event.target.closest("button");
       if (!button) {
@@ -326,7 +203,7 @@
 
       try {
         if (action === "refresh") {
-          await Promise.all([refreshStatus(), refreshTests()]);
+          await refreshStatus();
         } else if (action === "save-token") {
           localStorage.setItem("panamDockToken", tokenInput.value.trim());
           setStatus("Token saved locally.");
@@ -336,17 +213,13 @@
           setStatus("Token cleared.");
         } else if (action === "start" || action === "stop") {
           await serviceAction(button.dataset.service, action);
-        } else if (action === "run-test") {
-          await runTest(button.dataset.test);
-        } else if (action === "run-all-tests") {
-          await runAllTests();
+        } else if (action === "open-web") {
+          window.open("http://127.0.0.1:5050", "_blank", "noopener");
         }
       } catch (error) {
         setStatus(error.message);
       }
     });
-
-    refreshTests().catch((error) => setStatus(error.message));
   </script>
 </body>
 </html>
