@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Panam Dock - Smoke Tests</title>
+  <title>Panam Deck - Smoke Tests</title>
   <link rel="stylesheet" href="{{ url_for('static', filename='dock.css') }}">
 </head>
 <body>
@@ -14,7 +14,7 @@
         <h1>Smoke Tests</h1>
         <p class="notice">Allowlistovane testy pro lokalni kontrolu Panam.</p>
       </div>
-      <nav class="dock-nav" aria-label="Dock navigation">
+      <nav class="dock-nav" aria-label="Deck navigation">
         <a class="{{ 'active' if active_page == 'dashboard' else '' }}" href="/">Dashboard</a>
         <a class="{{ 'active' if active_page == 'tests' else '' }}" href="/tests">Smoke Tests</a>
         <a class="{{ 'active' if active_page == 'logs' else '' }}" href="/logs">Logs</a>

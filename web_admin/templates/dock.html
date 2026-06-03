@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Panam Dock</title>
+  <title>Panam Deck</title>
   <link rel="stylesheet" href="{{ url_for('static', filename='dock.css') }}">
 </head>
 <body>
@@ -11,10 +11,10 @@
     <header class="dock-header">
       <div>
         <p class="eyebrow">Local Admin</p>
-        <h1>Panam Dock</h1>
-        <p class="notice">Dock je lokalni admin panel. Nespoustej ho verejne.</p>
+        <h1>Panam CyberDeck</h1>
+        <p class="notice">Panam Deck je lokalni control panel. Nespoustej ho verejne.</p>
       </div>
-      <nav class="dock-nav" aria-label="Dock navigation">
+      <nav class="dock-nav" aria-label="Deck navigation">
         <a class="{{ 'active' if active_page == 'dashboard' else '' }}" href="/">Dashboard</a>
         <a class="{{ 'active' if active_page == 'tests' else '' }}" href="/tests">Smoke Tests</a>
         <a class="{{ 'active' if active_page == 'logs' else '' }}" href="/logs">Logs</a>
