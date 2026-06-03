@@ -1,6 +1,6 @@
 # Panam
 
-Panam je osobni AI asistentka v Pythonu. Projekt uz neni jen Discord bot: jadro Panam je sdilena aplikační vrstva, nad kterou bezi Discord adapter, lokalni Web appka a lokalni Dock pro spravu procesu.
+Panam je osobni AI asistentka v Pythonu. Projekt uz neni jen Discord bot: jadro Panam je sdilena aplikační vrstva, nad kterou bezi Discord adapter, lokalni Web appka a lokalni Deck pro spravu procesu.
 
 Panam umi odpovidat pres OpenAI API, vest kratkou konverzacni pamet, pracovat s poznamkami a todo listem, shrnovat texty, analyzovat prilohy a bezpecne vytvaret nove vystupni soubory z dokumentu.
 
@@ -13,7 +13,7 @@ Projekt je rozdeleny na nekolik vrstev:
 - `panam_command_router.py` - textovy parser prikazu pro adaptery.
 - Discord adapter - `bot.py` a `panam_discord_*`.
 - Web adapter - `panam_web_app.py`, `panam_web_adapter.py`, `web/`.
-- Dock - `panam_dock_app.py`, `panam_process_manager.py`, `web_admin/`.
+- Deck - `panam_dock_app.py`, `panam_process_manager.py`, `web_admin/`.
 - File pipeline - cteni, analyza a tvorba novych souboru.
 
 `bot.py` je jen tenky entrypoint:
@@ -71,8 +71,8 @@ Promenne:
 - `ALLOWED_CHANNEL_IDS` - volitelny seznam channel ID oddelenych carkou. Prazdna hodnota znamena, ze bot muze odpovidat vsude.
 - `OPENAI_MODEL` - model pro OpenAI volani, fallback je `gpt-5.4-mini`.
 - `OPENAI_PROMPT_ID` a `OPENAI_PROMPT_VERSION` - volitelny OpenAI Prompt Management prompt.
-- `PANAM_DOCK_ADMIN_TOKEN` - volitelny token pro Dock POST akce.
-- `PANAM_DOCK_PORT` - port Docku, default `5051`.
+- `PANAM_DOCK_ADMIN_TOKEN` - volitelny token pro Deck POST akce.
+- `PANAM_DOCK_PORT` - port Decku, default `5051`.
 - `PANAM_WEB_HOST` - host Panam Webu, default `127.0.0.1`.
 - `PANAM_WEB_PORT` - port Panam Webu, default `5050`.
 - `PANAM_WEB_DEBUG` - Flask debug pro rucni spusteni webu, default `1`.
@@ -106,13 +106,13 @@ python panam_web_app.py
 
 Web bezi defaultne na `http://127.0.0.1:5050`.
 
-Panam Dock:
+Panam Deck:
 
 ```powershell
 python panam_dock_app.py
 ```
 
-Dock bezi defaultne na `http://127.0.0.1:5051`.
+Deck bezi defaultne na `http://127.0.0.1:5051`.
 
 ## Panam Web
 
@@ -132,13 +132,13 @@ Routy:
 
 Web adapter pouziva sdileny command router a `panam_core.py`. Web zatim pracuje s internim web user/channel ID a nepouziva Discord.
 
-Pri rucnim spusteni muze byt Flask debug a reloader zapnuty. Kdyz Web spousti Dock, nastavuje se `PANAM_STARTED_BY_DOCK=1`, `PANAM_WEB_DEBUG=0` a `PANAM_WEB_USE_RELOADER=0`, aby se na Windows nededily Werkzeug reloader socket/env hodnoty.
+Pri rucnim spusteni muze byt Flask debug a reloader zapnuty. Kdyz Web spousti Deck, nastavuje se `PANAM_STARTED_BY_DOCK=1`, `PANAM_WEB_DEBUG=0` a `PANAM_WEB_USE_RELOADER=0`, aby se na Windows nededily Werkzeug reloader socket/env hodnoty.
 
-## Panam Dock
+## Panam Deck
 
-`panam_dock_app.py` je lokalni admin panel pro spravu procesu Panam. Je oddeleny od Panam Webu, aby z nej slo zapnout a vypnout i samotny Web.
+`panam_dock_app.py` je lokalni control panel pro spravu procesu Panam. Je oddeleny od Panam Webu, aby z nej slo zapnout a vypnout i samotny Web.
 
-Dock:
+Deck:
 
 - bezi pouze na `127.0.0.1`
 - default port je `5051`
@@ -169,11 +169,11 @@ Procesy spravuje `panam_process_manager.py`:
 - pri startu child procesu odstranuje Werkzeug/Flask reloader env promenne `WERKZEUG_RUN_MAIN`, `WERKZEUG_SERVER_FD`, `FLASK_RUN_FROM_CLI`, `WERKZEUG_DEBUG_PIN`
 - na Windows pri stopu pouziva `taskkill /PID <pid> /T /F`
 
-UI rozlisuje `RUNNING`, `STOPPED` a `ERROR`. Pokud proces existuje, ale web health check selze, Dock to ukaze jako error/detail misto falesneho running stavu.
+UI rozlisuje `RUNNING`, `STOPPED` a `ERROR`. Pokud proces existuje, ale web health check selze, Deck to ukaze jako error/detail misto falesneho running stavu.
 
 Dashboard `/` spravuje sluzby a jejich stav.
 
-Stranka `/tests` spousti smoke testy pro lokalni vyvoj a rychlou kontrolu po pullu nebo commitu. Testy jsou pevne allowlistovane v `panam_test_runner.py`, nejde spustit libovolny prikaz. Vysledky ukazuji `PASS`/`FAIL`, duration, return code, stdout a stderr. Dock uklada poslednich 50 zaznamu test historie do `runtime/dock/test_history.json`.
+Stranka `/tests` spousti smoke testy pro lokalni vyvoj a rychlou kontrolu po pullu nebo commitu. Testy jsou pevne allowlistovane v `panam_test_runner.py`, nejde spustit libovolny prikaz. Vysledky ukazuji `PASS`/`FAIL`, duration, return code, stdout a stderr. Deck uklada poslednich 50 zaznamu test historie do `runtime/dock/test_history.json`.
 
 Allowlist V1:
 
@@ -302,16 +302,16 @@ Web:
 - `web/templates/index.html` - Web UI.
 - `web/static/` - Web CSS a assety.
 
-Dock:
+Deck:
 
-- `panam_dock_app.py` - Flask Dock app.
+- `panam_dock_app.py` - Flask Deck app.
 - `panam_process_manager.py` - allowlist subprocess manager.
 - `panam_test_runner.py` - allowlist smoke test runner.
 - `panam_log_reader.py` - allowlist log viewer helper.
-- `web_admin/templates/dock.html` - Dock UI.
+- `web_admin/templates/dock.html` - Deck UI.
 - `web_admin/templates/tests.html` - Smoke Tests UI.
 - `web_admin/templates/logs.html` - Logs UI.
-- `web_admin/static/dock.css` - Dock styl.
+- `web_admin/static/dock.css` - Deck styl.
 
 Soubory:
 
@@ -342,7 +342,7 @@ python scripts/discord_basic_commands_smoke_test.py
 python scripts/discord_message_router_smoke_test.py
 ```
 
-Dock smoke test nestartuje realny `bot.py` ani `panam_web_app.py`. Kontroluje importy, `/health`, `/api/status`, `/api/tests`, stavova pole sluzeb a sanitizaci child env pro Panam Web.
+Deck smoke test nestartuje realny `bot.py` ani `panam_web_app.py`. Kontroluje importy, `/health`, `/api/status`, `/api/tests`, stavova pole sluzeb a sanitizaci child env pro Panam Web.
 
 `panam_test_runner_smoke_test.py` kontroluje allowlist, sanitizaci test env a muze spustit kratky router smoke test, pokud existuje.
 
@@ -359,8 +359,8 @@ Docx/XLSX testy v tomto workspace typicky pouzivaji `.venv`, protoze systemovy P
 
 - `.env` nikdy necommituj.
 - Tokeny a citlive hodnoty se neloguji.
-- Dock nesmi byt vystaven verejne.
-- Dock umi spoustet jen pevne povolene sluzby `bot` a `web`.
+- Deck nesmi byt vystaven verejne.
+- Deck umi spoustet jen pevne povolene sluzby `bot` a `web`.
 - Puvodni prilohy se nikdy neupravuji.
 - Vystupni soubory vznikaji jako nove soubory.
 - Obsah priloh, vystupu a cele dotazy se nema logovat.
