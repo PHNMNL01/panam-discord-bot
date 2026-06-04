@@ -44,14 +44,75 @@
         <button type="button">Ukaž poznámky</button>
       </div>
     </section>
+
+    <section class="file-panel" aria-label="Panam souborova dilna">
+      <div class="file-panel-header">
+        <div>
+          <p class="eyebrow">Souborova dilna</p>
+          <h2>Souborova dilna</h2>
+        </div>
+      </div>
+
+      <form id="file-form" class="file-form" enctype="multipart/form-data">
+        <div class="field">
+          <label for="file-input">Soubor</label>
+          <input
+            id="file-input"
+            name="file"
+            type="file"
+            accept=".txt,.md,.csv,.json,.pdf,.docx,.xlsx"
+            required
+          >
+        </div>
+
+        <div class="field">
+          <label for="file-instruction">Instrukce</label>
+          <textarea
+            id="file-instruction"
+            name="instruction"
+            rows="3"
+            placeholder="Napr. vyber sloupce Oddeleni"
+          ></textarea>
+        </div>
+
+        <div class="file-controls">
+          <div class="field">
+            <label for="output-format">Vystup</label>
+            <select id="output-format" name="output_format">
+              <option value="auto">auto</option>
+              <option value="chat">chat</option>
+              <option value="md">md</option>
+              <option value="txt">txt</option>
+              <option value="docx">docx</option>
+              <option value="xlsx">xlsx</option>
+              <option value="csv">csv</option>
+              <option value="json">json</option>
+            </select>
+          </div>
+          <button id="file-submit" type="submit">Zpracovat</button>
+        </div>
+      </form>
+
+      <div class="file-actions" aria-label="Rychle souborove akce">
+        <button type="button">Vyber sloupce Oddeleni</button>
+        <button type="button">Odstran prazdne radky</button>
+        <button type="button">Udelej report</button>
+        <button type="button">Vytahni data do JSONu</button>
+      </div>
+    </section>
   </main>
 
   <script>
     const chatForm = document.querySelector("#chat-form");
+    const fileForm = document.querySelector("#file-form");
     const chatLog = document.querySelector("#chat-log");
     const messageInput = document.querySelector("#message");
+    const fileInput = document.querySelector("#file-input");
+    const fileInstruction = document.querySelector("#file-instruction");
+    const fileSubmit = document.querySelector("#file-submit");
     const clearButton = document.querySelector("#clear-chat");
     const exampleButtons = document.querySelectorAll(".examples button");
+    const fileActionButtons = document.querySelectorAll(".file-actions button");
 
     const welcomeText = "Jsem online ve web režimu. Zkus třeba „help“ nebo „ukaž todo“. ";
 
@@ -93,6 +154,15 @@
       body.textContent = text;
 
       message.append(name, body);
+
+      if (options.downloadUrl) {
+        const link = document.createElement("a");
+        link.className = "download-link";
+        link.href = options.downloadUrl;
+        link.textContent = options.downloadName || "Stahnout vystup";
+        link.download = options.downloadName || "";
+        message.append(link);
+      }
 
       if (role === "panam") {
         row.append(createAvatar(), message);
@@ -137,9 +207,57 @@
       }
     }
 
+    async function sendFileRequest() {
+      if (!fileInput.files.length) {
+        appendMessage("panam", "Vyber prosim soubor.");
+        return;
+      }
+
+      const formData = new FormData(fileForm);
+      const filename = fileInput.files[0].name;
+      appendMessage("user", `Soubor: ${filename}\n${fileInstruction.value.trim() || "auto"}`);
+
+      fileSubmit.disabled = true;
+      const loadingMessage = appendMessage("panam", "Panam zpracovava soubor...", { loading: true });
+
+      try {
+        const response = await fetch("/api/files/process", {
+          method: "POST",
+          body: formData,
+        });
+        const data = await response.json();
+        loadingMessage.remove();
+
+        if (!response.ok || data.error) {
+          appendMessage("panam", data.error || "Soubor se nepodarilo zpracovat.");
+          return;
+        }
+
+        if (data.kind === "file") {
+          appendMessage("panam", data.message || "Soubor je hotovy.", {
+            downloadUrl: data.download_url,
+            downloadName: data.output_filename,
+          });
+          return;
+        }
+
+        appendMessage("panam", data.answer || data.message || "Panam nevratila odpoved.");
+      } catch (error) {
+        loadingMessage.remove();
+        appendMessage("panam", "Spojeni se souborovou dilnou selhalo.");
+      } finally {
+        fileSubmit.disabled = false;
+      }
+    }
+
     chatForm.addEventListener("submit", (event) => {
       event.preventDefault();
       sendMessage();
+    });
+
+    fileForm.addEventListener("submit", (event) => {
+      event.preventDefault();
+      sendFileRequest();
     });
 
     messageInput.addEventListener("keydown", (event) => {
@@ -166,6 +284,13 @@
       button.addEventListener("click", () => {
         messageInput.value = button.textContent;
         messageInput.focus();
+      });
+    });
+
+    fileActionButtons.forEach((button) => {
+      button.addEventListener("click", () => {
+        fileInstruction.value = button.textContent;
+        fileInstruction.focus();
       });
     });
 

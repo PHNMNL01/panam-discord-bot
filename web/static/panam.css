@@ -31,7 +31,7 @@ body {
   margin: 0 auto;
   padding: 40px 0;
   display: grid;
-  grid-template-rows: auto 1fr;
+  grid-template-rows: auto 1fr auto;
   gap: 24px;
 }
 
@@ -75,6 +75,43 @@ h1 {
   display: grid;
   grid-template-rows: 1fr auto auto;
   overflow: hidden;
+}
+
+.file-panel {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: rgba(16, 23, 36, 0.78);
+  box-shadow: 0 18px 64px rgba(0, 0, 0, 0.28);
+  padding: 18px;
+}
+
+.file-panel-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+h2 {
+  margin: 0 0 14px;
+  font-size: 1.25rem;
+  line-height: 1.2;
+}
+
+.file-form {
+  display: grid;
+  gap: 14px;
+}
+
+.field {
+  display: grid;
+  gap: 7px;
+}
+
+.field label {
+  color: var(--cyan);
+  font-size: 0.82rem;
+  font-weight: 700;
 }
 
 .chat-log {
@@ -193,7 +230,25 @@ textarea {
   font: inherit;
 }
 
-textarea:focus {
+input[type="file"],
+select {
+  width: 100%;
+  min-height: 44px;
+  border: 1px solid rgba(147, 164, 184, 0.3);
+  border-radius: 8px;
+  background: #090d16;
+  color: var(--text);
+  padding: 10px 12px;
+  font: inherit;
+}
+
+select {
+  appearance: none;
+}
+
+textarea:focus,
+input[type="file"]:focus,
+select:focus {
   outline: 2px solid rgba(33, 230, 255, 0.45);
   border-color: var(--cyan);
 }
@@ -206,7 +261,8 @@ button {
 }
 
 .composer button,
-.clear-button {
+.clear-button,
+.file-controls button {
   min-height: 44px;
   background: linear-gradient(135deg, var(--cyan), var(--pink));
   color: #05070d;
@@ -216,6 +272,13 @@ button {
 
 .composer button {
   align-self: end;
+}
+
+.file-controls {
+  display: grid;
+  grid-template-columns: minmax(160px, 240px) auto;
+  align-items: end;
+  gap: 12px;
 }
 
 .clear-button {
@@ -244,15 +307,43 @@ button:disabled {
   font-size: 0.9rem;
 }
 
-.examples button {
+.examples button,
+.file-actions button {
   border: 1px solid rgba(33, 230, 255, 0.18);
   background: rgba(33, 230, 255, 0.08);
   color: var(--text);
   padding: 7px 10px;
 }
 
-.examples button:hover {
+.examples button:hover,
+.file-actions button:hover {
   border-color: rgba(33, 230, 255, 0.44);
+}
+
+.file-actions {
+  margin-top: 14px;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.download-link {
+  width: fit-content;
+  margin-top: 10px;
+  display: inline-flex;
+  align-items: center;
+  border: 1px solid rgba(255, 63, 180, 0.38);
+  border-radius: 8px;
+  background: rgba(255, 63, 180, 0.12);
+  color: var(--text);
+  padding: 8px 10px;
+  font-weight: 700;
+  text-decoration: none;
+}
+
+.download-link:hover {
+  border-color: rgba(255, 63, 180, 0.68);
+  filter: brightness(1.08);
 }
 
 .sr-only {
@@ -290,8 +381,13 @@ button:disabled {
     grid-template-columns: 1fr;
   }
 
+  .file-controls {
+    grid-template-columns: 1fr;
+  }
+
   .composer button,
-  .clear-button {
+  .clear-button,
+  .file-controls button {
     width: 100%;
   }
 }
