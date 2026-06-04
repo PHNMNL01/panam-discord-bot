@@ -1,3 +1,7 @@
+from __future__ import annotations
+
+from pathlib import Path
+
 import panam_core
 import panam_memory
 from panam_command_router import parse_panam_command
@@ -19,6 +23,29 @@ WEB_HELP_TEXT = """Panam web scaffold commands:
 - najdi poznamku <dotaz>
 - pridej todo <text>
 - ukaz todo"""
+
+
+async def handle_web_file_request(
+    model: str,
+    input_path: Path,
+    original_filename: str,
+    instruction: str,
+    mode: str = "chat_answer",
+    output_format: str | None = None,
+) -> PanamFileResult:
+    from panam_file_service import PanamFileRequest, process_panam_file_request
+
+    request = PanamFileRequest(
+        input_path=Path(input_path),
+        original_filename=original_filename,
+        instruction=instruction,
+        mode=mode,
+        output_format=output_format,
+        user_id=WEB_USER_ID,
+        channel_id=WEB_CHANNEL_ID,
+        source="web",
+    )
+    return await process_panam_file_request(model, request)
 
 
 def clear_web_chat_memory() -> str:
