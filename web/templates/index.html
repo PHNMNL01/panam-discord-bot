@@ -7,97 +7,125 @@
   <link rel="stylesheet" href="{{ url_for('static', filename='panam.css') }}">
 </head>
 <body>
-  <main class="shell">
-    <section class="hero">
-      <div>
-        <p class="eyebrow">Panam adapter preview</p>
-        <h1>Panam Web</h1>
-        <p class="intro">
-          Základní webový chat nad Panam core. Ve webu už nemusíš psát „Panam“ před každý příkaz.
-        </p>
-      </div>
-      <button id="clear-chat" class="clear-button" type="button">Vyčistit chat</button>
-    </section>
+  <main class="panam-web-shell">
+    <aside class="panam-web-rail" aria-label="Budouci navigace Panam">
+      <a class="rail-home-mark" href="{{ url_for('index') }}" aria-label="Zpet na hlavni stranku Panam">
+        <span class="panam-home-fallback" aria-hidden="true">P</span>
+        <img src="{{ url_for('static', filename='panam_avatar.png') }}" alt="" onerror="this.remove();">
+      </a>
+      <span class="rail-placeholder-dot" aria-hidden="true"></span>
+      <span class="rail-placeholder-dot" aria-hidden="true"></span>
+    </aside>
 
-    <section class="chat-panel" aria-label="Panam chat">
-      <div id="chat-log" class="chat-log" aria-live="polite"></div>
-
-      <form id="chat-form" class="composer">
-        <label for="message" class="sr-only">Zpráva pro Panam</label>
-        <textarea
-          id="message"
-          name="message"
-          rows="3"
-          placeholder="Napiš zprávu pro Panam..."
-          autocomplete="off"
-        ></textarea>
-        <button type="submit">Odeslat</button>
-      </form>
-
-      <div class="examples" aria-label="Příklady příkazů">
-        <span>Příklady:</span>
-        <button type="button">Jak se máš?</button>
-        <button type="button">Shrň mi tento text...</button>
-        <button type="button">Přidej todo dodělat web UI</button>
-        <button type="button">Ukaž todo</button>
-        <button type="button">Přidej poznámku Panam web v1 funguje</button>
-        <button type="button">Ukaž poznámky</button>
-      </div>
-    </section>
-
-    <section class="file-panel" aria-label="Panam souborova dilna">
-      <div class="file-panel-header">
-        <div>
-          <p class="eyebrow">Souborova dilna</p>
-          <h2>Souborova dilna</h2>
-        </div>
-      </div>
-
-      <form id="file-form" class="file-form" enctype="multipart/form-data">
-        <div class="field">
-          <label for="file-input">Soubor</label>
-          <input
-            id="file-input"
-            name="file"
-            type="file"
-            accept=".txt,.md,.csv,.json,.pdf,.docx,.xlsx"
-            required
-          >
-        </div>
-
-        <div class="field">
-          <label for="file-instruction">Instrukce</label>
-          <textarea
-            id="file-instruction"
-            name="instruction"
-            rows="3"
-            placeholder="Napr. vyber sloupce Oddeleni"
-          ></textarea>
-        </div>
-
-        <div class="file-controls">
-          <div class="field">
-            <label for="output-format">Vystup</label>
-            <select id="output-format" name="output_format">
-              <option value="auto">auto</option>
-              <option value="chat">chat</option>
-              <option value="md">md</option>
-              <option value="txt">txt</option>
-              <option value="docx">docx</option>
-              <option value="xlsx">xlsx</option>
-              <option value="csv">csv</option>
-              <option value="json">json</option>
-            </select>
+    <section class="panam-web-main">
+      <section class="hero">
+        <div class="page-title-brand">
+          <a class="panam-home-mark" href="{{ url_for('index') }}" aria-label="Zpet na hlavni stranku Panam">
+            <span class="panam-home-fallback" aria-hidden="true">P</span>
+            <img src="{{ url_for('static', filename='panam_avatar.png') }}" alt="" onerror="this.remove();">
+          </a>
+          <div>
+            <p class="eyebrow">Panam adapter preview</p>
+            <h1>Panam Web</h1>
+            <p class="intro">
+              Základní webový chat nad Panam core. Ve webu už nemusíš psát „Panam“ před každý příkaz.
+            </p>
           </div>
-          <button id="file-submit" type="submit">Zpracovat</button>
         </div>
-      </form>
+        <div class="hero-actions">
+          <div class="panam-status-badge" aria-label="Panam status">
+            <span class="panam-status-avatar" aria-hidden="true">P</span>
+            <span class="panam-status-text">
+              <span class="panam-status-name">Panam</span>
+              <span class="panam-status-detail">web adapter online</span>
+            </span>
+          </div>
+          <button id="clear-chat" class="clear-button" type="button">Vyčistit chat</button>
+        </div>
+      </section>
 
-      <div class="file-actions" aria-label="Rychle souborove akce">
-        <button type="button">Vyber sloupce Oddeleni</button>
-        <button type="button">Odstran prazdne radky</button>
-        <button type="button">Udelej report</button>
-        <button type="button">Vytahni data do JSONu</button>
+      <div class="panam-web-workspace">
+        <section class="chat-panel panam-chat-panel" aria-label="Panam chat">
+          <div id="chat-log" class="chat-log" aria-live="polite"></div>
+
+          <form id="chat-form" class="composer">
+            <label for="message" class="sr-only">Zpráva pro Panam</label>
+            <textarea
+              id="message"
+              name="message"
+              rows="3"
+              placeholder="Napiš zprávu pro Panam..."
+              autocomplete="off"
+            ></textarea>
+            <button type="submit">Odeslat</button>
+          </form>
+
+          <div class="examples" aria-label="Příklady příkazů">
+            <span>Příklady:</span>
+            <button type="button">Jak se máš?</button>
+            <button type="button">Shrň mi tento text...</button>
+            <button type="button">Přidej todo dodělat web UI</button>
+            <button type="button">Ukaž todo</button>
+            <button type="button">Přidej poznámku Panam web v1 funguje</button>
+            <button type="button">Ukaž poznámky</button>
+          </div>
+        </section>
+
+        <section class="file-panel panam-file-panel" aria-label="Panam souborova dilna">
+          <div class="file-panel-header">
+            <div>
+              <p class="eyebrow">Souborova dilna</p>
+              <h2>Souborova dilna</h2>
+            </div>
+          </div>
+
+          <form id="file-form" class="file-form" enctype="multipart/form-data">
+            <div class="field">
+              <label for="file-input">Soubor</label>
+              <input
+                id="file-input"
+                name="file"
+                type="file"
+                accept=".txt,.md,.csv,.json,.pdf,.docx,.xlsx"
+                required
+              >
+            </div>
+
+            <div class="field">
+              <label for="file-instruction">Instrukce</label>
+              <textarea
+                id="file-instruction"
+                name="instruction"
+                rows="3"
+                placeholder="Napr. vyber sloupce Oddeleni"
+              ></textarea>
+            </div>
+
+            <div class="file-controls">
+              <div class="field">
+                <label for="output-format">Vystup</label>
+                <select id="output-format" name="output_format">
+                  <option value="auto">auto</option>
+                  <option value="chat">chat</option>
+                  <option value="md">md</option>
+                  <option value="txt">txt</option>
+                  <option value="docx">docx</option>
+                  <option value="xlsx">xlsx</option>
+                  <option value="csv">csv</option>
+                  <option value="json">json</option>
+                </select>
+              </div>
+              <button id="file-submit" type="submit">Zpracovat</button>
+            </div>
+          </form>
+
+          <div class="file-actions" aria-label="Rychle souborove akce">
+            <button type="button">Vyber sloupce Oddeleni</button>
+            <button type="button">Odstran prazdne radky</button>
+            <button type="button">Udelej report</button>
+            <button type="button">Vytahni data do JSONu</button>
+          </div>
+        </section>
       </div>
     </section>
   </main>

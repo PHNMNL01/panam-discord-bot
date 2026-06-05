@@ -6,7 +6,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from dotenv import load_dotenv
-from flask import Flask, jsonify, render_template, request
+from flask import Flask, jsonify, render_template, request, send_from_directory
 
 import panam_log_reader
 import panam_process_manager
@@ -61,6 +61,7 @@ def _token_warning() -> str | None:
 def _page_context(active_page: str) -> dict:
     return {
         "active_page": active_page,
+        "home_url": "/",
         "token_required": bool(ADMIN_TOKEN),
         "token_warning": _token_warning(),
     }
@@ -153,6 +154,11 @@ def logs_page():
 @app.get("/health")
 def health():
     return jsonify({"status": "ok", "service": "panam-dock"})
+
+
+@app.get("/panam-avatar.png")
+def panam_avatar():
+    return send_from_directory(BASE_DIR / "web" / "static", "panam_avatar.png")
 
 
 @app.get("/api/status")

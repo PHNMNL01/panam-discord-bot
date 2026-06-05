@@ -9,16 +9,31 @@
 <body>
   <main class="dock-shell">
     <header class="dock-header">
-      <div>
-        <p class="eyebrow">Local Admin</p>
-        <h1>Logs</h1>
-        <p class="notice">Bezpecny viewer pouze pro allowlistovane logy.</p>
+      <div class="page-title-brand">
+        <a class="panam-home-mark" href="{{ home_url }}" aria-label="Zpet na hlavni stranku Panam">
+          <span class="panam-home-fallback" aria-hidden="true">P</span>
+          <img src="{{ url_for('panam_avatar') }}" alt="" onerror="this.remove();">
+        </a>
+        <div>
+          <p class="eyebrow">Local Admin</p>
+          <h1>Logs</h1>
+          <p class="notice">Bezpecny viewer pouze pro allowlistovane logy.</p>
+        </div>
       </div>
-      <nav class="dock-nav" aria-label="Deck navigation">
-        <a class="{{ 'active' if active_page == 'dashboard' else '' }}" href="/">Dashboard</a>
-        <a class="{{ 'active' if active_page == 'tests' else '' }}" href="/tests">Smoke Tests</a>
-        <a class="{{ 'active' if active_page == 'logs' else '' }}" href="/logs">Logs</a>
-      </nav>
+      <div class="dock-header-actions">
+        <nav class="dock-nav" aria-label="Deck navigation">
+          <a class="{{ 'active' if active_page == 'dashboard' else '' }}" href="/">Dashboard</a>
+          <a class="{{ 'active' if active_page == 'tests' else '' }}" href="/tests">Smoke Tests</a>
+          <a class="{{ 'active' if active_page == 'logs' else '' }}" href="/logs">Logs</a>
+        </nav>
+        <div class="panam-status-badge" aria-label="Panam status">
+          <span class="panam-status-avatar" aria-hidden="true">P</span>
+          <span class="panam-status-text">
+            <span class="panam-status-name">Panam</span>
+            <span class="panam-status-detail">local deck online</span>
+          </span>
+        </div>
+      </div>
     </header>
 
     {% if token_warning %}
