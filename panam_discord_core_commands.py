@@ -37,6 +37,27 @@ def log_ask_voice_status(
     )
 
 
+def log_panam_talk_voice_status(
+    status: str,
+    interaction: discord.Interaction,
+    **details,
+) -> None:
+    user = getattr(interaction, "user", None)
+    detail_text = " ".join(
+        f"{key}={value}"
+        for key, value in details.items()
+        if value is not None
+    )
+    logger.info(
+        "panam_talk_voice status=%s guild_id=%s channel_id=%s user_id=%s%s",
+        status,
+        interaction.guild_id,
+        interaction.channel_id,
+        getattr(user, "id", None),
+        f" {detail_text}" if detail_text else "",
+    )
+
+
 async def handle_note_add_command(
     interaction: discord.Interaction,
     text: str,
@@ -273,3 +294,84 @@ async def handle_panam_talk_command(
         await interaction.followup.send(
             "Něco se pokazilo při talk režimu. Mrkni do konzole na chybu."
         )
+
+
+async def handle_panam_talk_voice_command(
+    model: str,
+    interaction: discord.Interaction,
+    message: str,
+) -> None:
+    message_length = len(message or "")
+    log_panam_talk_voice_status(
+        "started",
+        interaction,
+        message_length=message_length,
+    )
+    await interaction.response.defer(thinking=True)
+
+    try:
+        response = await panam_core.handle_talk(model, message)
+    except Exception:
+        mark_command_status(interaction, "error")
+        log_panam_talk_voice_status(
+            "error",
+            interaction,
+            message_length=message_length,
+        )
+        logger.exception("Chyba pri zpracovani /panam_talk_voice")
+        await interaction.followup.send(
+            "Neco se pokazilo pri talk rezimu. Mrkni do konzole na chybu."
+        )
+        return
+
+    answer = str(response.text or "").strip() or "Nemam odpoved."
+    voice_text = truncate_text_for_voice(answer)
+    answer_length = len(answer)
+    voice_text_length = len(voice_text)
+
+    try:
+        await send_followup_chunks(interaction, answer)
+    except Exception:
+        mark_command_status(interaction, "error")
+        log_panam_talk_voice_status(
+            "error",
+            interaction,
+            message_length=message_length,
+            answer_length=answer_length,
+            voice_text_length=voice_text_length,
+        )
+        logger.exception("Chyba pri odesilani /panam_talk_voice odpovedi")
+        return
+
+    log_panam_talk_voice_status(
+        "answered",
+        interaction,
+        message_length=message_length,
+        answer_length=answer_length,
+        voice_text_length=voice_text_length,
+    )
+
+    played = await play_tts_text(
+        interaction,
+        voice_text,
+        "panam_talk_voice",
+        original_text_length=voice_text_length,
+    )
+    if not played:
+        mark_command_status(interaction, "error")
+        log_panam_talk_voice_status(
+            "voice_error",
+            interaction,
+            message_length=message_length,
+            answer_length=answer_length,
+            voice_text_length=voice_text_length,
+        )
+        return
+
+    log_panam_talk_voice_status(
+        "success",
+        interaction,
+        message_length=message_length,
+        answer_length=answer_length,
+        voice_text_length=voice_text_length,
+    )
