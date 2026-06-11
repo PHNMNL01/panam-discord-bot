@@ -47,9 +47,11 @@ from panam_discord_memory_command import handle_memory_clear_command
 from panam_discord_message_router import handle_discord_message
 from panam_discord_read_file import handle_read_file_command
 from panam_discord_voice import (
+    handle_listen_test_command,
     handle_voice_join_command,
     handle_voice_leave_command,
     handle_voice_say_command,
+    log_listen_test_status,
 )
 
 
@@ -292,6 +294,31 @@ async def ask_voice(interaction: discord.Interaction, question: str) -> None:
         return
 
     await handle_ask_voice_command(OPENAI_MODEL, interaction, question)
+
+
+@bot.tree.command(
+    name="listen_test",
+    description="Technicky otestuj kratky prijem audia z aktualniho voice kanalu."
+)
+@app_commands.describe(seconds="Delka testu v sekundach, 1 az 10")
+async def listen_test(
+    interaction: discord.Interaction,
+    seconds: app_commands.Range[int, 1, 10] = 5,
+) -> None:
+    if ALLOWED_CHANNEL_IDS and str(interaction.channel_id) not in ALLOWED_CHANNEL_IDS:
+        log_listen_test_status(
+            "error",
+            interaction,
+            seconds=int(seconds),
+            received_audio=False,
+        )
+        await interaction.response.send_message(
+            "Tady nemám povolené odpovídat.",
+            ephemeral=True,
+        )
+        return
+
+    await handle_listen_test_command(interaction, int(seconds))
 
 
 @bot.tree.command(

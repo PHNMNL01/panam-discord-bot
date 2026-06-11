@@ -248,6 +248,7 @@ Zakladni slash commandy:
 - `/voice_leave`
 - `/ask_voice`
 - `/panam_talk_voice`
+- `/listen_test`
 
 ### Panam Voice Speak v1
 
@@ -284,8 +285,20 @@ Definition of Done:
 - `/voice_leave` bota odpoji
 - existujici textove prikazy porad funguji
 - `/voice_join`, `/voice_say`, `/ask_voice` a `/voice_leave` porad funguji
-- zadne poslouchani nebylo pridane
+- zadny trvaly poslech, STT ani wake phrase nebyly pridane
 - v logu nejsou tokeny, raw TTS texty ani citlivy obsah
+
+Manual listen_test smoke test:
+
+```text
+1. Pripoj se do voice kanalu.
+2. Spust `/listen_test 5`.
+3. Behem peti sekund neco rekni.
+4. Over, ze command skonci uspesne a ukaze, jestli prijal audio packety.
+```
+
+`/listen_test` je pouze kratky explicitni technicky test prijmu audia.
+Nepridava STT, wake phrase, trvaly poslech, `/listen` ani voice watch.
 
 Natural zpravy funguji, kdyz je Panam oslovena, napr.:
 
