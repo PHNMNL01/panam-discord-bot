@@ -188,11 +188,9 @@ async def handle_ask_voice_command(
     interaction: discord.Interaction,
     question: str,
 ) -> None:
-    question_length = len(question or "")
     log_ask_voice_status(
         "started",
         interaction,
-        question_length=question_length,
     )
     await interaction.response.defer(thinking=True)
 
@@ -206,7 +204,6 @@ async def handle_ask_voice_command(
         log_ask_voice_status(
             "error",
             interaction,
-            question_length=question_length,
         )
         logger.exception("Chyba pri zpracovani /ask_voice")
         await interaction.followup.send(
@@ -216,9 +213,7 @@ async def handle_ask_voice_command(
 
     answer = str(response.text or "").strip() or "Nemam odpoved."
     voice_text = truncate_text_for_voice(answer)
-    answer_length = len(answer)
     voice_text_length = len(voice_text)
-    voice_truncated = voice_text_length < answer_length
 
     try:
         await send_followup_chunks(interaction, answer)
@@ -227,10 +222,6 @@ async def handle_ask_voice_command(
         log_ask_voice_status(
             "error",
             interaction,
-            question_length=question_length,
-            answer_length=answer_length,
-            voice_text_length=voice_text_length,
-            voice_truncated=voice_truncated,
         )
         logger.exception("Chyba pri odesilani /ask_voice odpovedi")
         return
@@ -242,37 +233,25 @@ async def handle_ask_voice_command(
     log_ask_voice_status(
         "answered",
         interaction,
-        question_length=question_length,
-        answer_length=answer_length,
-        voice_text_length=voice_text_length,
-        voice_truncated=voice_truncated,
     )
 
     played = await play_tts_text(
         interaction,
         voice_text,
         "ask_voice",
-        original_text_length=answer_length,
+        original_text_length=voice_text_length,
     )
     if not played:
         mark_command_status(interaction, "error")
         log_ask_voice_status(
             "voice_error",
             interaction,
-            question_length=question_length,
-            answer_length=answer_length,
-            voice_text_length=voice_text_length,
-            voice_truncated=voice_truncated,
         )
         return
 
     log_ask_voice_status(
         "success",
         interaction,
-        question_length=question_length,
-        answer_length=answer_length,
-        voice_text_length=voice_text_length,
-        voice_truncated=voice_truncated,
     )
 
 

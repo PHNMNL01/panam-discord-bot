@@ -55,10 +55,18 @@ ALLOWED_CHANNEL_IDS=
 OPENAI_MODEL=gpt-5.4-mini
 OPENAI_PROMPT_ID=
 OPENAI_PROMPT_VERSION=
-PANAM_TTS_PROVIDER=edge
+PANAM_TTS_PROVIDER=elevenlabs
 PANAM_TTS_VOICE=cs-CZ-VlastaNeural
 PANAM_TTS_RATE=+0%
 PANAM_TTS_VOLUME=+0%
+ELEVENLABS_API_KEY=
+ELEVENLABS_VOICE_ID=
+ELEVENLABS_MODEL_ID=eleven_multilingual_v2
+ELEVENLABS_OUTPUT_FORMAT=mp3_44100_128
+ELEVENLABS_STABILITY=0.45
+ELEVENLABS_SIMILARITY_BOOST=0.75
+ELEVENLABS_STYLE=0.25
+ELEVENLABS_USE_SPEAKER_BOOST=true
 PANAM_DOCK_ADMIN_TOKEN=
 PANAM_DOCK_PORT=5051
 PANAM_WEB_HOST=127.0.0.1
@@ -75,10 +83,18 @@ Promenne:
 - `ALLOWED_CHANNEL_IDS` - volitelny seznam channel ID oddelenych carkou. Prazdna hodnota znamena, ze bot muze odpovidat vsude.
 - `OPENAI_MODEL` - model pro OpenAI volani, fallback je `gpt-5.4-mini`.
 - `OPENAI_PROMPT_ID` a `OPENAI_PROMPT_VERSION` - volitelny OpenAI Prompt Management prompt.
-- `PANAM_TTS_PROVIDER` - TTS backend pro Discord voice, default `edge`.
+- `PANAM_TTS_PROVIDER` - TTS backend pro Discord voice. Pro ElevenLabs nastav `elevenlabs`; kdyz neni nastavene, fallback je `edge`.
 - `PANAM_TTS_VOICE` - edge-tts hlas, default `cs-CZ-VlastaNeural`.
 - `PANAM_TTS_RATE` - rychlost edge-tts hlasu, default `+0%`.
 - `PANAM_TTS_VOLUME` - hlasitost edge-tts hlasu, default `+0%`.
+- `ELEVENLABS_API_KEY` - ElevenLabs API klic pro cloud TTS.
+- `ELEVENLABS_VOICE_ID` - ElevenLabs voice ID.
+- `ELEVENLABS_MODEL_ID` - ElevenLabs model, default `eleven_multilingual_v2`.
+- `ELEVENLABS_OUTPUT_FORMAT` - vystupni audio format, default `mp3_44100_128`.
+- `ELEVENLABS_STABILITY` - ElevenLabs voice setting, default `0.45`.
+- `ELEVENLABS_SIMILARITY_BOOST` - ElevenLabs voice setting, default `0.75`.
+- `ELEVENLABS_STYLE` - ElevenLabs voice setting, default `0.25`.
+- `ELEVENLABS_USE_SPEAKER_BOOST` - ElevenLabs voice setting, default `true`.
 - `PANAM_DOCK_ADMIN_TOKEN` - volitelny token pro Deck POST akce.
 - `PANAM_DOCK_PORT` - port Decku, default `5051`.
 - `PANAM_WEB_HOST` - host Panam Webu, default `127.0.0.1`.
@@ -243,6 +259,7 @@ Manual smoke test:
 ```powershell
 .\.venv\Scripts\Activate.ps1
 python -m pip install -r requirements.txt
+# dopln ELEVENLABS_API_KEY a ELEVENLABS_VOICE_ID do .env
 ffmpeg -version
 python bot.py
 ```
@@ -251,16 +268,16 @@ V Discordu:
 
 1. Pripoj se do voice kanalu.
 2. Spust `/voice_join`.
-3. Spust `/voice_say Ahoj, já jsem Panam. Teď už mluvím česky.`.
-4. Spust `/ask_voice Jak se jmenujes a co umis?`.
+3. Spust `/voice_say Ahoj, já jsem Panam. Tohle je test ElevenLabs hlasu.`.
+4. Spust `/ask_voice Jak se jmenuješ a co umíš?`.
 5. Over, ze odpoved prijde textem do Discord chatu i hlasem ve voice.
 6. Spust `/voice_leave`.
 
 Definition of Done:
 
 - bot se pripoji do tveho aktualniho voice kanalu
-- `/voice_say Ahoj, já jsem Panam. Teď už mluvím česky.` slysitelne prehraje cesky zensky hlas
-- `/ask_voice Jak se jmenujes a co umis?` odpovi textem i hlasem
+- `/voice_say Ahoj, já jsem Panam. Tohle je test ElevenLabs hlasu.` vytvori ElevenLabs MP3 a prehraje ho ve voice
+- `/ask_voice Jak se jmenuješ a co umíš?` odpovi textem i hlasem pres ElevenLabs
 - `/voice_leave` bota odpoji
 - existujici textove prikazy porad funguji
 - `/voice_join`, `/voice_say` a `/voice_leave` porad funguji
