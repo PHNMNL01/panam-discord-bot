@@ -31,6 +31,21 @@ def create_input_xlsx(path: Path) -> None:
     workbook.close()
 
 
+def create_titled_header_input_xlsx(path: Path) -> None:
+    workbook = Workbook()
+    worksheet = workbook.active
+    worksheet.title = "Vozovy park"
+    worksheet.append(["VOZOVÝ PARK - interní export"])
+    worksheet.append([])
+    worksheet.append([])
+    worksheet.append(["SPZ", "ZNAČKA", "ŘIDIČ"])
+    worksheet.append(["1AB 2345", "ŠKODA RAPID", "Ana Novak"])
+    worksheet.append(["2CD 6789", "VW GOLF", "Bela Svoboda"])
+    worksheet.append(["3EF 0123", "ŠKODA RAPID", "Cyril Dvorak"])
+    workbook.save(path)
+    workbook.close()
+
+
 def read_rows(path: Path) -> list[tuple]:
     workbook = load_workbook(path, read_only=True, data_only=True)
     try:
@@ -129,6 +144,23 @@ def main() -> None:
         )
         assert output_path.exists(), "Vystupni XLSX neexistuje."
         assert result.operation_summary == "nalezení duplicit podle sloupce Soukromý e-mail"
+
+        titled_input_path = base_dir / "vozovy_park.xlsx"
+        create_titled_header_input_xlsx(titled_input_path)
+
+        output_path = base_dir / "vozovy_park_skoda_rapid_by_Panam.xlsx"
+        result = panam_spreadsheet.transform_xlsx(
+            titled_input_path,
+            output_path,
+            "nech jen řádky kde Značka = ŠKODA RAPID",
+        )
+        assert output_path.exists(), "Vystupni XLSX neexistuje."
+        assert result.row_count_before == 3
+        assert result.row_count_after == 2
+        rows = read_rows(output_path)
+        assert rows[0] == ("SPZ", "ZNAČKA", "ŘIDIČ")
+        assert len(rows) == 3
+        assert all(row[1] == "ŠKODA RAPID" for row in rows[1:])
 
     print("spreadsheet transform smoke test ok")
 

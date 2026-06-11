@@ -15,6 +15,7 @@ MIN_COLUMN_WIDTH = 10
 MAX_COLUMN_WIDTH = 50
 COLUMN_WIDTH_PADDING = 2
 COLUMN_JOINER_WORDS = {"a", "and"}
+HEADER_SCAN_LIMIT = 20
 
 logger = logging.getLogger("panam.spreadsheet")
 
@@ -170,6 +171,86 @@ def _is_empty_value(value: Any) -> bool:
     return value is None or str(value).strip() == ""
 
 
+def _requested_columns_from_plan(plan: SpreadsheetTransformPlan) -> tuple[str, ...]:
+    requested_columns: list[str] = []
+
+    for column in (
+        plan.filter_column,
+        plan.sort_column,
+        plan.duplicate_column,
+        *plan.selected_columns,
+    ):
+        if column:
+            requested_columns.append(column)
+
+    return tuple(requested_columns)
+
+
+def _headers_from_row(row: tuple[Any, ...]) -> list[str]:
+    return [str(value).strip() if value is not None else "" for value in row]
+
+
+def _has_unique_header_names(headers: list[str]) -> bool:
+    normalized_seen: set[str] = set()
+
+    for header in headers:
+        normalized_header = _normalize_header(header)
+        if not normalized_header:
+            continue
+        if normalized_header in normalized_seen:
+            return False
+        normalized_seen.add(normalized_header)
+
+    return True
+
+
+def _requested_column_match_count(headers: list[str], requested_columns: tuple[str, ...]) -> int:
+    matches = 0
+
+    for requested_column in requested_columns:
+        try:
+            if find_column_index(headers, requested_column) is not None:
+                matches += 1
+        except SpreadsheetTransformUserError:
+            return -1
+
+    return matches
+
+
+def _choose_header_row(
+    rows: list[tuple[Any, ...]],
+    requested_columns: tuple[str, ...],
+) -> tuple[int, list[str]]:
+    best_score: tuple[int, int] | None = None
+    best_candidate: tuple[int, list[str]] | None = None
+
+    for row_index, row in enumerate(rows[:HEADER_SCAN_LIMIT]):
+        headers = _headers_from_row(row)
+        non_empty_headers = [header for header in headers if header]
+
+        if len(non_empty_headers) < 2:
+            continue
+
+        if not _has_unique_header_names(headers):
+            continue
+
+        match_count = _requested_column_match_count(headers, requested_columns)
+        if match_count < 0:
+            continue
+
+        score = (match_count, -row_index)
+        if best_score is None or score > best_score:
+            best_score = score
+            best_candidate = (row_index, headers)
+
+    if best_candidate is None:
+        raise SpreadsheetTransformUserError(
+            "V Excelu jsem nenašla řádek s hlavičkami sloupců."
+        )
+
+    return best_candidate
+
+
 def _split_columns(text: str) -> tuple[str, ...]:
     clean_text = re.sub(r"\s+", " ", text).strip(" .,;:")
     if not clean_text:
@@ -303,7 +384,10 @@ def _format_worksheet(worksheet: Worksheet) -> None:
         worksheet.column_dimensions[get_column_letter(column_index)].width = width
 
 
-def _read_first_sheet_values(input_path: Path) -> tuple[list[str], list[list[Any]]]:
+def _read_first_sheet_values(
+    input_path: Path,
+    requested_columns: tuple[str, ...] = (),
+) -> tuple[list[str], list[list[Any]]]:
     workbook = load_workbook(input_path, read_only=True, data_only=True)
     try:
         worksheet = workbook.active
@@ -314,24 +398,13 @@ def _read_first_sheet_values(input_path: Path) -> tuple[list[str], list[list[Any
     if not rows:
         raise SpreadsheetTransformUserError("Ten Excel je prazdny.")
 
-    raw_headers = list(rows[0])
-    headers = [str(value).strip() if value is not None else "" for value in raw_headers]
-    if not any(headers):
-        raise SpreadsheetTransformUserError("V prvnim radku Excelu nevidim hlavicky sloupcu.")
-
-    normalized_seen: set[str] = set()
-    for header in headers:
-        normalized_header = _normalize_header(header)
-        if not normalized_header:
-            continue
-        if normalized_header in normalized_seen:
-            raise SpreadsheetTransformUserError(
-                "Excel ma duplicitni hlavicky sloupcu. V1 potrebuje jednoznacne nazvy."
-            )
-        normalized_seen.add(normalized_header)
+    header_row_index, headers = _choose_header_row(rows, requested_columns)
 
     width = len(headers)
-    data_rows = [list(row[:width]) + [None] * max(0, width - len(row)) for row in rows[1:]]
+    data_rows = [
+        list(row[:width]) + [None] * max(0, width - len(row))
+        for row in rows[header_row_index + 1:]
+    ]
     return headers, data_rows
 
 
@@ -375,7 +448,8 @@ def transform_xlsx(
     sheet_name: str = "Data",
 ) -> SpreadsheetTransformResult:
     plan = parse_transform_instruction(instruction)
-    headers, rows = _read_first_sheet_values(input_path)
+    requested_columns = _requested_columns_from_plan(plan)
+    headers, rows = _read_first_sheet_values(input_path, requested_columns)
     rows_read = len(rows)
     column_count_before = len(headers)
     operation_summary_parts: list[str] = []
