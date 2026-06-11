@@ -16,6 +16,12 @@ DEFAULT_TTS_PROVIDER = "edge"
 DEFAULT_TTS_VOICE = "cs-CZ-VlastaNeural"
 DEFAULT_TTS_RATE = "+0%"
 DEFAULT_TTS_VOLUME = "+0%"
+DEFAULT_ELEVENLABS_MODEL_ID = "eleven_multilingual_v2"
+DEFAULT_ELEVENLABS_OUTPUT_FORMAT = "mp3_44100_128"
+DEFAULT_ELEVENLABS_STABILITY = 0.45
+DEFAULT_ELEVENLABS_SIMILARITY_BOOST = 0.75
+DEFAULT_ELEVENLABS_STYLE = 0.25
+DEFAULT_ELEVENLABS_USE_SPEAKER_BOOST = True
 
 logger = logging.getLogger("panam")
 
@@ -117,12 +123,81 @@ def _powershell_string(value: Path) -> str:
     return "'" + str(value).replace("'", "''") + "'"
 
 
-def _get_tts_settings() -> dict[str, str]:
+def _parse_float_env(name: str, default: float) -> float:
+    value = (os.getenv(name) or "").strip()
+    if not value:
+        return default
+
+    try:
+        return float(value)
+    except ValueError:
+        return default
+
+
+def _parse_bool_env(name: str, default: bool) -> bool:
+    value = (os.getenv(name) or "").strip().lower()
+    if not value:
+        return default
+
+    return value in {"1", "true", "yes", "on"}
+
+
+def _mask_secretish_value(value: str | None) -> str | None:
+    clean_value = str(value or "").strip()
+    if not clean_value:
+        return None
+    if len(clean_value) <= 8:
+        return "*" * len(clean_value)
+    return f"{clean_value[:4]}...{clean_value[-4:]}"
+
+
+def _get_tts_settings() -> dict[str, str | float | bool]:
     return {
         "provider": (os.getenv("PANAM_TTS_PROVIDER") or DEFAULT_TTS_PROVIDER).strip().lower(),
         "voice": (os.getenv("PANAM_TTS_VOICE") or DEFAULT_TTS_VOICE).strip(),
         "rate": (os.getenv("PANAM_TTS_RATE") or DEFAULT_TTS_RATE).strip(),
         "volume": (os.getenv("PANAM_TTS_VOLUME") or DEFAULT_TTS_VOLUME).strip(),
+        "elevenlabs_api_key": (os.getenv("ELEVENLABS_API_KEY") or "").strip(),
+        "elevenlabs_voice_id": (os.getenv("ELEVENLABS_VOICE_ID") or "").strip(),
+        "elevenlabs_model_id": (
+            os.getenv("ELEVENLABS_MODEL_ID") or DEFAULT_ELEVENLABS_MODEL_ID
+        ).strip(),
+        "elevenlabs_output_format": (
+            os.getenv("ELEVENLABS_OUTPUT_FORMAT") or DEFAULT_ELEVENLABS_OUTPUT_FORMAT
+        ).strip(),
+        "elevenlabs_stability": _parse_float_env(
+            "ELEVENLABS_STABILITY",
+            DEFAULT_ELEVENLABS_STABILITY,
+        ),
+        "elevenlabs_similarity_boost": _parse_float_env(
+            "ELEVENLABS_SIMILARITY_BOOST",
+            DEFAULT_ELEVENLABS_SIMILARITY_BOOST,
+        ),
+        "elevenlabs_style": _parse_float_env("ELEVENLABS_STYLE", DEFAULT_ELEVENLABS_STYLE),
+        "elevenlabs_use_speaker_boost": _parse_bool_env(
+            "ELEVENLABS_USE_SPEAKER_BOOST",
+            DEFAULT_ELEVENLABS_USE_SPEAKER_BOOST,
+        ),
+    }
+
+
+def _tts_log_details(
+    settings: dict[str, str | float | bool],
+    text_length: int,
+) -> dict[str, str | int | None]:
+    provider = str(settings["provider"])
+    if provider == "elevenlabs":
+        return {
+            "provider": provider,
+            "model_id": str(settings["elevenlabs_model_id"]),
+            "voice_id": _mask_secretish_value(str(settings["elevenlabs_voice_id"])),
+            "text_length": text_length,
+        }
+
+    return {
+        "provider": provider,
+        "voice_id": _mask_secretish_value(str(settings["voice"])),
+        "text_length": text_length,
     }
 
 
@@ -194,7 +269,7 @@ async def _create_tts_wav_file_async(text: str) -> Path:
     return await asyncio.to_thread(_create_tts_wav_file, text)
 
 
-async def _create_edge_tts_audio_file(text: str, settings: dict[str, str]) -> Path:
+async def _create_edge_tts_audio_file(text: str, settings: dict[str, str | float | bool]) -> Path:
     VOICE_RUNTIME_DIR.mkdir(parents=True, exist_ok=True)
 
     audio_file = tempfile.NamedTemporaryFile(
@@ -217,9 +292,9 @@ async def _create_edge_tts_audio_file(text: str, settings: dict[str, str]) -> Pa
     try:
         communicate = edge_tts.Communicate(
             text,
-            voice=settings["voice"],
-            rate=settings["rate"],
-            volume=settings["volume"],
+            voice=str(settings["voice"]),
+            rate=str(settings["rate"]),
+            volume=str(settings["volume"]),
         )
         await communicate.save(str(audio_path))
     except Exception as error:
@@ -235,16 +310,91 @@ async def _create_edge_tts_audio_file(text: str, settings: dict[str, str]) -> Pa
     return audio_path
 
 
-async def _create_tts_audio_file(text: str, settings: dict[str, str]) -> Path:
-    provider = settings["provider"]
+def _create_elevenlabs_audio_file_sync(
+    text: str,
+    settings: dict[str, str | float | bool],
+) -> Path:
+    api_key = str(settings["elevenlabs_api_key"])
+    voice_id = str(settings["elevenlabs_voice_id"])
+    if not api_key or not voice_id:
+        raise VoiceCommandUserError(
+            "ElevenLabs TTS potrebuje ELEVENLABS_API_KEY a ELEVENLABS_VOICE_ID v .env."
+        )
+
+    VOICE_RUNTIME_DIR.mkdir(parents=True, exist_ok=True)
+
+    audio_file = tempfile.NamedTemporaryFile(
+        suffix=".mp3",
+        prefix="panam_tts_",
+        dir=VOICE_RUNTIME_DIR,
+        delete=False,
+    )
+    audio_path = Path(audio_file.name)
+    audio_file.close()
+
+    try:
+        from elevenlabs import VoiceSettings
+        from elevenlabs.client import ElevenLabs
+    except ImportError as error:
+        audio_path.unlink(missing_ok=True)
+        raise VoiceCommandUserError(
+            "elevenlabs neni nainstalovane. Spust python -m pip install -r requirements.txt."
+        ) from error
+
+    try:
+        elevenlabs_client = ElevenLabs(api_key=api_key)
+        response = elevenlabs_client.text_to_speech.convert(
+            voice_id=voice_id,
+            output_format=str(settings["elevenlabs_output_format"]),
+            text=text,
+            model_id=str(settings["elevenlabs_model_id"]),
+            voice_settings=VoiceSettings(
+                stability=float(settings["elevenlabs_stability"]),
+                similarity_boost=float(settings["elevenlabs_similarity_boost"]),
+                style=float(settings["elevenlabs_style"]),
+                use_speaker_boost=bool(settings["elevenlabs_use_speaker_boost"]),
+            ),
+        )
+        with audio_path.open("wb") as output_file:
+            for chunk in response:
+                if chunk:
+                    output_file.write(chunk)
+    except VoiceCommandUserError:
+        audio_path.unlink(missing_ok=True)
+        raise
+    except Exception as error:
+        audio_path.unlink(missing_ok=True)
+        raise VoiceCommandUserError(
+            "Nepodarilo se vytvorit ElevenLabs TTS audio. Zkontroluj internet a ElevenLabs nastaveni."
+        ) from error
+
+    if not audio_path.exists() or audio_path.stat().st_size <= 0:
+        audio_path.unlink(missing_ok=True)
+        raise VoiceCommandUserError("ElevenLabs TTS vytvorilo prazdny audio soubor.")
+
+    return audio_path
+
+
+async def _create_elevenlabs_audio_file(
+    text: str,
+    settings: dict[str, str | float | bool],
+) -> Path:
+    return await asyncio.to_thread(_create_elevenlabs_audio_file_sync, text, settings)
+
+
+async def _create_tts_audio_file(text: str, settings: dict[str, str | float | bool]) -> Path:
+    provider = str(settings["provider"])
     if provider == "edge":
         return await _create_edge_tts_audio_file(text, settings)
+
+    if provider == "elevenlabs":
+        return await _create_elevenlabs_audio_file(text, settings)
 
     if provider in {"system", "windows", "system_speech"}:
         return await _create_tts_wav_file_async(text)
 
     raise VoiceCommandUserError(
-        "Neznamy TTS provider. Podporovane hodnoty jsou edge nebo system."
+        "Neznamy TTS provider. Podporovane hodnoty jsou elevenlabs, edge nebo system."
     )
 
 
@@ -276,8 +426,7 @@ async def play_tts_text(
     clean_text = str(text or "").strip()
     text_length = original_text_length if original_text_length is not None else len(clean_text)
     settings = _get_tts_settings()
-    provider = settings["provider"]
-    voice = settings["voice"]
+    log_details = _tts_log_details(settings, text_length)
 
     try:
         voice_client = await _connect_or_move_to_user_channel(interaction)
@@ -287,9 +436,7 @@ async def play_tts_text(
             command_name,
             "error",
             interaction,
-            provider=provider,
-            voice=voice,
-            text_length=text_length,
+            **log_details,
         )
         await interaction.followup.send(str(error), ephemeral=True)
         return False
@@ -298,15 +445,14 @@ async def play_tts_text(
             command_name,
             "error",
             interaction,
-            provider=provider,
-            voice=voice,
-            text_length=text_length,
+            **log_details,
         )
         logger.warning(
-            "%s setup failed provider=%s voice=%s error_type=%s",
+            "%s setup failed provider=%s model_id=%s voice_id=%s error_type=%s",
             command_name,
-            provider,
-            voice,
+            log_details.get("provider"),
+            log_details.get("model_id"),
+            log_details.get("voice_id"),
             type(error).__name__,
         )
         await interaction.followup.send(
@@ -334,9 +480,7 @@ async def play_tts_text(
             command_name,
             "error",
             interaction,
-            provider=provider,
-            voice=voice,
-            text_length=text_length,
+            **log_details,
         )
         logger.exception("%s playback start failed", command_name)
         await interaction.followup.send(
@@ -349,9 +493,7 @@ async def play_tts_text(
         command_name,
         "success",
         interaction,
-        provider=provider,
-        voice=voice,
-        text_length=text_length,
+        **log_details,
     )
     return True
 
@@ -415,13 +557,12 @@ async def handle_voice_say_command(interaction: discord.Interaction, text: str) 
     command_name = "voice_say"
     text_length = len(text or "")
     settings = _get_tts_settings()
+    log_details = _tts_log_details(settings, text_length)
     _log_voice_command(
         command_name,
         "started",
         interaction,
-        provider=settings["provider"],
-        voice=settings["voice"],
-        text_length=text_length,
+        **log_details,
     )
 
     clean_text = str(text or "").strip()
@@ -430,9 +571,7 @@ async def handle_voice_say_command(interaction: discord.Interaction, text: str) 
             command_name,
             "error",
             interaction,
-            provider=settings["provider"],
-            voice=settings["voice"],
-            text_length=0,
+            **_tts_log_details(settings, 0),
         )
         await interaction.response.send_message(
             "Text pro voice_say nesmi byt prazdny.",
@@ -445,9 +584,7 @@ async def handle_voice_say_command(interaction: discord.Interaction, text: str) 
             command_name,
             "error",
             interaction,
-            provider=settings["provider"],
-            voice=settings["voice"],
-            text_length=text_length,
+            **log_details,
         )
         await interaction.response.send_message(
             f"Text je moc dlouhy. Limit pro speak v1 je {MAX_TTS_TEXT_LENGTH} znaku.",
