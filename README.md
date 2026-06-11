@@ -222,6 +222,7 @@ Zakladni slash commandy:
 - `/voice_join`
 - `/voice_say`
 - `/voice_leave`
+- `/ask_voice`
 
 ### Panam Voice Speak v1
 
@@ -243,14 +244,18 @@ V Discordu:
 1. Pripoj se do voice kanalu.
 2. Spust `/voice_join`.
 3. Spust `/voice_say text:Ahoj, jsem Panam`.
-4. Spust `/voice_leave`.
+4. Spust `/ask_voice Jak se jmenujes a co umis?`.
+5. Over, ze odpoved prijde textem do Discord chatu i hlasem ve voice.
+6. Spust `/voice_leave`.
 
 Definition of Done:
 
 - bot se pripoji do tveho aktualniho voice kanalu
 - `/voice_say ahoj` slysitelne prehraje audio
+- `/ask_voice Jak se jmenujes a co umis?` odpovi textem i hlasem
 - `/voice_leave` bota odpoji
 - existujici textove prikazy porad funguji
+- `/voice_join`, `/voice_say` a `/voice_leave` porad funguji
 - zadne poslouchani nebylo pridane
 - v logu nejsou tokeny, raw TTS texty ani citlivy obsah
 

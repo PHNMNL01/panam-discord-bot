@@ -187,6 +187,94 @@ def _cleanup_audio_file(audio_path: Path) -> None:
         logger.warning("voice_tts cleanup failed path=%s", audio_path.name)
 
 
+def truncate_text_for_voice(text: str, limit: int = MAX_TTS_TEXT_LENGTH) -> str:
+    clean_text = str(text or "").strip()
+    if len(clean_text) <= limit:
+        return clean_text
+
+    if limit <= 3:
+        return clean_text[:limit]
+
+    return clean_text[: limit - 3].rstrip() + "..."
+
+
+async def play_tts_text(
+    interaction: discord.Interaction,
+    text: str,
+    command_name: str,
+    *,
+    original_text_length: int | None = None,
+) -> bool:
+    clean_text = str(text or "").strip()
+    text_length = original_text_length if original_text_length is not None else len(clean_text)
+
+    try:
+        voice_client = await _connect_or_move_to_user_channel(interaction)
+        audio_path = await _create_tts_wav_file_async(clean_text)
+    except VoiceCommandUserError as error:
+        _log_voice_command(
+            command_name,
+            "error",
+            interaction,
+            text_length=text_length,
+            voice_text_length=len(clean_text),
+        )
+        await interaction.followup.send(str(error), ephemeral=True)
+        return False
+    except Exception:
+        _log_voice_command(
+            command_name,
+            "error",
+            interaction,
+            text_length=text_length,
+            voice_text_length=len(clean_text),
+        )
+        logger.exception("%s setup failed", command_name)
+        await interaction.followup.send(
+            "Nepodarilo se pripravit voice audio.",
+            ephemeral=True,
+        )
+        return False
+
+    if voice_client.is_playing():
+        voice_client.stop()
+
+    def after_playback(error: Exception | None) -> None:
+        _cleanup_audio_file(audio_path)
+        if error is not None:
+            logger.error("%s playback error=%s", command_name, error)
+
+    try:
+        voice_client.play(
+            discord.FFmpegPCMAudio(str(audio_path)),
+            after=after_playback,
+        )
+    except Exception:
+        _cleanup_audio_file(audio_path)
+        _log_voice_command(
+            command_name,
+            "error",
+            interaction,
+            text_length=text_length,
+            voice_text_length=len(clean_text),
+        )
+        logger.exception("%s playback start failed", command_name)
+        await interaction.followup.send(
+            "Nepodarilo se prehrat voice audio. Je dostupny FFmpeg?",
+            ephemeral=True,
+        )
+        return False
+
+    _log_voice_command(
+        command_name,
+        "success",
+        interaction,
+        text_length=text_length,
+        voice_text_length=len(clean_text),
+    )
+    return True
+
+
 async def handle_voice_join_command(interaction: discord.Interaction) -> None:
     command_name = "voice_join"
     _log_voice_command(command_name, "started", interaction)
