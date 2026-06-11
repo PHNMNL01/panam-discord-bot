@@ -26,6 +26,11 @@ def main() -> None:
     assert hasattr(panam_discord_runner, "run_discord_bot")
     assert hasattr(panam_discord_runner, "DiscordAIBot")
     assert hasattr(panam_discord_runner, "bot")
+    command_names = {
+        command.name
+        for command in panam_discord_runner.bot.tree.get_commands()
+    }
+    assert {"voice_join", "voice_leave", "voice_say"}.issubset(command_names)
 
     print("discord runner smoke test ok")
 

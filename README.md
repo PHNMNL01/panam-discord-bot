@@ -219,6 +219,40 @@ Zakladni slash commandy:
 - `/transform_docx`
 - `/transform_excel`
 - `/file_job_test`
+- `/voice_join`
+- `/voice_say`
+- `/voice_leave`
+
+### Panam Voice Speak v1
+
+Voice v1 je pouze Discord output kanal. Panam se umi pripojit do voice kanalu,
+prehrat kratky TTS text a odpojit se. Nepridava nahravani, STT, wake phrase ani
+listen command.
+
+Manual smoke test:
+
+```powershell
+.\.venv\Scripts\Activate.ps1
+pip install -r requirements.txt
+ffmpeg -version
+python bot.py
+```
+
+V Discordu:
+
+1. Pripoj se do voice kanalu.
+2. Spust `/voice_join`.
+3. Spust `/voice_say text:Ahoj, jsem Panam`.
+4. Spust `/voice_leave`.
+
+Definition of Done:
+
+- bot se pripoji do tveho aktualniho voice kanalu
+- `/voice_say ahoj` slysitelne prehraje audio
+- `/voice_leave` bota odpoji
+- existujici textove prikazy porad funguji
+- zadne poslouchani nebylo pridane
+- v logu nejsou tokeny, raw TTS texty ani citlivy obsah
 
 Natural zpravy funguji, kdyz je Panam oslovena, napr.:
 
@@ -293,6 +327,7 @@ Discord:
 
 - `bot.py` - entrypoint.
 - `panam_discord_runner.py` - Discord client, slash command dekoratory a eventy.
+- `panam_discord_voice.py` - Discord voice speak v1 output adapter.
 - `panam_discord_*` - command adaptery, helpery, natural flow a file-job obsluha.
 
 Web:
