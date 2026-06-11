@@ -1,13 +1,18 @@
 import asyncio
+from dataclasses import dataclass
 import logging
 import os
 import shutil
 import subprocess
 import tempfile
 import threading
+import time
+import wave
 from pathlib import Path
 
 import discord
+
+from panam_stt import SttUserError, get_stt_settings, transcribe_audio_file
 
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -15,6 +20,11 @@ VOICE_RUNTIME_DIR = BASE_DIR / "runtime" / "voice"
 MAX_TTS_TEXT_LENGTH = 500
 LISTEN_TEST_MIN_SECONDS = 1
 LISTEN_TEST_MAX_SECONDS = 10
+LISTEN_TRANSCRIBE_MIN_SECONDS = 1
+LISTEN_TRANSCRIBE_MAX_SECONDS = 10
+DISCORD_PCM_SAMPLE_RATE = 48000
+DISCORD_PCM_CHANNELS = 2
+DISCORD_PCM_SAMPLE_WIDTH = 2
 DEFAULT_TTS_PROVIDER = "edge"
 DEFAULT_TTS_VOICE = "cs-CZ-VlastaNeural"
 DEFAULT_TTS_RATE = "+0%"
@@ -31,6 +41,38 @@ logger = logging.getLogger("panam")
 
 class VoiceCommandUserError(Exception):
     pass
+
+
+@dataclass
+class VoiceCaptureResult:
+    audio_path: Path | None
+    packet_count: int
+    pcm_frame_count: int
+    opus_frame_count: int
+    received_audio: bool
+    pcm_bytes: bytes
+    pcm_bytes_total: int
+    opus_bytes_total: int
+    first_frame_byte_lengths: list[int]
+    first_pcm_frame_byte_lengths: list[int]
+    first_opus_frame_byte_lengths: list[int]
+    wants_opus: bool
+    has_pcm_attr: bool
+    has_opus_attr: bool
+    voice_data_type: str | None
+    voice_data_safe_attrs: list[str]
+    min_frame_bytes: int | None
+    max_frame_bytes: int | None
+    avg_frame_bytes: float | None
+    capture_requested_seconds: int
+    capture_actual_seconds: float
+    first_frame_at_ms: float | None
+    last_frame_at_ms: float | None
+    sink_cleanup_done: bool
+    output_file_size_bytes: int
+    duration_seconds: float | None
+    sample_rate: int | None
+    channels: int | None
 
 
 def _safe_voice_context(interaction: discord.Interaction) -> dict[str, int | None]:
@@ -71,16 +113,107 @@ def log_listen_test_status(
     *,
     seconds: int,
     received_audio: bool,
+    packet_count: int = 0,
+    output_file_size_bytes: int = 0,
+    duration_seconds: float | None = None,
 ) -> None:
     context = _safe_voice_context(interaction)
     logger.info(
-        "action=listen_test status=%s seconds=%s guild_id=%s channel_id=%s user_id=%s received_audio=%s",
+        (
+            "command=listen_test action=listen_test status=%s seconds=%s "
+            "packet_count=%s received_audio=%s output_file_size_bytes=%s "
+            "duration_seconds=%s guild_id=%s channel_id=%s user_id=%s"
+        ),
         status,
         seconds,
+        packet_count,
+        str(received_audio).lower(),
+        output_file_size_bytes,
+        duration_seconds,
         context["guild_id"],
         context["channel_id"],
         context["user_id"],
+    )
+
+
+def log_listen_transcribe_status(
+    status: str,
+    interaction: discord.Interaction,
+    *,
+    seconds: int,
+    received_audio: bool,
+    packet_count: int,
+    transcript_length: int | None,
+    provider: str,
+    model_id: str,
+) -> None:
+    context = _safe_voice_context(interaction)
+    logger.info(
+        (
+            "action=listen_transcribe status=%s seconds=%s received_audio=%s "
+            "packet_count=%s transcript_length=%s provider=%s model_id=%s "
+            "guild_id=%s channel_id=%s user_id=%s"
+        ),
+        status,
+        seconds,
         str(received_audio).lower(),
+        packet_count,
+        transcript_length,
+        provider,
+        model_id,
+        context["guild_id"],
+        context["channel_id"],
+        context["user_id"],
+    )
+
+
+def log_listen_transcribe_debug_status(
+    status: str,
+    interaction: discord.Interaction,
+    *,
+    seconds: int,
+    received_audio: bool,
+    packet_count: int,
+    pcm_frame_count: int = 0,
+    pcm_bytes_total: int = 0,
+    min_frame_bytes: int | None = None,
+    max_frame_bytes: int | None = None,
+    avg_frame_bytes: float | None = None,
+    capture_requested_seconds: int | None = None,
+    capture_actual_seconds: float | None = None,
+    first_frame_at_ms: float | None = None,
+    last_frame_at_ms: float | None = None,
+    output_file_size_bytes: int = 0,
+    duration_seconds: float | None = None,
+) -> None:
+    context = _safe_voice_context(interaction)
+    logger.info(
+        (
+            "command=listen_transcribe_debug action=listen_transcribe_debug status=%s seconds=%s "
+            "packet_count=%s pcm_frame_count=%s received_audio=%s pcm_bytes_total=%s "
+            "min_frame_bytes=%s max_frame_bytes=%s avg_frame_bytes=%s "
+            "capture_requested_seconds=%s capture_actual_seconds=%s first_frame_at_ms=%s "
+            "last_frame_at_ms=%s output_file_size_bytes=%s duration_seconds=%s "
+            "guild_id=%s channel_id=%s user_id=%s"
+        ),
+        status,
+        seconds,
+        packet_count,
+        pcm_frame_count,
+        str(received_audio).lower(),
+        pcm_bytes_total,
+        min_frame_bytes,
+        max_frame_bytes,
+        avg_frame_bytes,
+        capture_requested_seconds,
+        capture_actual_seconds,
+        first_frame_at_ms,
+        last_frame_at_ms,
+        output_file_size_bytes,
+        duration_seconds,
+        context["guild_id"],
+        context["channel_id"],
+        context["user_id"],
     )
 
 
@@ -191,6 +324,406 @@ async def _connect_or_move_to_user_voice_recv(interaction: discord.Interaction):
         raise VoiceCommandUserError("Nepodarilo se vytvorit Discord voice receive client.")
 
     return connected_client
+
+
+def _get_wav_metadata(audio_path: Path) -> tuple[float | None, int | None, int | None]:
+    try:
+        with wave.open(str(audio_path), "rb") as wav_file:
+            sample_rate = wav_file.getframerate()
+            channels = wav_file.getnchannels()
+            frame_count = wav_file.getnframes()
+            duration = frame_count / sample_rate if sample_rate else None
+            return duration, sample_rate, channels
+    except (OSError, wave.Error):
+        return None, None, None
+
+
+def _infer_pcm_channels(frame_sizes: list[int]) -> int:
+    if not frame_sizes:
+        return DISCORD_PCM_CHANNELS
+
+    mono_frame_bytes = int(DISCORD_PCM_SAMPLE_RATE * 0.02 * DISCORD_PCM_SAMPLE_WIDTH)
+    stereo_frame_bytes = mono_frame_bytes * DISCORD_PCM_CHANNELS
+    stereo_matches = sum(1 for size in frame_sizes if size and size % stereo_frame_bytes == 0)
+    mono_matches = sum(1 for size in frame_sizes if size and size % mono_frame_bytes == 0)
+
+    if mono_matches > stereo_matches:
+        return 1
+    return DISCORD_PCM_CHANNELS
+
+
+def _log_capture_state(
+    interaction: discord.Interaction,
+    *,
+    file_prefix: str,
+    state: str,
+    seconds: int,
+    packet_count: int = 0,
+    pcm_frame_count: int = 0,
+    capture_actual_seconds: float | None = None,
+) -> None:
+    context = _safe_voice_context(interaction)
+    logger.info(
+        (
+            "voice_capture_state=%s command=%s seconds=%s packet_count=%s "
+            "pcm_frame_count=%s capture_actual_seconds=%s guild_id=%s channel_id=%s user_id=%s"
+        ),
+        state,
+        file_prefix,
+        seconds,
+        packet_count,
+        pcm_frame_count,
+        capture_actual_seconds,
+        context["guild_id"],
+        context["channel_id"],
+        context["user_id"],
+    )
+
+
+def _safe_voice_data_attrs(data) -> list[str]:
+    attrs: list[str] = []
+    for name in dir(data):
+        if name.startswith("_"):
+            continue
+        try:
+            value = getattr(data, name)
+        except Exception:
+            continue
+        if callable(value):
+            continue
+        attrs.append(name)
+    return sorted(attrs)[:30]
+
+
+def _create_voice_capture_sink(voice_recv):
+    class VoiceCaptureSink(voice_recv.AudioSink):
+        def __init__(self) -> None:
+            super().__init__()
+            self.packet_count = 0
+            self.pcm_frame_count = 0
+            self.opus_frame_count = 0
+            self._lock = threading.Lock()
+            self._started_at: float | None = None
+            self._first_frame_at: float | None = None
+            self._last_frame_at: float | None = None
+            self._pcm_chunks: list[bytes] = []
+            self._pcm_frame_sizes: list[int] = []
+            self._opus_frame_sizes: list[int] = []
+            self._has_pcm_attr = False
+            self._has_opus_attr = False
+            self._voice_data_type: str | None = None
+            self._voice_data_safe_attrs: list[str] = []
+            self._cleanup_done = threading.Event()
+
+        def mark_started(self) -> None:
+            with self._lock:
+                self._started_at = time.perf_counter()
+
+        def wants_opus(self) -> bool:
+            return True
+
+        def write(self, user, data) -> None:
+            try:
+                with self._lock:
+                    self.packet_count += 1
+                    if self._voice_data_type is None:
+                        self._voice_data_type = type(data).__name__
+                        self._voice_data_safe_attrs = _safe_voice_data_attrs(data)
+
+                    self._has_pcm_attr = self._has_pcm_attr or hasattr(data, "pcm")
+                    self._has_opus_attr = self._has_opus_attr or hasattr(data, "opus")
+                    pcm = getattr(data, "pcm", None)
+                    opus = getattr(data, "opus", None)
+
+                    pcm_frame = bytes(pcm) if pcm else b""
+                    opus_frame = bytes(opus) if opus else b""
+
+                    if opus_frame:
+                        self.opus_frame_count += 1
+                        self._opus_frame_sizes.append(len(opus_frame))
+
+                    if not pcm_frame:
+                        return
+
+                    now = time.perf_counter()
+                    if self._started_at is not None:
+                        if self._first_frame_at is None:
+                            self._first_frame_at = now
+                        self._last_frame_at = now
+
+                    self.pcm_frame_count += 1
+                    self._pcm_chunks.append(pcm_frame)
+                    self._pcm_frame_sizes.append(len(pcm_frame))
+            except Exception:
+                logger.exception("voice_capture_sink_write_failed")
+
+        def cleanup(self) -> None:
+            self._cleanup_done.set()
+
+        @property
+        def received_audio(self) -> bool:
+            with self._lock:
+                return self.packet_count > 0
+
+        def snapshot_packet_count(self) -> int:
+            with self._lock:
+                return self.packet_count
+
+        def snapshot_pcm_frame_count(self) -> int:
+            with self._lock:
+                return self.pcm_frame_count
+
+        def snapshot_opus_frame_count(self) -> int:
+            with self._lock:
+                return self.opus_frame_count
+
+        def snapshot_pcm_bytes(self) -> bytes:
+            with self._lock:
+                return b"".join(self._pcm_chunks)
+
+        def snapshot_pcm_frame_sizes(self) -> list[int]:
+            with self._lock:
+                return list(self._pcm_frame_sizes)
+
+        def snapshot_opus_frame_sizes(self) -> list[int]:
+            with self._lock:
+                return list(self._opus_frame_sizes)
+
+        def snapshot_voice_data_metadata(self) -> tuple[bool, bool, str | None, list[str]]:
+            with self._lock:
+                return (
+                    self._has_pcm_attr,
+                    self._has_opus_attr,
+                    self._voice_data_type,
+                    list(self._voice_data_safe_attrs),
+                )
+
+        def snapshot_frame_timing_ms(self) -> tuple[float | None, float | None]:
+            with self._lock:
+                if self._started_at is None:
+                    return None, None
+                first_frame_at_ms = (
+                    (self._first_frame_at - self._started_at) * 1000
+                    if self._first_frame_at is not None
+                    else None
+                )
+                last_frame_at_ms = (
+                    (self._last_frame_at - self._started_at) * 1000
+                    if self._last_frame_at is not None
+                    else None
+                )
+                return first_frame_at_ms, last_frame_at_ms
+
+        def wait_for_cleanup(self, timeout: float = 2.0) -> bool:
+            return self._cleanup_done.wait(timeout)
+
+        def write_wav(self, audio_path: Path) -> None:
+            pcm_bytes = self.snapshot_pcm_bytes()
+            channels = _infer_pcm_channels(self.snapshot_pcm_frame_sizes())
+
+            with wave.open(str(audio_path), "wb") as wav_file:
+                wav_file.setnchannels(channels)
+                wav_file.setsampwidth(DISCORD_PCM_SAMPLE_WIDTH)
+                wav_file.setframerate(DISCORD_PCM_SAMPLE_RATE)
+                wav_file.writeframes(pcm_bytes)
+
+    return VoiceCaptureSink()
+
+
+async def capture_voice_audio(
+    interaction: discord.Interaction,
+    seconds: int,
+    *,
+    file_prefix: str = "capture",
+    output_wav: bool = False,
+) -> VoiceCaptureResult:
+    try:
+        from discord.ext import voice_recv
+    except ImportError as error:
+        raise VoiceCommandUserError(
+            f"{file_prefix} potrebuje discord-ext-voice-recv. Spust python -m pip install -r requirements.txt."
+        ) from error
+
+    sink = _create_voice_capture_sink(voice_recv)
+    voice_client = None
+    capture_started_at: float | None = None
+    capture_actual_seconds = 0.0
+    sink_cleanup_done = False
+
+    def current_capture_actual_seconds() -> float:
+        if capture_actual_seconds:
+            return capture_actual_seconds
+        if capture_started_at is None:
+            return 0.0
+        return time.perf_counter() - capture_started_at
+
+    try:
+        _log_capture_state(
+            interaction,
+            file_prefix=file_prefix,
+            state="capture_started",
+            seconds=seconds,
+        )
+        voice_client = await _connect_or_move_to_user_voice_recv(interaction)
+        capture_started_at = time.perf_counter()
+        sink.mark_started()
+        voice_client.listen(sink)
+        _log_capture_state(
+            interaction,
+            file_prefix=file_prefix,
+            state="sink_listen_started",
+            seconds=seconds,
+            packet_count=sink.snapshot_packet_count(),
+            pcm_frame_count=sink.snapshot_pcm_frame_count(),
+        )
+        _log_capture_state(
+            interaction,
+            file_prefix=file_prefix,
+            state="sleep_started",
+            seconds=seconds,
+            packet_count=sink.snapshot_packet_count(),
+            pcm_frame_count=sink.snapshot_pcm_frame_count(),
+        )
+        await asyncio.sleep(seconds)
+        capture_actual_seconds = current_capture_actual_seconds()
+        _log_capture_state(
+            interaction,
+            file_prefix=file_prefix,
+            state="sleep_finished",
+            seconds=seconds,
+            packet_count=sink.snapshot_packet_count(),
+            pcm_frame_count=sink.snapshot_pcm_frame_count(),
+            capture_actual_seconds=capture_actual_seconds,
+        )
+    finally:
+        if voice_client is not None and hasattr(voice_client, "is_listening"):
+            try:
+                if voice_client.is_listening():
+                    voice_client.stop_listening()
+                _log_capture_state(
+                    interaction,
+                    file_prefix=file_prefix,
+                    state="stop_listening_called",
+                    seconds=seconds,
+                    packet_count=sink.snapshot_packet_count(),
+                    pcm_frame_count=sink.snapshot_pcm_frame_count(),
+                    capture_actual_seconds=current_capture_actual_seconds(),
+                )
+            except Exception:
+                logger.warning("%s stop_listening failed", file_prefix)
+            sink_cleanup_done = await asyncio.to_thread(sink.wait_for_cleanup, 2.0)
+            _log_capture_state(
+                interaction,
+                file_prefix=file_prefix,
+                state="sink_cleanup_done",
+                seconds=seconds,
+                packet_count=sink.snapshot_packet_count(),
+                pcm_frame_count=sink.snapshot_pcm_frame_count(),
+                capture_actual_seconds=current_capture_actual_seconds(),
+            )
+
+    packet_count = sink.snapshot_packet_count()
+    pcm_frame_count = sink.snapshot_pcm_frame_count()
+    opus_frame_count = sink.snapshot_opus_frame_count()
+    received_audio = sink.received_audio
+    pcm_bytes = sink.snapshot_pcm_bytes()
+    pcm_frame_sizes = sink.snapshot_pcm_frame_sizes()
+    opus_frame_sizes = sink.snapshot_opus_frame_sizes()
+    has_pcm_attr, has_opus_attr, voice_data_type, voice_data_safe_attrs = (
+        sink.snapshot_voice_data_metadata()
+    )
+    first_frame_at_ms, last_frame_at_ms = sink.snapshot_frame_timing_ms()
+    pcm_bytes_total = len(pcm_bytes)
+    opus_bytes_total = sum(opus_frame_sizes)
+    first_pcm_frame_byte_lengths = pcm_frame_sizes[:5]
+    first_opus_frame_byte_lengths = opus_frame_sizes[:5]
+    first_frame_byte_lengths = (
+        first_pcm_frame_byte_lengths
+        if first_pcm_frame_byte_lengths
+        else first_opus_frame_byte_lengths
+    )
+    min_frame_bytes = min(pcm_frame_sizes) if pcm_frame_sizes else None
+    max_frame_bytes = max(pcm_frame_sizes) if pcm_frame_sizes else None
+    avg_frame_bytes = (
+        sum(pcm_frame_sizes) / len(pcm_frame_sizes)
+        if pcm_frame_sizes
+        else None
+    )
+    base_result = {
+        "packet_count": packet_count,
+        "pcm_frame_count": pcm_frame_count,
+        "opus_frame_count": opus_frame_count,
+        "received_audio": received_audio,
+        "pcm_bytes": pcm_bytes,
+        "pcm_bytes_total": pcm_bytes_total,
+        "opus_bytes_total": opus_bytes_total,
+        "first_frame_byte_lengths": first_frame_byte_lengths,
+        "first_pcm_frame_byte_lengths": first_pcm_frame_byte_lengths,
+        "first_opus_frame_byte_lengths": first_opus_frame_byte_lengths,
+        "wants_opus": sink.wants_opus(),
+        "has_pcm_attr": has_pcm_attr,
+        "has_opus_attr": has_opus_attr,
+        "voice_data_type": voice_data_type,
+        "voice_data_safe_attrs": voice_data_safe_attrs,
+        "min_frame_bytes": min_frame_bytes,
+        "max_frame_bytes": max_frame_bytes,
+        "avg_frame_bytes": avg_frame_bytes,
+        "capture_requested_seconds": seconds,
+        "capture_actual_seconds": current_capture_actual_seconds(),
+        "first_frame_at_ms": first_frame_at_ms,
+        "last_frame_at_ms": last_frame_at_ms,
+        "sink_cleanup_done": sink_cleanup_done,
+    }
+    if not received_audio:
+        return VoiceCaptureResult(
+            audio_path=None,
+            **base_result,
+            output_file_size_bytes=0,
+            duration_seconds=None,
+            sample_rate=None,
+            channels=None,
+        )
+
+    if not output_wav:
+        return VoiceCaptureResult(
+            audio_path=None,
+            **base_result,
+            output_file_size_bytes=0,
+            duration_seconds=None,
+            sample_rate=None,
+            channels=None,
+        )
+
+    if pcm_frame_count <= 0:
+        return VoiceCaptureResult(
+            audio_path=None,
+            **base_result,
+            output_file_size_bytes=0,
+            duration_seconds=None,
+            sample_rate=None,
+            channels=None,
+        )
+
+    VOICE_RUNTIME_DIR.mkdir(parents=True, exist_ok=True)
+    audio_file = tempfile.NamedTemporaryFile(
+        suffix=".wav",
+        prefix=f"panam_{file_prefix}_",
+        dir=VOICE_RUNTIME_DIR,
+        delete=False,
+    )
+    audio_path = Path(audio_file.name)
+    audio_file.close()
+    sink.write_wav(audio_path)
+    duration, sample_rate, channels = _get_wav_metadata(audio_path)
+
+    return VoiceCaptureResult(
+        audio_path=audio_path,
+        **base_result,
+        output_file_size_bytes=audio_path.stat().st_size if audio_path.exists() else 0,
+        duration_seconds=duration,
+        sample_rate=sample_rate,
+        channels=channels,
+    )
 
 
 def _powershell_executable() -> str:
@@ -746,57 +1279,18 @@ async def handle_listen_test_command(
     await interaction.response.defer(ephemeral=True, thinking=True)
 
     try:
-        from discord.ext import voice_recv
-    except ImportError:
-        log_listen_test_status(
-            "error",
+        capture = await capture_voice_audio(
             interaction,
-            seconds=seconds,
-            received_audio=False,
+            seconds,
+            file_prefix="listen_test",
+            output_wav=False,
         )
-        await interaction.followup.send(
-            "listen_test potrebuje discord-ext-voice-recv. Spust python -m pip install -r requirements.txt.",
-            ephemeral=True,
-        )
-        return
-
-    class PacketCountingSink(voice_recv.AudioSink):
-        def __init__(self) -> None:
-            super().__init__()
-            self.packet_count = 0
-            self._lock = threading.Lock()
-
-        def wants_opus(self) -> bool:
-            return True
-
-        def write(self, user, data) -> None:
-            with self._lock:
-                self.packet_count += 1
-
-        def cleanup(self) -> None:
-            pass
-
-        @property
-        def received_audio(self) -> bool:
-            with self._lock:
-                return self.packet_count > 0
-
-        def snapshot_packet_count(self) -> int:
-            with self._lock:
-                return self.packet_count
-
-    sink = PacketCountingSink()
-
-    try:
-        voice_client = await _connect_or_move_to_user_voice_recv(interaction)
-        voice_client.listen(sink)
-        await asyncio.sleep(seconds)
     except VoiceCommandUserError as error:
         log_listen_test_status(
             "error",
             interaction,
             seconds=seconds,
-            received_audio=sink.received_audio,
+            received_audio=False,
         )
         await interaction.followup.send(str(error), ephemeral=True)
         return
@@ -805,7 +1299,7 @@ async def handle_listen_test_command(
             "error",
             interaction,
             seconds=seconds,
-            received_audio=sink.received_audio,
+            received_audio=False,
         )
         logger.exception("listen_test failed")
         await interaction.followup.send(
@@ -813,30 +1307,311 @@ async def handle_listen_test_command(
             ephemeral=True,
         )
         return
-    finally:
-        if "voice_client" in locals() and hasattr(voice_client, "is_listening"):
-            try:
-                if voice_client.is_listening():
-                    voice_client.stop_listening()
-            except Exception:
-                logger.warning("listen_test stop_listening failed")
 
-    received_audio = sink.received_audio
-    packet_count = sink.snapshot_packet_count()
     log_listen_test_status(
         "success",
         interaction,
         seconds=seconds,
-        received_audio=received_audio,
+        received_audio=capture.received_audio,
+        packet_count=capture.packet_count,
+        output_file_size_bytes=capture.output_file_size_bytes,
+        duration_seconds=capture.duration_seconds,
     )
     await interaction.followup.send(
         (
             "listen_test dokoncen. "
-            f"Prijate audio: {'ano' if received_audio else 'ne'}. "
-            f"Packety: {packet_count}."
+            f"Prijate audio: {'ano' if capture.received_audio else 'ne'}. "
+            f"Packety: {capture.packet_count}."
         ),
         ephemeral=True,
     )
+
+
+async def handle_listen_transcribe_command(
+    interaction: discord.Interaction,
+    seconds: int = 5,
+) -> None:
+    try:
+        seconds = int(seconds)
+    except (TypeError, ValueError):
+        seconds = 5
+    seconds = max(
+        LISTEN_TRANSCRIBE_MIN_SECONDS,
+        min(LISTEN_TRANSCRIBE_MAX_SECONDS, seconds),
+    )
+
+    stt_settings = get_stt_settings()
+    provider = stt_settings["provider"]
+    model_id = stt_settings["elevenlabs_stt_model_id"]
+
+    def log_status(
+        status: str,
+        *,
+        received_audio: bool,
+        packet_count: int = 0,
+        transcript_length: int | None = None,
+    ) -> None:
+        log_listen_transcribe_status(
+            status,
+            interaction,
+            seconds=seconds,
+            received_audio=received_audio,
+            packet_count=packet_count,
+            transcript_length=transcript_length,
+            provider=provider,
+            model_id=model_id,
+        )
+
+    log_status("started", received_audio=False)
+
+    voice_client = _get_voice_client(interaction)
+    if voice_client is not None and voice_client.is_connected() and voice_client.is_playing():
+        log_status("error", received_audio=False)
+        await interaction.response.send_message(
+            "Nejdriv nech Panam domluvit. listen_transcribe se nespusti, kdyz bot prehrava audio.",
+            ephemeral=True,
+        )
+        return
+
+    await interaction.response.defer(ephemeral=True, thinking=True)
+
+    try:
+        capture = await capture_voice_audio(
+            interaction,
+            seconds,
+            file_prefix="stt",
+            output_wav=True,
+        )
+    except VoiceCommandUserError as error:
+        log_status("error", received_audio=False)
+        await interaction.followup.send(str(error), ephemeral=True)
+        return
+    except Exception:
+        log_status("error", received_audio=False)
+        logger.exception("listen_transcribe receive failed")
+        await interaction.followup.send(
+            "Nepodarilo se dokoncit listen_transcribe.",
+            ephemeral=True,
+        )
+        return
+
+    if not capture.received_audio or capture.audio_path is None:
+        log_status(
+            "success",
+            received_audio=False,
+            packet_count=capture.packet_count,
+            transcript_length=0,
+        )
+        await interaction.followup.send(
+            "Nic jsem neslysela. Zkus /listen_transcribe znovu a promluv behem testu.",
+            ephemeral=True,
+        )
+        return
+
+    try:
+        transcript, stt_settings = await asyncio.to_thread(
+            transcribe_audio_file,
+            capture.audio_path,
+        )
+        provider = stt_settings["provider"]
+        model_id = stt_settings["elevenlabs_stt_model_id"]
+        transcript_length = len(transcript)
+    except SttUserError as error:
+        log_status(
+            "error",
+            received_audio=True,
+            packet_count=capture.packet_count,
+            transcript_length=0,
+        )
+        await interaction.followup.send(str(error), ephemeral=True)
+        return
+    except Exception:
+        log_status(
+            "error",
+            received_audio=True,
+            packet_count=capture.packet_count,
+            transcript_length=0,
+        )
+        logger.exception("listen_transcribe stt failed")
+        await interaction.followup.send(
+            "Nepodarilo se prepsat audio.",
+            ephemeral=True,
+        )
+        return
+    finally:
+        if capture.audio_path is not None:
+            _cleanup_audio_file(capture.audio_path)
+
+    log_status(
+        "success",
+        received_audio=True,
+        packet_count=capture.packet_count,
+        transcript_length=transcript_length,
+    )
+    if not transcript:
+        await interaction.followup.send(
+            "Audio jsem slysela, ale nepodarilo se ho prepsat.",
+            ephemeral=True,
+        )
+        return
+
+    await interaction.followup.send(
+        f"Přepis:\n{transcript}",
+    )
+
+
+async def handle_listen_transcribe_debug_command(
+    interaction: discord.Interaction,
+    seconds: int = 5,
+) -> None:
+    try:
+        seconds = int(seconds)
+    except (TypeError, ValueError):
+        seconds = 5
+    seconds = max(
+        LISTEN_TRANSCRIBE_MIN_SECONDS,
+        min(LISTEN_TRANSCRIBE_MAX_SECONDS, seconds),
+    )
+
+    def log_status(
+        status: str,
+        *,
+        received_audio: bool,
+        packet_count: int = 0,
+        pcm_frame_count: int = 0,
+        pcm_bytes_total: int = 0,
+        min_frame_bytes: int | None = None,
+        max_frame_bytes: int | None = None,
+        avg_frame_bytes: float | None = None,
+        capture_requested_seconds: int | None = None,
+        capture_actual_seconds: float | None = None,
+        first_frame_at_ms: float | None = None,
+        last_frame_at_ms: float | None = None,
+        output_file_size_bytes: int = 0,
+        duration_seconds: float | None = None,
+    ) -> None:
+        log_listen_transcribe_debug_status(
+            status,
+            interaction,
+            seconds=seconds,
+            received_audio=received_audio,
+            packet_count=packet_count,
+            pcm_frame_count=pcm_frame_count,
+            pcm_bytes_total=pcm_bytes_total,
+            min_frame_bytes=min_frame_bytes,
+            max_frame_bytes=max_frame_bytes,
+            avg_frame_bytes=avg_frame_bytes,
+            capture_requested_seconds=capture_requested_seconds,
+            capture_actual_seconds=capture_actual_seconds,
+            first_frame_at_ms=first_frame_at_ms,
+            last_frame_at_ms=last_frame_at_ms,
+            output_file_size_bytes=output_file_size_bytes,
+            duration_seconds=duration_seconds,
+        )
+
+    log_status("started", received_audio=False)
+
+    voice_client = _get_voice_client(interaction)
+    if voice_client is not None and voice_client.is_connected() and voice_client.is_playing():
+        log_status("error", received_audio=False)
+        await interaction.response.send_message(
+            "Nejdriv nech Panam domluvit. listen_transcribe_debug se nespusti, kdyz bot prehrava audio.",
+            ephemeral=True,
+        )
+        return
+
+    await interaction.response.defer(ephemeral=True, thinking=True)
+
+    try:
+        capture = await capture_voice_audio(
+            interaction,
+            seconds,
+            file_prefix="stt_debug",
+            output_wav=True,
+        )
+    except VoiceCommandUserError as error:
+        log_status("error", received_audio=False)
+        await interaction.followup.send(str(error), ephemeral=True)
+        return
+    except Exception:
+        log_status("error", received_audio=False)
+        logger.exception("listen_transcribe_debug receive failed")
+        await interaction.followup.send(
+            "Nepodarilo se dokoncit listen_transcribe_debug.",
+            ephemeral=True,
+        )
+        return
+
+    log_status(
+        "success",
+        received_audio=capture.received_audio,
+        packet_count=capture.packet_count,
+        pcm_frame_count=capture.pcm_frame_count,
+        pcm_bytes_total=capture.pcm_bytes_total,
+        min_frame_bytes=capture.min_frame_bytes,
+        max_frame_bytes=capture.max_frame_bytes,
+        avg_frame_bytes=capture.avg_frame_bytes,
+        capture_requested_seconds=capture.capture_requested_seconds,
+        capture_actual_seconds=capture.capture_actual_seconds,
+        first_frame_at_ms=capture.first_frame_at_ms,
+        last_frame_at_ms=capture.last_frame_at_ms,
+        output_file_size_bytes=capture.output_file_size_bytes,
+        duration_seconds=capture.duration_seconds,
+    )
+    if capture.pcm_frame_count > 0:
+        diagnosis = "data.pcm prislo, WAV je vytvoren z PCM."
+    elif capture.opus_frame_count > 0:
+        diagnosis = "data.pcm nechodi; chodi Opus/raw packet data, WAV z PCM nelze vytvorit."
+    else:
+        diagnosis = "neprisly PCM ani Opus framy."
+
+    metadata_text = (
+        "listen_transcribe_debug dokoncen.\n"
+        f"packet_count={capture.packet_count}\n"
+        f"pcm_frame_count={capture.pcm_frame_count}\n"
+        f"opus_frame_count={capture.opus_frame_count}\n"
+        f"received_audio={str(capture.received_audio).lower()}\n"
+        f"wants_opus={str(capture.wants_opus).lower()}\n"
+        f"has_pcm_attr={str(capture.has_pcm_attr).lower()}\n"
+        f"has_opus_attr={str(capture.has_opus_attr).lower()}\n"
+        f"voice_data_type={capture.voice_data_type}\n"
+        f"voice_data_safe_attrs={capture.voice_data_safe_attrs}\n"
+        f"first_5_frame_byte_lengths={capture.first_frame_byte_lengths}\n"
+        f"first_5_pcm_frame_byte_lengths={capture.first_pcm_frame_byte_lengths}\n"
+        f"first_5_opus_frame_byte_lengths={capture.first_opus_frame_byte_lengths}\n"
+        f"opus_bytes_total={capture.opus_bytes_total}\n"
+        f"capture_requested_seconds={capture.capture_requested_seconds}\n"
+        f"capture_actual_seconds={capture.capture_actual_seconds}\n"
+        f"first_frame_at_ms={capture.first_frame_at_ms}\n"
+        f"last_frame_at_ms={capture.last_frame_at_ms}\n"
+        f"sink_cleanup_done={str(capture.sink_cleanup_done).lower()}\n"
+        f"pcm_bytes_total={capture.pcm_bytes_total}\n"
+        f"min_frame_bytes={capture.min_frame_bytes}\n"
+        f"max_frame_bytes={capture.max_frame_bytes}\n"
+        f"avg_frame_bytes={capture.avg_frame_bytes}\n"
+        f"output_file_size_bytes={capture.output_file_size_bytes}\n"
+        f"duration_seconds={capture.duration_seconds}\n"
+        f"sample_rate={capture.sample_rate}\n"
+        f"channels={capture.channels}\n"
+        f"diagnosis={diagnosis}"
+    )
+
+    try:
+        if capture.audio_path is None:
+            await interaction.followup.send(metadata_text, ephemeral=True)
+            return
+
+        await interaction.followup.send(
+            metadata_text,
+            file=discord.File(
+                str(capture.audio_path),
+                filename="panam_listen_transcribe_debug.wav",
+            ),
+            ephemeral=True,
+        )
+    finally:
+        if capture.audio_path is not None:
+            _cleanup_audio_file(capture.audio_path)
 
 
 async def handle_voice_say_command(interaction: discord.Interaction, text: str) -> None:

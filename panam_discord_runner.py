@@ -7,6 +7,7 @@ import discord
 from discord import app_commands
 from dotenv import load_dotenv
 
+from panam_stt import get_stt_settings
 from panam_discord_analyze_command import handle_analyze_command
 from panam_discord_basic_commands import (
     handle_help_command,
@@ -48,10 +49,13 @@ from panam_discord_message_router import handle_discord_message
 from panam_discord_read_file import handle_read_file_command
 from panam_discord_voice import (
     handle_listen_test_command,
+    handle_listen_transcribe_command,
+    handle_listen_transcribe_debug_command,
     handle_voice_join_command,
     handle_voice_leave_command,
     handle_voice_say_command,
     log_listen_test_status,
+    log_listen_transcribe_status,
 )
 
 
@@ -319,6 +323,55 @@ async def listen_test(
         return
 
     await handle_listen_test_command(interaction, int(seconds))
+
+
+@bot.tree.command(
+    name="listen_transcribe",
+    description="Nahraj kratke voice audio a vrat jen textovy prepis."
+)
+@app_commands.describe(seconds="Delka nahravky v sekundach, 1 az 10")
+async def listen_transcribe(
+    interaction: discord.Interaction,
+    seconds: app_commands.Range[int, 1, 10] = 5,
+) -> None:
+    if ALLOWED_CHANNEL_IDS and str(interaction.channel_id) not in ALLOWED_CHANNEL_IDS:
+        stt_settings = get_stt_settings()
+        log_listen_transcribe_status(
+            "error",
+            interaction,
+            seconds=int(seconds),
+            received_audio=False,
+            packet_count=0,
+            transcript_length=None,
+            provider=stt_settings["provider"],
+            model_id=stt_settings["elevenlabs_stt_model_id"],
+        )
+        await interaction.response.send_message(
+            "Tady nemám povolené odpovídat.",
+            ephemeral=True,
+        )
+        return
+
+    await handle_listen_transcribe_command(interaction, int(seconds))
+
+
+@bot.tree.command(
+    name="listen_transcribe_debug",
+    description="Nahraj kratke voice audio, vrat metadata a WAV attachment."
+)
+@app_commands.describe(seconds="Delka debug nahravky v sekundach, 1 az 10")
+async def listen_transcribe_debug(
+    interaction: discord.Interaction,
+    seconds: app_commands.Range[int, 1, 10] = 5,
+) -> None:
+    if ALLOWED_CHANNEL_IDS and str(interaction.channel_id) not in ALLOWED_CHANNEL_IDS:
+        await interaction.response.send_message(
+            "Tady nemám povolené odpovídat.",
+            ephemeral=True,
+        )
+        return
+
+    await handle_listen_transcribe_debug_command(interaction, int(seconds))
 
 
 @bot.tree.command(
