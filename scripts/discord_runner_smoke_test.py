@@ -21,6 +21,7 @@ def assert_no_bot_import() -> None:
 
 def assert_tts_config() -> None:
     requirements = (ROOT / "requirements.txt").read_text(encoding="utf-8")
+    assert "discord-ext-voice-recv" in requirements
     assert "edge-tts" in requirements
     assert "elevenlabs" in requirements
 
@@ -59,8 +60,9 @@ def main() -> None:
         "voice_say",
         "ask_voice",
         "panam_talk_voice",
+        "listen_test",
     }.issubset(command_names)
-    assert {"listen", "voice_watch"}.isdisjoint(command_names)
+    assert {"listen", "voice_watch", "voice_watch_on"}.isdisjoint(command_names)
     assert_tts_config()
 
     print("discord runner smoke test ok")

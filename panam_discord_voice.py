@@ -4,6 +4,7 @@ import os
 import shutil
 import subprocess
 import tempfile
+import threading
 from pathlib import Path
 
 import discord
@@ -12,6 +13,8 @@ import discord
 BASE_DIR = Path(__file__).resolve().parent
 VOICE_RUNTIME_DIR = BASE_DIR / "runtime" / "voice"
 MAX_TTS_TEXT_LENGTH = 500
+LISTEN_TEST_MIN_SECONDS = 1
+LISTEN_TEST_MAX_SECONDS = 10
 DEFAULT_TTS_PROVIDER = "edge"
 DEFAULT_TTS_VOICE = "cs-CZ-VlastaNeural"
 DEFAULT_TTS_RATE = "+0%"
@@ -59,6 +62,25 @@ def _log_voice_command(
         context["channel_id"],
         context["user_id"],
         f" {detail_text}" if detail_text else "",
+    )
+
+
+def log_listen_test_status(
+    status: str,
+    interaction: discord.Interaction,
+    *,
+    seconds: int,
+    received_audio: bool,
+) -> None:
+    context = _safe_voice_context(interaction)
+    logger.info(
+        "action=listen_test status=%s seconds=%s guild_id=%s channel_id=%s user_id=%s received_audio=%s",
+        status,
+        seconds,
+        context["guild_id"],
+        context["channel_id"],
+        context["user_id"],
+        str(received_audio).lower(),
     )
 
 
@@ -119,6 +141,54 @@ async def _connect_or_move_to_user_voice(
     )
     if not isinstance(connected_client, discord.VoiceClient):
         raise VoiceCommandUserError("Nepodařilo se vytvořit Discord voice client.")
+
+    return connected_client
+
+
+async def _connect_or_move_to_user_voice_recv(interaction: discord.Interaction):
+    try:
+        from discord.ext import voice_recv
+    except ImportError as error:
+        raise VoiceCommandUserError(
+            "listen_test potrebuje discord-ext-voice-recv. Spust python -m pip install -r requirements.txt."
+        ) from error
+
+    guild = interaction.guild
+    if guild is None:
+        raise VoiceCommandUserError("Voice command musi bezet na Discord serveru.")
+
+    target_channel = _get_voice_channel(interaction)
+    voice_client = _get_voice_client(interaction)
+    if voice_client is not None and voice_client.is_connected():
+        if voice_client.is_playing():
+            raise VoiceCommandUserError(
+                "Nejdriv nech Panam domluvit. listen_test se nespusti, kdyz bot prehrava audio."
+            )
+
+        if hasattr(voice_client, "is_listening") and voice_client.is_listening():
+            raise VoiceCommandUserError("listen_test uz prave bezi.")
+
+        if not isinstance(voice_client, voice_recv.VoiceRecvClient):
+            await voice_client.disconnect(force=False)
+            return await target_channel.connect(
+                cls=voice_recv.VoiceRecvClient,
+                timeout=10.0,
+                reconnect=True,
+                self_deaf=False,
+            )
+
+        if voice_client.channel != target_channel:
+            await voice_client.move_to(target_channel)
+        return voice_client
+
+    connected_client = await target_channel.connect(
+        cls=voice_recv.VoiceRecvClient,
+        timeout=10.0,
+        reconnect=True,
+        self_deaf=False,
+    )
+    if not isinstance(connected_client, voice_recv.VoiceRecvClient):
+        raise VoiceCommandUserError("Nepodarilo se vytvorit Discord voice receive client.")
 
     return connected_client
 
@@ -640,6 +710,133 @@ async def handle_voice_leave_command(interaction: discord.Interaction) -> None:
 
     _log_voice_command(command_name, "success", interaction)
     await interaction.response.send_message("Odpojila jsem se.", ephemeral=True)
+
+
+async def handle_listen_test_command(
+    interaction: discord.Interaction,
+    seconds: int = 5,
+) -> None:
+    try:
+        seconds = int(seconds)
+    except (TypeError, ValueError):
+        seconds = 5
+    seconds = max(LISTEN_TEST_MIN_SECONDS, min(LISTEN_TEST_MAX_SECONDS, seconds))
+
+    log_listen_test_status(
+        "started",
+        interaction,
+        seconds=seconds,
+        received_audio=False,
+    )
+
+    voice_client = _get_voice_client(interaction)
+    if voice_client is not None and voice_client.is_connected() and voice_client.is_playing():
+        log_listen_test_status(
+            "error",
+            interaction,
+            seconds=seconds,
+            received_audio=False,
+        )
+        await interaction.response.send_message(
+            "Nejdriv nech Panam domluvit. listen_test se nespusti, kdyz bot prehrava audio.",
+            ephemeral=True,
+        )
+        return
+
+    await interaction.response.defer(ephemeral=True, thinking=True)
+
+    try:
+        from discord.ext import voice_recv
+    except ImportError:
+        log_listen_test_status(
+            "error",
+            interaction,
+            seconds=seconds,
+            received_audio=False,
+        )
+        await interaction.followup.send(
+            "listen_test potrebuje discord-ext-voice-recv. Spust python -m pip install -r requirements.txt.",
+            ephemeral=True,
+        )
+        return
+
+    class PacketCountingSink(voice_recv.AudioSink):
+        def __init__(self) -> None:
+            super().__init__()
+            self.packet_count = 0
+            self._lock = threading.Lock()
+
+        def wants_opus(self) -> bool:
+            return True
+
+        def write(self, user, data) -> None:
+            with self._lock:
+                self.packet_count += 1
+
+        def cleanup(self) -> None:
+            pass
+
+        @property
+        def received_audio(self) -> bool:
+            with self._lock:
+                return self.packet_count > 0
+
+        def snapshot_packet_count(self) -> int:
+            with self._lock:
+                return self.packet_count
+
+    sink = PacketCountingSink()
+
+    try:
+        voice_client = await _connect_or_move_to_user_voice_recv(interaction)
+        voice_client.listen(sink)
+        await asyncio.sleep(seconds)
+    except VoiceCommandUserError as error:
+        log_listen_test_status(
+            "error",
+            interaction,
+            seconds=seconds,
+            received_audio=sink.received_audio,
+        )
+        await interaction.followup.send(str(error), ephemeral=True)
+        return
+    except Exception:
+        log_listen_test_status(
+            "error",
+            interaction,
+            seconds=seconds,
+            received_audio=sink.received_audio,
+        )
+        logger.exception("listen_test failed")
+        await interaction.followup.send(
+            "Nepodarilo se dokoncit listen_test.",
+            ephemeral=True,
+        )
+        return
+    finally:
+        if "voice_client" in locals() and hasattr(voice_client, "is_listening"):
+            try:
+                if voice_client.is_listening():
+                    voice_client.stop_listening()
+            except Exception:
+                logger.warning("listen_test stop_listening failed")
+
+    received_audio = sink.received_audio
+    packet_count = sink.snapshot_packet_count()
+    log_listen_test_status(
+        "success",
+        interaction,
+        seconds=seconds,
+        received_audio=received_audio,
+    )
+    await interaction.followup.send(
+        (
+            "listen_test dokoncen. "
+            f"Prijate audio: {'ano' if received_audio else 'ne'}. "
+            f"Packety: {packet_count}."
+        ),
+        ephemeral=True,
+    )
 
 
 async def handle_voice_say_command(interaction: discord.Interaction, text: str) -> None:
