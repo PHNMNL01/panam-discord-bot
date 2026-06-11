@@ -247,6 +247,7 @@ Zakladni slash commandy:
 - `/voice_say`
 - `/voice_leave`
 - `/ask_voice`
+- `/panam_talk_voice`
 
 ### Panam Voice Speak v1
 
@@ -270,17 +271,19 @@ V Discordu:
 2. Spust `/voice_join`.
 3. Spust `/voice_say Ahoj, já jsem Panam. Tohle je test ElevenLabs hlasu.`.
 4. Spust `/ask_voice Jak se jmenuješ a co umíš?`.
-5. Over, ze odpoved prijde textem do Discord chatu i hlasem ve voice.
-6. Spust `/voice_leave`.
+5. Spust `/panam_talk_voice Řekni mi, co si myslíš o tom, že už máš hlas.`.
+6. Over, ze odpovedi prijdou textem do Discord chatu i hlasem ve voice.
+7. Spust `/voice_leave`.
 
 Definition of Done:
 
 - bot se pripoji do tveho aktualniho voice kanalu
 - `/voice_say Ahoj, já jsem Panam. Tohle je test ElevenLabs hlasu.` vytvori ElevenLabs MP3 a prehraje ho ve voice
 - `/ask_voice Jak se jmenuješ a co umíš?` odpovi textem i hlasem pres ElevenLabs
+- `/panam_talk_voice Řekni mi, co si myslíš o tom, že už máš hlas.` odpovi textem i hlasem v existujicim talk rezimu
 - `/voice_leave` bota odpoji
 - existujici textove prikazy porad funguji
-- `/voice_join`, `/voice_say` a `/voice_leave` porad funguji
+- `/voice_join`, `/voice_say`, `/ask_voice` a `/voice_leave` porad funguji
 - zadne poslouchani nebylo pridane
 - v logu nejsou tokeny, raw TTS texty ani citlivy obsah
 

@@ -53,7 +53,13 @@ def main() -> None:
         command.name
         for command in panam_discord_runner.bot.tree.get_commands()
     }
-    assert {"voice_join", "voice_leave", "voice_say", "ask_voice"}.issubset(command_names)
+    assert {
+        "voice_join",
+        "voice_leave",
+        "voice_say",
+        "ask_voice",
+        "panam_talk_voice",
+    }.issubset(command_names)
     assert {"listen", "voice_watch"}.isdisjoint(command_names)
     assert_tts_config()
 

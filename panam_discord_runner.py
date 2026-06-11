@@ -28,11 +28,13 @@ from panam_discord_core_commands import (
     handle_note_list_command,
     handle_note_search_command,
     handle_panam_talk_command,
+    handle_panam_talk_voice_command,
     handle_summary_command,
     handle_todo_add_command,
     handle_todo_done_command,
     handle_todo_list_command,
     log_ask_voice_status,
+    log_panam_talk_voice_status,
 )
 from panam_discord_file_commands import (
     handle_extract_data_command,
@@ -700,6 +702,27 @@ async def panam_talk(interaction: discord.Interaction, message: str) -> None:
         return
 
     await handle_panam_talk_command(OPENAI_MODEL, interaction, message)
+
+
+@bot.tree.command(
+    name="panam_talk_voice",
+    description="Promluv si s Panam v talk rezimu a precti odpoved ve voice."
+)
+@app_commands.describe(message="Zprava pro Panam talk voice rezim")
+async def panam_talk_voice(interaction: discord.Interaction, message: str) -> None:
+    if ALLOWED_CHANNEL_IDS and str(interaction.channel_id) not in ALLOWED_CHANNEL_IDS:
+        log_panam_talk_voice_status(
+            "denied",
+            interaction,
+            message_length=len(message or ""),
+        )
+        await interaction.response.send_message(
+            "Tady nemám povolené odpovídat.",
+            ephemeral=True,
+        )
+        return
+
+    await handle_panam_talk_voice_command(OPENAI_MODEL, interaction, message)
 
 
 def run_discord_bot() -> None:
