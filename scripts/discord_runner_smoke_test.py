@@ -39,6 +39,9 @@ def assert_tts_config() -> None:
         "ELEVENLABS_SIMILARITY_BOOST=0.75",
         "ELEVENLABS_STYLE=0.25",
         "ELEVENLABS_USE_SPEAKER_BOOST=true",
+        "PANAM_STT_PROVIDER=elevenlabs",
+        "ELEVENLABS_STT_MODEL_ID=scribe_v2",
+        "ELEVENLABS_STT_LANGUAGE_CODE=ces",
     ):
         assert key in env_example
 
@@ -61,6 +64,8 @@ def main() -> None:
         "ask_voice",
         "panam_talk_voice",
         "listen_test",
+        "listen_transcribe",
+        "listen_transcribe_debug",
     }.issubset(command_names)
     assert {"listen", "voice_watch", "voice_watch_on"}.isdisjoint(command_names)
     assert_tts_config()

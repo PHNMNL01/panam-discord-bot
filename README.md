@@ -67,6 +67,9 @@ ELEVENLABS_STABILITY=0.45
 ELEVENLABS_SIMILARITY_BOOST=0.75
 ELEVENLABS_STYLE=0.25
 ELEVENLABS_USE_SPEAKER_BOOST=true
+PANAM_STT_PROVIDER=elevenlabs
+ELEVENLABS_STT_MODEL_ID=scribe_v2
+ELEVENLABS_STT_LANGUAGE_CODE=ces
 PANAM_DOCK_ADMIN_TOKEN=
 PANAM_DOCK_PORT=5051
 PANAM_WEB_HOST=127.0.0.1
@@ -95,6 +98,9 @@ Promenne:
 - `ELEVENLABS_SIMILARITY_BOOST` - ElevenLabs voice setting, default `0.75`.
 - `ELEVENLABS_STYLE` - ElevenLabs voice setting, default `0.25`.
 - `ELEVENLABS_USE_SPEAKER_BOOST` - ElevenLabs voice setting, default `true`.
+- `PANAM_STT_PROVIDER` - STT backend pro kratky explicitni prepis, default `elevenlabs`.
+- `ELEVENLABS_STT_MODEL_ID` - ElevenLabs STT model, default `scribe_v2`.
+- `ELEVENLABS_STT_LANGUAGE_CODE` - jazyk STT vstupu, default `ces`.
 - `PANAM_DOCK_ADMIN_TOKEN` - volitelny token pro Deck POST akce.
 - `PANAM_DOCK_PORT` - port Decku, default `5051`.
 - `PANAM_WEB_HOST` - host Panam Webu, default `127.0.0.1`.
@@ -249,12 +255,16 @@ Zakladni slash commandy:
 - `/ask_voice`
 - `/panam_talk_voice`
 - `/listen_test`
+- `/listen_transcribe`
+- `/listen_transcribe_debug`
 
 ### Panam Voice Speak v1
 
-Voice v1 je pouze Discord output kanal. Panam se umi pripojit do voice kanalu,
-prehrat kratky TTS text a odpojit se. Nepridava nahravani, STT, wake phrase ani
-listen command.
+Voice v1 primarne slouzi jako Discord output kanal. Panam se umi pripojit do
+voice kanalu, prehrat kratky TTS text a odpojit se. Navic existuji explicitni
+kratke technicke testy `/listen_test`, `/listen_transcribe`,
+`/listen_transcribe_debug`. Nepridavaji trvaly poslech, wake phrase, `/listen`
+ani routovani hlasoveho vstupu do Panam routeru.
 
 Manual smoke test:
 
@@ -285,7 +295,7 @@ Definition of Done:
 - `/voice_leave` bota odpoji
 - existujici textove prikazy porad funguji
 - `/voice_join`, `/voice_say`, `/ask_voice` a `/voice_leave` porad funguji
-- zadny trvaly poslech, STT ani wake phrase nebyly pridane
+- zadny trvaly poslech, wake phrase ani routovani hlasu do Panam routeru nebyly pridane
 - v logu nejsou tokeny, raw TTS texty ani citlivy obsah
 
 Manual listen_test smoke test:
@@ -299,6 +309,29 @@ Manual listen_test smoke test:
 
 `/listen_test` je pouze kratky explicitni technicky test prijmu audia.
 Nepridava STT, wake phrase, trvaly poslech, `/listen` ani voice watch.
+
+Manual listen_transcribe smoke test:
+
+```text
+1. Pripoj se do voice kanalu.
+2. Spust `/listen_transcribe 5`.
+3. Rekni kratce: Ahoj Panam, toto je test.
+4. Over, ze Discord vrati textovy prepis.
+```
+
+`/listen_transcribe` pouze explicitne nahraje kratke audio a vrati textovy prepis.
+Prepis neposila do Panam routeru, nevola AI odpoved a neprehrava hlasem.
+
+Manual listen_transcribe_debug smoke test:
+
+```text
+1. Pripoj se do voice kanalu.
+2. Spust `/listen_transcribe_debug 5`.
+3. Behem peti sekund rekni kratkou vetu.
+4. Stahni prilozeny WAV a nahraj ho rucne do ElevenLabs Playgroundu.
+5. Pokud Playground audio precte, hledej problem v API callu nebo parsingu odpovedi.
+6. Pokud Playground audio neprecte, hledej problem v Discord capture nebo WAV encodingu.
+```
 
 Natural zpravy funguji, kdyz je Panam oslovena, napr.:
 
