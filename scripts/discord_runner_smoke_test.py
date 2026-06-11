@@ -19,6 +19,20 @@ def assert_no_bot_import() -> None:
             assert node.module != "bot"
 
 
+def assert_tts_config() -> None:
+    requirements = (ROOT / "requirements.txt").read_text(encoding="utf-8")
+    assert "edge-tts" in requirements
+
+    env_example = (ROOT / ".env.example").read_text(encoding="utf-8")
+    for key in (
+        "PANAM_TTS_PROVIDER=edge",
+        "PANAM_TTS_VOICE=cs-CZ-VlastaNeural",
+        "PANAM_TTS_RATE=+0%",
+        "PANAM_TTS_VOLUME=+0%",
+    ):
+        assert key in env_example
+
+
 def main() -> None:
     import panam_discord_runner
 
@@ -31,6 +45,7 @@ def main() -> None:
         for command in panam_discord_runner.bot.tree.get_commands()
     }
     assert {"voice_join", "voice_leave", "voice_say", "ask_voice"}.issubset(command_names)
+    assert_tts_config()
 
     print("discord runner smoke test ok")
 

@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import os
 import shutil
 import subprocess
 import tempfile
@@ -11,6 +12,10 @@ import discord
 BASE_DIR = Path(__file__).resolve().parent
 VOICE_RUNTIME_DIR = BASE_DIR / "runtime" / "voice"
 MAX_TTS_TEXT_LENGTH = 500
+DEFAULT_TTS_PROVIDER = "edge"
+DEFAULT_TTS_VOICE = "cs-CZ-VlastaNeural"
+DEFAULT_TTS_RATE = "+0%"
+DEFAULT_TTS_VOLUME = "+0%"
 
 logger = logging.getLogger("panam")
 
@@ -112,6 +117,15 @@ def _powershell_string(value: Path) -> str:
     return "'" + str(value).replace("'", "''") + "'"
 
 
+def _get_tts_settings() -> dict[str, str]:
+    return {
+        "provider": (os.getenv("PANAM_TTS_PROVIDER") or DEFAULT_TTS_PROVIDER).strip().lower(),
+        "voice": (os.getenv("PANAM_TTS_VOICE") or DEFAULT_TTS_VOICE).strip(),
+        "rate": (os.getenv("PANAM_TTS_RATE") or DEFAULT_TTS_RATE).strip(),
+        "volume": (os.getenv("PANAM_TTS_VOLUME") or DEFAULT_TTS_VOLUME).strip(),
+    }
+
+
 def _create_tts_wav_file(text: str) -> Path:
     VOICE_RUNTIME_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -180,6 +194,60 @@ async def _create_tts_wav_file_async(text: str) -> Path:
     return await asyncio.to_thread(_create_tts_wav_file, text)
 
 
+async def _create_edge_tts_audio_file(text: str, settings: dict[str, str]) -> Path:
+    VOICE_RUNTIME_DIR.mkdir(parents=True, exist_ok=True)
+
+    audio_file = tempfile.NamedTemporaryFile(
+        suffix=".mp3",
+        prefix="panam_tts_",
+        dir=VOICE_RUNTIME_DIR,
+        delete=False,
+    )
+    audio_path = Path(audio_file.name)
+    audio_file.close()
+
+    try:
+        import edge_tts
+    except ImportError as error:
+        audio_path.unlink(missing_ok=True)
+        raise VoiceCommandUserError(
+            "edge-tts neni nainstalovane. Spust python -m pip install -r requirements.txt."
+        ) from error
+
+    try:
+        communicate = edge_tts.Communicate(
+            text,
+            voice=settings["voice"],
+            rate=settings["rate"],
+            volume=settings["volume"],
+        )
+        await communicate.save(str(audio_path))
+    except Exception as error:
+        audio_path.unlink(missing_ok=True)
+        raise VoiceCommandUserError(
+            "Nepodarilo se vytvorit edge TTS audio. Zkontroluj edge-tts, internet a nastaveni hlasu."
+        ) from error
+
+    if not audio_path.exists() or audio_path.stat().st_size <= 0:
+        audio_path.unlink(missing_ok=True)
+        raise VoiceCommandUserError("edge TTS vytvorilo prazdny audio soubor.")
+
+    return audio_path
+
+
+async def _create_tts_audio_file(text: str, settings: dict[str, str]) -> Path:
+    provider = settings["provider"]
+    if provider == "edge":
+        return await _create_edge_tts_audio_file(text, settings)
+
+    if provider in {"system", "windows", "system_speech"}:
+        return await _create_tts_wav_file_async(text)
+
+    raise VoiceCommandUserError(
+        "Neznamy TTS provider. Podporovane hodnoty jsou edge nebo system."
+    )
+
+
 def _cleanup_audio_file(audio_path: Path) -> None:
     try:
         audio_path.unlink(missing_ok=True)
@@ -207,29 +275,40 @@ async def play_tts_text(
 ) -> bool:
     clean_text = str(text or "").strip()
     text_length = original_text_length if original_text_length is not None else len(clean_text)
+    settings = _get_tts_settings()
+    provider = settings["provider"]
+    voice = settings["voice"]
 
     try:
         voice_client = await _connect_or_move_to_user_channel(interaction)
-        audio_path = await _create_tts_wav_file_async(clean_text)
+        audio_path = await _create_tts_audio_file(clean_text, settings)
     except VoiceCommandUserError as error:
         _log_voice_command(
             command_name,
             "error",
             interaction,
+            provider=provider,
+            voice=voice,
             text_length=text_length,
-            voice_text_length=len(clean_text),
         )
         await interaction.followup.send(str(error), ephemeral=True)
         return False
-    except Exception:
+    except Exception as error:
         _log_voice_command(
             command_name,
             "error",
             interaction,
+            provider=provider,
+            voice=voice,
             text_length=text_length,
-            voice_text_length=len(clean_text),
         )
-        logger.exception("%s setup failed", command_name)
+        logger.warning(
+            "%s setup failed provider=%s voice=%s error_type=%s",
+            command_name,
+            provider,
+            voice,
+            type(error).__name__,
+        )
         await interaction.followup.send(
             "Nepodarilo se pripravit voice audio.",
             ephemeral=True,
@@ -255,8 +334,9 @@ async def play_tts_text(
             command_name,
             "error",
             interaction,
+            provider=provider,
+            voice=voice,
             text_length=text_length,
-            voice_text_length=len(clean_text),
         )
         logger.exception("%s playback start failed", command_name)
         await interaction.followup.send(
@@ -269,8 +349,9 @@ async def play_tts_text(
         command_name,
         "success",
         interaction,
+        provider=provider,
+        voice=voice,
         text_length=text_length,
-        voice_text_length=len(clean_text),
     )
     return True
 
@@ -331,6 +412,64 @@ async def handle_voice_leave_command(interaction: discord.Interaction) -> None:
 
 
 async def handle_voice_say_command(interaction: discord.Interaction, text: str) -> None:
+    command_name = "voice_say"
+    text_length = len(text or "")
+    settings = _get_tts_settings()
+    _log_voice_command(
+        command_name,
+        "started",
+        interaction,
+        provider=settings["provider"],
+        voice=settings["voice"],
+        text_length=text_length,
+    )
+
+    clean_text = str(text or "").strip()
+    if not clean_text:
+        _log_voice_command(
+            command_name,
+            "error",
+            interaction,
+            provider=settings["provider"],
+            voice=settings["voice"],
+            text_length=0,
+        )
+        await interaction.response.send_message(
+            "Text pro voice_say nesmi byt prazdny.",
+            ephemeral=True,
+        )
+        return
+
+    if len(clean_text) > MAX_TTS_TEXT_LENGTH:
+        _log_voice_command(
+            command_name,
+            "error",
+            interaction,
+            provider=settings["provider"],
+            voice=settings["voice"],
+            text_length=text_length,
+        )
+        await interaction.response.send_message(
+            f"Text je moc dlouhy. Limit pro speak v1 je {MAX_TTS_TEXT_LENGTH} znaku.",
+            ephemeral=True,
+        )
+        return
+
+    await interaction.response.defer(ephemeral=True, thinking=True)
+
+    played = await play_tts_text(
+        interaction,
+        clean_text,
+        command_name,
+        original_text_length=text_length,
+    )
+    if not played:
+        return
+
+    await interaction.followup.send("Prehravam ve voice kanalu.", ephemeral=True)
+
+
+async def _handle_voice_say_command_legacy(interaction: discord.Interaction, text: str) -> None:
     command_name = "voice_say"
     text_length = len(text or "")
     _log_voice_command(command_name, "started", interaction, text_length=text_length)
