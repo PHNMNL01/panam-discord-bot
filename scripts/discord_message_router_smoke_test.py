@@ -25,6 +25,8 @@ def main() -> None:
     assert_no_bot_import()
     assert hasattr(panam_discord_message_router, "handle_discord_message")
     assert hasattr(panam_discord_message_router, "handle_basic_panam_message")
+    assert hasattr(panam_discord_message_router, "handle_natural_voice_reply")
+    assert hasattr(panam_discord_message_router, "log_natural_voice_reply_status")
 
     print("discord message router smoke test passed")
 

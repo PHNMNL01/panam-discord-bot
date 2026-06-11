@@ -63,7 +63,11 @@ def _log_voice_command(
 
 
 def _get_voice_channel(interaction: discord.Interaction) -> discord.abc.Connectable:
-    user_voice = getattr(interaction.user, "voice", None)
+    return _get_voice_channel_for_user(interaction.user)
+
+
+def _get_voice_channel_for_user(user) -> discord.abc.Connectable:
+    user_voice = getattr(user, "voice", None)
     channel = getattr(user_voice, "channel", None)
 
     if channel is None:
@@ -73,7 +77,10 @@ def _get_voice_channel(interaction: discord.Interaction) -> discord.abc.Connecta
 
 
 def _get_voice_client(interaction: discord.Interaction) -> discord.VoiceClient | None:
-    guild = interaction.guild
+    return _get_voice_client_for_guild(interaction.guild)
+
+
+def _get_voice_client_for_guild(guild) -> discord.VoiceClient | None:
     if guild is None:
         return None
 
@@ -87,12 +94,18 @@ def _get_voice_client(interaction: discord.Interaction) -> discord.VoiceClient |
 async def _connect_or_move_to_user_channel(
     interaction: discord.Interaction,
 ) -> discord.VoiceClient:
-    guild = interaction.guild
+    return await _connect_or_move_to_user_voice(interaction.guild, interaction.user)
+
+
+async def _connect_or_move_to_user_voice(
+    guild,
+    user,
+) -> discord.VoiceClient:
     if guild is None:
         raise VoiceCommandUserError("Voice command musí běžet na Discord serveru.")
 
-    target_channel = _get_voice_channel(interaction)
-    voice_client = _get_voice_client(interaction)
+    target_channel = _get_voice_channel_for_user(user)
+    voice_client = _get_voice_client_for_guild(guild)
 
     if voice_client is not None and voice_client.is_connected():
         if voice_client.channel != target_channel:
@@ -495,6 +508,82 @@ async def play_tts_text(
         interaction,
         **log_details,
     )
+    return True
+
+
+async def play_tts_text_for_message(
+    message: discord.Message,
+    text: str,
+    command_name: str,
+    *,
+    original_text_length: int | None = None,
+    log_playback: bool = True,
+) -> bool:
+    clean_text = str(text or "").strip()
+    text_length = original_text_length if original_text_length is not None else len(clean_text)
+    settings = _get_tts_settings()
+    log_details = _tts_log_details(settings, text_length)
+
+    async def send_voice_error(error_text: str) -> None:
+        await message.channel.send(error_text)
+
+    try:
+        voice_client = await _connect_or_move_to_user_voice(message.guild, message.author)
+        audio_path = await _create_tts_audio_file(clean_text, settings)
+    except VoiceCommandUserError as error:
+        if log_playback:
+            logger.info(
+                "voice_command=%s status=error guild_id=%s channel_id=%s user_id=%s %s",
+                command_name,
+                getattr(message.guild, "id", None),
+                getattr(message.channel, "id", None),
+                getattr(message.author, "id", None),
+                " ".join(f"{key}={value}" for key, value in log_details.items()),
+            )
+        await send_voice_error(str(error))
+        return False
+    except Exception as error:
+        if log_playback:
+            logger.warning(
+                "%s setup failed provider=%s model_id=%s voice_id=%s error_type=%s",
+                command_name,
+                log_details.get("provider"),
+                log_details.get("model_id"),
+                log_details.get("voice_id"),
+                type(error).__name__,
+            )
+        await send_voice_error("Nepodarilo se pripravit voice audio.")
+        return False
+
+    if voice_client.is_playing():
+        voice_client.stop()
+
+    def after_playback(error: Exception | None) -> None:
+        _cleanup_audio_file(audio_path)
+        if error is not None and log_playback:
+            logger.error("%s playback error=%s", command_name, error)
+
+    try:
+        voice_client.play(
+            discord.FFmpegPCMAudio(str(audio_path)),
+            after=after_playback,
+        )
+    except Exception:
+        _cleanup_audio_file(audio_path)
+        if log_playback:
+            logger.exception("%s playback start failed", command_name)
+        await send_voice_error("Nepodarilo se prehrat voice audio. Je dostupny FFmpeg?")
+        return False
+
+    if log_playback:
+        logger.info(
+            "voice_command=%s status=success guild_id=%s channel_id=%s user_id=%s %s",
+            command_name,
+            getattr(message.guild, "id", None),
+            getattr(message.channel, "id", None),
+            getattr(message.author, "id", None),
+            " ".join(f"{key}={value}" for key, value in log_details.items()),
+        )
     return True
 
 
