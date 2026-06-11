@@ -42,6 +42,11 @@ from panam_discord_file_job_test import handle_file_job_test_command
 from panam_discord_memory_command import handle_memory_clear_command
 from panam_discord_message_router import handle_discord_message
 from panam_discord_read_file import handle_read_file_command
+from panam_discord_voice import (
+    handle_voice_join_command,
+    handle_voice_leave_command,
+    handle_voice_say_command,
+)
 
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -213,6 +218,55 @@ async def memory_clear(interaction: discord.Interaction) -> None:
         interaction,
         channel_id,
     )
+
+
+@bot.tree.command(
+    name="voice_join",
+    description="Pripoj Panam do tveho aktualniho voice kanalu."
+)
+@log_slash_command("voice_join")
+async def voice_join(interaction: discord.Interaction) -> None:
+    if not is_interaction_allowed(interaction, "voice_join"):
+        await interaction.response.send_message(
+            "Tady nemam povolene odpovidat.",
+            ephemeral=True,
+        )
+        return
+
+    await handle_voice_join_command(interaction)
+
+
+@bot.tree.command(
+    name="voice_leave",
+    description="Odpoj Panam z voice kanalu."
+)
+@log_slash_command("voice_leave")
+async def voice_leave(interaction: discord.Interaction) -> None:
+    if not is_interaction_allowed(interaction, "voice_leave"):
+        await interaction.response.send_message(
+            "Tady nemam povolene odpovidat.",
+            ephemeral=True,
+        )
+        return
+
+    await handle_voice_leave_command(interaction)
+
+
+@bot.tree.command(
+    name="voice_say",
+    description="Prehraj kratky text ve voice kanalu."
+)
+@app_commands.describe(text="Kratky text, ktery Panam precte nahlas")
+@log_slash_command("voice_say")
+async def voice_say(interaction: discord.Interaction, text: str) -> None:
+    if not is_interaction_allowed(interaction, "voice_say"):
+        await interaction.response.send_message(
+            "Tady nemam povolene odpovidat.",
+            ephemeral=True,
+        )
+        return
+
+    await handle_voice_say_command(interaction, text)
 
 
 @bot.tree.command(
