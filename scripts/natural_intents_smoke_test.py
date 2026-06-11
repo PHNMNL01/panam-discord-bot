@@ -44,6 +44,7 @@ def main() -> None:
         "should_skip_recent_text_content",
         "is_file_router_candidate",
         "parse_natural_intent",
+        "parse_natural_voice_reply_question",
         "get_natural_action_name",
     ):
         assert hasattr(panam_discord_natural_intents, name), name
@@ -65,8 +66,29 @@ def main() -> None:
         None,
     )
 
+    natural_voice_cases = {
+        "hlasem co umíš?": "co umíš?",
+        "řekni hlasem co umíš?": "co umíš?",
+        "rekni hlasem co umis?": "co umis?",
+        "řekni nahlas jak se jmenuješ?": "jak se jmenuješ?",
+        "rekni nahlas jak se jmenujes?": "jak se jmenujes?",
+        "odpověz hlasem jak se máš?": "jak se máš?",
+        "odpovez hlasem jak se mas?": "jak se mas?",
+    }
+    for text, question in natural_voice_cases.items():
+        assert (
+            panam_discord_natural_intents.parse_natural_voice_reply_question(text)
+            == question
+        )
+
     assert panam_discord_natural_intents.should_skip_recent_text_content("") is True
     assert panam_discord_natural_intents.should_skip_recent_text_content("Panam") is True
+    assert (
+        panam_discord_natural_intents.should_skip_recent_text_content(
+            "Panam hlasem co umis?"
+        )
+        is True
+    )
     assert (
         panam_discord_natural_intents.should_skip_recent_text_content(
             "bezna veta bez prikazu"

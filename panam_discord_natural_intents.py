@@ -58,12 +58,31 @@ def should_skip_recent_text_content(content: str) -> bool:
 
     return (
         is_natural_attachment_analyze_request(normalized)
+        or parse_natural_voice_reply_question(normalized) is not None
         or parse_natural_intent(normalized) is not None
     )
 
 
 def is_file_router_candidate(text: str) -> bool:
     return has_explicit_file_output_request(text) or has_explicit_file_action_request(text)
+
+
+def parse_natural_voice_reply_question(text: str) -> str | None:
+    patterns = (
+        r"^hlasem\s+(.+)$",
+        r"^(?:řekni|rekni)\s+hlasem\s+(.+)$",
+        r"^(?:řekni|rekni)\s+nahlas\s+(.+)$",
+        r"^(?:odpověz|odpovez)\s+hlasem\s+(.+)$",
+    )
+    for pattern in patterns:
+        match = re.match(pattern, text.strip(), re.IGNORECASE)
+        if not match:
+            continue
+
+        question = match.group(1).strip()
+        return question or None
+
+    return None
 
 
 def parse_natural_intent(text: str) -> Optional[tuple[str, Optional[str]]]:

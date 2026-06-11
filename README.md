@@ -291,6 +291,8 @@ Natural zpravy funguji, kdyz je Panam oslovena, napr.:
 
 ```text
 Panam ahoj
+Panam hlasem co umíš?
+Panam řekni nahlas jak se jmenuješ?
 Panam shrn to
 Panam co si o tom myslis?
 Panam pridej poznamku zavolat ucetni

@@ -40,11 +40,13 @@ from panam_discord_natural_file_orchestrator import (
 )
 from panam_discord_natural_intents import (
     get_natural_action_name,
+    parse_natural_voice_reply_question,
     parse_natural_intent,
     should_skip_recent_text_content,
 )
 from panam_discord_responses import send_channel_chunks
 from panam_discord_text_history import find_recent_text_message
+from panam_discord_voice import play_tts_text_for_message, truncate_text_for_voice
 from panam_file_context import (
     get_last_file_context,
     set_last_file_context,
@@ -102,6 +104,94 @@ def get_author_name(author) -> str:
     return getattr(author, "display_name", author.name)
 
 
+def log_natural_voice_reply_status(
+    status: str,
+    message: discord.Message,
+    *,
+    question_length: int | None = None,
+    answer_length: int | None = None,
+) -> None:
+    logger.info(
+        "action=natural_voice_reply status=%s user_id=%s channel_id=%s guild_id=%s question_length=%s answer_length=%s",
+        status,
+        getattr(message.author, "id", None),
+        getattr(message.channel, "id", None),
+        getattr(message.guild, "id", None),
+        question_length,
+        answer_length,
+    )
+
+
+def _message_author_voice_channel(message: discord.Message):
+    author_voice = getattr(message.author, "voice", None)
+    return getattr(author_voice, "channel", None)
+
+
+async def handle_natural_voice_reply(
+    model: str,
+    message: discord.Message,
+    question: str,
+) -> None:
+    question_length = len(question or "")
+    answer_length: int | None = None
+    log_natural_voice_reply_status(
+        "started",
+        message,
+        question_length=question_length,
+    )
+
+    try:
+        answer = (await ask_panam(model, question)).strip() or "Nemam odpoved."
+        answer_length = len(answer)
+        await send_channel_chunks(message, answer)
+    except Exception:
+        log_natural_voice_reply_status(
+            "error",
+            message,
+            question_length=question_length,
+            answer_length=answer_length,
+        )
+        logger.exception("Chyba pri zpracovani natural voice reply")
+        await message.channel.send("Neco se pokazilo pri zpracovani hlasove odpovedi.")
+        return
+
+    if _message_author_voice_channel(message) is None:
+        await message.channel.send(
+            "Textove jsem odpovedela, ale hlas nemuzu prehrat, protoze nejsi ve voice kanalu."
+        )
+        log_natural_voice_reply_status(
+            "voice_unavailable",
+            message,
+            question_length=question_length,
+            answer_length=answer_length,
+        )
+        return
+
+    voice_text = truncate_text_for_voice(answer)
+    played = await play_tts_text_for_message(
+        message,
+        voice_text,
+        "natural_voice_reply",
+        original_text_length=len(voice_text),
+        log_playback=False,
+    )
+    if not played:
+        log_natural_voice_reply_status(
+            "voice_error",
+            message,
+            question_length=question_length,
+            answer_length=answer_length,
+        )
+        return
+
+    log_natural_voice_reply_status(
+        "success",
+        message,
+        question_length=question_length,
+        answer_length=answer_length,
+    )
+
+
 async def handle_basic_panam_message(
     model: str,
     message: discord.Message,
@@ -131,6 +221,20 @@ async def handle_discord_message(
 ) -> None:
     request_text = extract_panam_request(message, bot_user)
     if request_text is None:
+        return
+
+    natural_voice_question = parse_natural_voice_reply_question(request_text)
+    if natural_voice_question is not None:
+        question_length = len(natural_voice_question)
+        if allowed_channel_ids and str(message.channel.id) not in allowed_channel_ids:
+            log_natural_voice_reply_status(
+                "denied",
+                message,
+                question_length=question_length,
+            )
+            return
+
+        await handle_natural_voice_reply(model, message, natural_voice_question)
         return
 
     current_file = find_supported_attachment_in_message(message)
