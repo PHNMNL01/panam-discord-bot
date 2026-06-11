@@ -23,6 +23,7 @@ from panam_discord_context import (
 )
 from panam_discord_core_commands import (
     handle_ask_command,
+    handle_ask_voice_command,
     handle_note_add_command,
     handle_note_list_command,
     handle_note_search_command,
@@ -31,6 +32,7 @@ from panam_discord_core_commands import (
     handle_todo_add_command,
     handle_todo_done_command,
     handle_todo_list_command,
+    log_ask_voice_status,
 )
 from panam_discord_file_commands import (
     handle_extract_data_command,
@@ -267,6 +269,27 @@ async def voice_say(interaction: discord.Interaction, text: str) -> None:
         return
 
     await handle_voice_say_command(interaction, text)
+
+
+@bot.tree.command(
+    name="ask_voice",
+    description="Odpovez textem a precti odpoved ve voice kanalu."
+)
+@app_commands.describe(question="Tvoje otazka pro Panam")
+async def ask_voice(interaction: discord.Interaction, question: str) -> None:
+    if ALLOWED_CHANNEL_IDS and str(interaction.channel_id) not in ALLOWED_CHANNEL_IDS:
+        log_ask_voice_status(
+            "denied",
+            interaction,
+            question_length=len(question or ""),
+        )
+        await interaction.response.send_message(
+            "Tady nemam povolene odpovidat.",
+            ephemeral=True,
+        )
+        return
+
+    await handle_ask_voice_command(OPENAI_MODEL, interaction, question)
 
 
 @bot.tree.command(
