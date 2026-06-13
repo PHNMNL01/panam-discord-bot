@@ -69,7 +69,7 @@ ELEVENLABS_STYLE=0.25
 ELEVENLABS_USE_SPEAKER_BOOST=true
 PANAM_STT_PROVIDER=elevenlabs
 ELEVENLABS_STT_MODEL_ID=scribe_v2
-ELEVENLABS_STT_LANGUAGE_CODE=ces
+ELEVENLABS_STT_LANGUAGE_CODE=cs
 PANAM_DOCK_ADMIN_TOKEN=
 PANAM_DOCK_PORT=5051
 PANAM_WEB_HOST=127.0.0.1
@@ -100,7 +100,7 @@ Promenne:
 - `ELEVENLABS_USE_SPEAKER_BOOST` - ElevenLabs voice setting, default `true`.
 - `PANAM_STT_PROVIDER` - STT backend pro kratky explicitni prepis, default `elevenlabs`.
 - `ELEVENLABS_STT_MODEL_ID` - ElevenLabs STT model, default `scribe_v2`.
-- `ELEVENLABS_STT_LANGUAGE_CODE` - jazyk STT vstupu, default `ces`.
+- `ELEVENLABS_STT_LANGUAGE_CODE` - jazyk STT vstupu, default `cs`.
 - `PANAM_DOCK_ADMIN_TOKEN` - volitelny token pro Deck POST akce.
 - `PANAM_DOCK_PORT` - port Decku, default `5051`.
 - `PANAM_WEB_HOST` - host Panam Webu, default `127.0.0.1`.
@@ -257,6 +257,7 @@ Zakladni slash commandy:
 - `/listen_test`
 - `/listen_transcribe`
 - `/listen_transcribe_debug`
+- `/transcribe_audio`
 
 ### Panam Voice Speak v1
 
@@ -321,6 +322,17 @@ Manual listen_transcribe smoke test:
 
 `/listen_transcribe` pouze explicitne nahraje kratke audio a vrati textovy prepis.
 Prepis neposila do Panam routeru, nevola AI odpoved a neprehrava hlasem.
+
+Manual transcribe_audio smoke test:
+
+```text
+1. Nahraj do Discordu kratke audio jako prilohu.
+2. Spust `/transcribe_audio file:<soubor>`.
+3. Over, ze Panam vrati textovy prepis.
+```
+
+`/transcribe_audio` prepisuje pouze nahranou audio prilohu. Nezapina live listen,
+nevola Panam router a neprehrava hlasem.
 
 Manual listen_transcribe_debug smoke test:
 
