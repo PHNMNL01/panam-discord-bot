@@ -47,6 +47,10 @@ from panam_discord_file_job_test import handle_file_job_test_command
 from panam_discord_memory_command import handle_memory_clear_command
 from panam_discord_message_router import handle_discord_message
 from panam_discord_read_file import handle_read_file_command
+from panam_discord_transcribe_audio import (
+    handle_transcribe_audio_command,
+    log_transcribe_audio_status,
+)
 from panam_discord_voice import (
     handle_listen_test_command,
     handle_listen_transcribe_command,
@@ -353,6 +357,37 @@ async def listen_transcribe(
         return
 
     await handle_listen_transcribe_command(interaction, int(seconds))
+
+
+@bot.tree.command(
+    name="transcribe_audio",
+    description="Prepis audio prilohu pres ElevenLabs STT."
+)
+@app_commands.describe(file="Audio soubor .m4a, .mp3, .wav, .webm, .ogg nebo .flac")
+async def transcribe_audio(
+    interaction: discord.Interaction,
+    file: discord.Attachment,
+) -> None:
+    if ALLOWED_CHANNEL_IDS and str(interaction.channel_id) not in ALLOWED_CHANNEL_IDS:
+        stt_settings = get_stt_settings()
+        extension = Path(file.filename or "").suffix.lower()
+        log_transcribe_audio_status(
+            "error",
+            interaction,
+            provider=stt_settings["provider"],
+            model_id=stt_settings["elevenlabs_stt_model_id"],
+            language_code=stt_settings["elevenlabs_stt_language_code"],
+            extension=extension,
+            file_size_bytes=getattr(file, "size", None),
+            transcript_length=None,
+        )
+        await interaction.response.send_message(
+            "Tady nemÃ¡m povolenÃ© odpovÃ­dat.",
+            ephemeral=True,
+        )
+        return
+
+    await handle_transcribe_audio_command(interaction, file)
 
 
 @bot.tree.command(

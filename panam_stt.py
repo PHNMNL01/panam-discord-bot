@@ -5,7 +5,7 @@ from pathlib import Path
 
 DEFAULT_STT_PROVIDER = "elevenlabs"
 DEFAULT_ELEVENLABS_STT_MODEL_ID = "scribe_v2"
-DEFAULT_ELEVENLABS_STT_LANGUAGE_CODE = "ces"
+DEFAULT_ELEVENLABS_STT_LANGUAGE_CODE = "cs"
 logger = logging.getLogger("panam")
 
 
