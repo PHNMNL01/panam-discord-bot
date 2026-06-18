@@ -11,22 +11,13 @@ Projekt je rozdeleny na nekolik vrstev:
 - `panam_core.py` - sdilene use-cases bez Discordu a Flasku.
 - `panam_ai.py` - OpenAI volani, shrnovani, analyza a classifier.
 - `panam_command_router.py` - textovy parser prikazu pro adaptery.
-- Discord adapter - `bot.py` a `panam_discord_*`.
+- Discord adapter - `panam_discord_runner.py` a `panam_discord_*`.
 - Web adapter - `panam_web_app.py`, `panam_web_adapter.py`, `web/`.
-- Deck - `panam_dock_app.py`, `panam_process_manager.py`, `web_admin/`.
+- Deck - `panam_dock_app.py`, `panam_process_manager.py`, `web_admin/`; lokalni control panel, pres ktery se da spoustet i Discord bot a Panam Web.
 - File pipeline - cteni, analyza a tvorba novych souboru.
+- Voice vrstva - `panam_discord_voice.py` a `panam_stt.py`; TTS output do Discord voice, kratke explicitni nahrani audia a STT prepis.
 
-`bot.py` je jen tenky entrypoint:
-
-```python
-from panam_discord_runner import run_discord_bot
-
-
-if __name__ == "__main__":
-    run_discord_bot()
-```
-
-Import Discord runneru bota nespousti. Token se kontroluje az pri `run_discord_bot()`.
+Hlavni lokalni ridici aplikace je dnes `panam_dock_app.py`. Deck umi hlidat stav sluzeb, spoustet a zastavovat Discord bota i Web, poustet smoke testy a cist allowlistovane logy. Samotny Discord bot zustava samostatna sluzba nad `panam_discord_runner.py`, ale v beznem lokalnim provozu se da pohodlne spoustet pres Deck.
 
 ## Co Panam Umi
 
@@ -41,6 +32,12 @@ Import Discord runneru bota nespousti. Token se kontroluje az pri `run_discord_b
 - vytvaret nove MD, TXT nebo DOCX dokumenty
 - tezit strukturovana data do JSON, CSV, Markdownu nebo XLSX
 - bezpecne transformovat DOCX a XLSX do noveho vystupniho souboru
+- pripojit se do Discord voice kanalu a odpojit se z nej
+- precist kratky text nahlas pres TTS ve voice kanalu
+- odpovidat textem i hlasem pres `/ask_voice` a `/panam_talk_voice`
+- reagovat hlasem i na prirozene fraze typu `Panam hlasem co umis?` nebo `Panam rekni nahlas jak se jmenujes?`
+- kratce explicitne nahrat audio z voice kanalu a overit prijem packetu
+- prepsat kratky hlasovy vstup na text pres STT prikazy `/listen_transcribe` a `/listen_transcribe_debug`
 - reagovat na prirozene fraze typu `Panam shrn to` nebo `Panam udelej z toho tabulku`
 
 ## Konfigurace
@@ -267,7 +264,7 @@ kratke technicke testy `/listen_test`, `/listen_transcribe`,
 `/listen_transcribe_debug`. Nepridavaji trvaly poslech, wake phrase, `/listen`
 ani routovani hlasoveho vstupu do Panam routeru.
 
-Manual smoke test:
+Rucni overeni voice vystupu:
 
 ```powershell
 .\.venv\Scripts\Activate.ps1
@@ -287,19 +284,12 @@ V Discordu:
 6. Over, ze odpovedi prijdou textem do Discord chatu i hlasem ve voice.
 7. Spust `/voice_leave`.
 
-Definition of Done:
+Ocekavany vysledek: Panam se pripoji do aktualniho voice kanalu, prehraje
+TTS odpoved, posle stejnou odpoved i textem do Discordu a po `/voice_leave`
+se odpoji. Voice funkce stale nepridavaji trvaly poslech, wake phrase ani
+automaticke routovani hlasoveho vstupu do Panam routeru.
 
-- bot se pripoji do tveho aktualniho voice kanalu
-- `/voice_say Ahoj, já jsem Panam. Tohle je test ElevenLabs hlasu.` vytvori ElevenLabs MP3 a prehraje ho ve voice
-- `/ask_voice Jak se jmenuješ a co umíš?` odpovi textem i hlasem pres ElevenLabs
-- `/panam_talk_voice Řekni mi, co si myslíš o tom, že už máš hlas.` odpovi textem i hlasem v existujicim talk rezimu
-- `/voice_leave` bota odpoji
-- existujici textove prikazy porad funguji
-- `/voice_join`, `/voice_say`, `/ask_voice` a `/voice_leave` porad funguji
-- zadny trvaly poslech, wake phrase ani routovani hlasu do Panam routeru nebyly pridane
-- v logu nejsou tokeny, raw TTS texty ani citlivy obsah
-
-Manual listen_test smoke test:
+Rucni overeni `/listen_test`:
 
 ```text
 1. Pripoj se do voice kanalu.
@@ -311,7 +301,7 @@ Manual listen_test smoke test:
 `/listen_test` je pouze kratky explicitni technicky test prijmu audia.
 Nepridava STT, wake phrase, trvaly poslech, `/listen` ani voice watch.
 
-Manual listen_transcribe smoke test:
+Rucni overeni `/listen_transcribe`:
 
 ```text
 1. Pripoj se do voice kanalu.
@@ -323,6 +313,9 @@ Manual listen_transcribe smoke test:
 `/listen_transcribe` pouze explicitne nahraje kratke audio a vrati textovy prepis.
 Prepis neposila do Panam routeru, nevola AI odpoved a neprehrava hlasem.
 
+<<<<<<< HEAD
+Rucni overeni `/listen_transcribe_debug`:
+=======
 Manual transcribe_audio smoke test:
 
 ```text
@@ -335,6 +328,7 @@ Manual transcribe_audio smoke test:
 nevola Panam router a neprehrava hlasem.
 
 Manual listen_transcribe_debug smoke test:
+>>>>>>> c9a4170c49d00616482e9bcb32782dd25e3625d5
 
 ```text
 1. Pripoj se do voice kanalu.
