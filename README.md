@@ -313,10 +313,7 @@ Rucni overeni `/listen_transcribe`:
 `/listen_transcribe` pouze explicitne nahraje kratke audio a vrati textovy prepis.
 Prepis neposila do Panam routeru, nevola AI odpoved a neprehrava hlasem.
 
-<<<<<<< HEAD
-Rucni overeni `/listen_transcribe_debug`:
-=======
-Manual transcribe_audio smoke test:
+Rucni overeni `/transcribe_audio`:
 
 ```text
 1. Nahraj do Discordu kratke audio jako prilohu.
@@ -327,8 +324,7 @@ Manual transcribe_audio smoke test:
 `/transcribe_audio` prepisuje pouze nahranou audio prilohu. Nezapina live listen,
 nevola Panam router a neprehrava hlasem.
 
-Manual listen_transcribe_debug smoke test:
->>>>>>> c9a4170c49d00616482e9bcb32782dd25e3625d5
+Rucni overeni `/listen_transcribe_debug`:
 
 ```text
 1. Pripoj se do voice kanalu.
@@ -338,6 +334,8 @@ Manual listen_transcribe_debug smoke test:
 5. Pokud Playground audio precte, hledej problem v API callu nebo parsingu odpovedi.
 6. Pokud Playground audio neprecte, hledej problem v Discord capture nebo WAV encodingu.
 ```
+
+## Natural Phrases
 
 Natural zpravy funguji, kdyz je Panam oslovena, napr.:
 
@@ -355,6 +353,10 @@ Panam udelej z toho DOCX
 Panam oprav ten Word dokument
 Panam odstran prazdne radky z te tabulky
 ```
+
+Prirozene fraze a testovaci pripady pro file router se udrzuji v
+`docs/router_test_cases.md`. Slouzi jako living spec pro vety, ktere Panam
+zna, neumi dobre rozpoznat, nebo se je ma casem doucit.
 
 ## File Pipeline
 
