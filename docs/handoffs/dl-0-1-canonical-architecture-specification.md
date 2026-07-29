@@ -10,11 +10,11 @@ A Knowledge Handoff is an evidence package between implementation agents, mappin
 | Repository | `C:\Panam_APP` |
 | Milestone ID | DL-0.1 |
 | Milestone name | Canonical Architecture Specification |
-| Handoff status | Draft |
+| Handoff status | Final |
 | Date | 2026-07-29 |
 | Authoring agent | Codex |
 | Related branch | `phase/development-loop-architecture` |
-| Related implementation commit | Pending |
+| Related implementation commit | `94c386b220ab349cb36d68a649f12c36a59b2a53` |
 | Previous handoff | None for Panam Development Loop |
 | Next expected step | DL-0.2 Architecture Decision Records |
 
@@ -27,6 +27,8 @@ Create the canonical repository-local architecture specification for Panam Devel
 Created the canonical Panam Development Loop architecture documentation set. It records the approved purpose and boundaries, actor responsibilities, end-to-end workflow, state machine, core data model, safety/Git/approval policy, recovery model, modular architecture, API and agent contracts, human interaction model, and implementation roadmap.
 
 One focused correction pass updated the documentation without changing the approved architecture substance. It added the complete milestone-level roadmap and clarified Pull Request creation authority, Feasibility Assessor ordering, Handoff Agent versus Handoff Finalizer responsibilities, SOURCE_COMPLETED checkpoint terminology, pre-freeze architecture status, DL-P0 scope, and Verifier/Reviewer workflow branches.
+
+Implementation commit `94c386b220ab349cb36d68a649f12c36a59b2a53` contains the twelve canonical architecture specification documents and this handoff's original draft. This finalized handoff records that implementation commit only. No handoff-finalization commit hash is recorded because that commit does not yet exist.
 
 ## Files changed
 
@@ -51,7 +53,8 @@ All created architecture-specification files are under `docs/development-loop/`.
 
 | Check | Command or method | Files or suites involved | Result | Notes |
 | --- | --- | --- | --- | --- |
-| Branch and worktree inspection | `git branch --show-current`; `git status --short --untracked-files=all` | Repository state | Passed | Confirmed the specified branch and documentation-only untracked changes; no commit or push occurred. |
+| Branch and worktree inspection | `git branch --show-current`; `git status --short --untracked-files=all` | Repository state | Passed | Confirmed the specified branch and documentation-only changes before implementation commit creation. |
+| Implementation commit inspection | `git show --stat --oneline 94c386b220ab349cb36d68a649f12c36a59b2a53` | Implementation commit | Passed | Commit contains the twelve architecture documents and the original draft handoff. |
 | Documentation inventory | `Get-ChildItem docs\\development-loop -File` | All twelve specification files | Passed | README plus eleven numbered documents were present. |
 | Required-section check | Read-only PowerShell content check | Eleven numbered documents | Passed | Confirmed Document purpose, In-scope responsibilities, Approved decisions, Explicit boundaries and out of scope, Cross-references, and Future considerations. |
 | Markdown-link check | Read-only PowerShell resolution check | Markdown links in `docs/development-loop/` | Passed | All local Markdown links resolved. |
@@ -98,7 +101,7 @@ No reusable capability candidate is asserted by this documentation-only mileston
 ## Known limitations
 
 - DL-0.1 does not implement workflow state, SQLite schema, worker process, agent adapter, subprocess runner, Git adapter, Web workspace, CyberDeck integration, or Vault workflow.
-- No implementation commit exists yet; the related implementation commit remains Pending.
+- The implementation commit is recorded, but the handoff-finalization commit does not yet exist and is intentionally not represented by an invented hash.
 - The specification remains pending the final DL-P0 read-only architecture audit and Architecture Freeze Gate.
 
 ## Unresolved questions
@@ -120,7 +123,7 @@ The following are non-blocking future implementation decisions, not DL-0.1 failu
 - The specification documents 75 approved milestones from DL-0.1 through DL-8.8.
 - Local Markdown links, required sections, canonical terminology, Pull Request authority wording, SOURCE_COMPLETED terminology, and trailing whitespace were checked as recorded above.
 - One focused correction pass was performed after the initial architecture specification.
-- No source implementation, database schema, Vault change, commit, or push was performed for DL-0.1.
+- No runtime implementation, database schema, Vault change, or Vault proposal was performed for DL-0.1. The source implementation commit is recorded above; no handoff-finalization commit hash is claimed.
 
 ### Project-owner-confirmed operational facts
 
@@ -139,7 +142,7 @@ The following are non-blocking future implementation decisions, not DL-0.1 failu
 
 | Field | Value |
 | --- | --- |
-| Source repository documentation changed | Yes: `docs/development-loop/` specification files and this draft handoff. |
+| Source repository documentation changed | Yes: `docs/development-loop/` specification files and this finalized handoff. |
 | Runtime implementation changed | No |
 | Agent repository files changed | No |
 | Vault files changed | No |
@@ -160,6 +163,6 @@ A Knowledge Handoff does not authorize Vault writes or Capability Registry chang
 - [x] Paths are repository-relative in the changed-file table.
 - [x] Sensitive values excluded.
 - [x] Vault was not modified.
-- [x] Commit status recorded as Pending.
+- [x] Implementation commit recorded; no handoff-finalization commit hash invented.
 - [x] Known limitations recorded.
 - [x] Unresolved questions recorded.
