@@ -10,21 +10,27 @@ A Knowledge Handoff is an evidence package between implementation agents, mappin
 | Repository | `C:\Panam_APP` |
 | Milestone ID | DL-0.2 |
 | Milestone name | Architecture Decision Records |
-| Workflow state | `PREPARING_HANDOFF` |
+| Workflow state | `FINALIZING_HANDOFF` |
 | Architecture implementation | `APPROVED` |
-| Handoff draft | `PREPARED` |
+| Handoff content | `FINALIZED` |
+| Focused correction attempts used | 1 of maximum 3 |
 | Date | 2026-08-02 |
 | Authoring agent | Codex |
 | Related branch | `phase/development-loop-architecture` |
 | Base HEAD | `90e98a6f74ea506c7bdabe7ffc64986e6e7573d9` |
-| Related implementation commit | Pending |
-| Handoff-finalization commit | Pending |
+| Related implementation commit | `bde6fb67acb39673a4ecc5c4cb8c58503421e0b5` |
+| Implementation commit message | `Add DL-0.2 architecture decision records` |
+| Verified implementation commit scope | 15 documentation files, 1,094 insertions |
+| Supplied implementation summary | 15 documentation files, 1,694 insertions; not corroborated by Git |
+| Handoff-finalization commit | Not yet created |
 | Source push | Pending |
+| Source milestone state | Not yet `SOURCE_COMPLETED` |
 | Vault proposal | Pending |
 | Approval 2 | Pending |
 | Vault lifecycle | Pending |
+| Architecture Freeze | Pending; not complete |
 | Previous handoff | `docs/handoffs/dl-0-1-canonical-architecture-specification.md` |
-| Next expected step | Create implementation commit 1 after approved handoff review |
+| Next expected step | Create the documentation-only handoff-finalization commit, then push and verify both source commits |
 
 ## Task
 
@@ -40,7 +46,7 @@ Specialist agents execute bounded inner loops.
 Only the Panam State Machine may authorize workflow transitions.
 ```
 
-The milestone does not implement any documented architecture. DL-0.2 is not `COMPLETED`; it is in `PREPARING_HANDOFF` with architecture implementation approved and source/Vault lifecycle work pending.
+The milestone does not implement any documented architecture. DL-0.2 is not `COMPLETED`; it is in `FINALIZING_HANDOFF` with architecture implementation approved, implementation commit created, and handoff-finalization, source push, and Vault lifecycle work pending.
 
 ## What changed
 
@@ -59,6 +65,17 @@ Focused correction attempt 1, the only correction attempt used out of the maximu
 - ADR-005 now states human-confirmed Pull Request creation and human-controlled merge, with any technical Panam PR creation limited to a future adapter after explicit human confirmation.
 
 The final focused architecture review result is `APPROVED`. All DL-0.2 acceptance criteria were rechecked and passed. Architecture Freeze is not complete.
+
+Implementation and review history:
+
+1. The initial ADR implementation was completed.
+2. Focused architecture review returned `NEEDS_FIX`.
+3. Three narrow findings were identified in ADR-003, ADR-005, and ADR-006.
+4. Focused correction attempt 1 resolved all three findings.
+5. Final focused architecture review returned `APPROVED`.
+6. The approved package was committed as `bde6fb67acb39673a4ecc5c4cb8c58503421e0b5` with message `Add DL-0.2 architecture decision records`.
+
+Git inspection of that commit reports 15 documentation files and 1,094 insertions. The supplied finalization brief reported 1,694 insertions; because both `git show --stat` and summed `git show --numstat` report 1,094, this handoff preserves the discrepancy rather than asserting the unsupported count.
 
 ### ADR summary
 
@@ -129,7 +146,7 @@ Handoff artifact, listed separately:
 
 | Change | Path | Responsibility |
 | --- | --- | --- |
-| Created | `docs/handoffs/dl-0-2-architecture-decision-records.md` | Draft knowledge handoff for the approved DL-0.2 documentation package. |
+| Created in implementation commit; modified for finalization | `docs/handoffs/dl-0-2-architecture-decision-records.md` | Final source-handoff content for the approved DL-0.2 documentation package. |
 
 ## Tests performed
 
@@ -147,6 +164,10 @@ Handoff artifact, listed separately:
 | Focused correction assertions | Read-only PowerShell exact-term checks | ADR-003, ADR-005, ADR-006 | Passed | Five node types, seven edge types, seven budget fields, two-attempt threshold, sole authority, evidence-gated example, and PR wording were present. |
 | Relative-link validation | Read-only PowerShell path resolution | Development Loop and handoff Markdown | Passed | All inspected relative Markdown links resolved after the handoff draft was created. |
 | Post-handoff repository refresh | Required Git and supplemental filesystem commands | Full uncommitted scope | Passed | Branch and HEAD remained unchanged; 12 ADRs, 14 new Markdown files including the handoff, required handoff sections/status fields, documentation-only scope, and no positive freeze-completion claim were confirmed. |
+| Implementation commit identity | `git rev-parse HEAD`; `git show --stat --oneline --decorate HEAD` | Implementation commit | Passed | Confirmed HEAD `bde6fb67acb39673a4ecc5c4cb8c58503421e0b5`, message, 15 documentation files, and 1,094 insertions. |
+| Implementation commit insertion total | Summed `git show --numstat --format= HEAD` | Implementation commit | Passed | Independently confirmed 15 files, 1,094 insertions, and 0 deletions; supplied 1,694-insertion summary was not corroborated. |
+| Pre-finalization worktree | `git status --short` | Repository state | Passed | Working tree was clean before this finalization-only edit. |
+| Finalization-only diff | `git diff --check`; `git diff --stat`; `git diff --name-only`; `git status --short` | Handoff finalization | Passed | Diff check returned exit code 0 and the only changed path was this handoff. |
 
 Skipped tests:
 
@@ -185,7 +206,10 @@ No reusable capability candidate is asserted by this milestone. ADR-010 defines 
 - DL-0.2 documents decisions but implements no workflow runtime, schema, State Machine, Development Worker, adapter, router, or registry.
 - Exact storage enums for node and edge types remain later implementation details.
 - Exact schema types and configured numeric budget values remain later policy and implementation decisions.
-- The implementation commit, handoff-finalization commit, source push, Vault proposal, Approval 2, and Vault lifecycle are all Pending.
+- Implementation commit `bde6fb67acb39673a4ecc5c4cb8c58503421e0b5` exists and contains the approved documentation package.
+- The handoff-finalization commit had not yet been created when this document was finalized. Its hash must be verified from Git history after the documentation-only finalization commit is created.
+- Source push, Vault proposal, Approval 2, and the Vault lifecycle remain Pending.
+- The source milestone state is not yet `SOURCE_COMPLETED`.
 - Architecture Freeze is not complete.
 
 The remaining Architecture Freeze dependency chain is:
@@ -212,46 +236,55 @@ The following are non-blocking future implementation decisions rather than DL-0.
 
 ### Verified implementation facts
 
-- The repository was inspected on branch `phase/development-loop-architecture` at base HEAD `90e98a6f74ea506c7bdabe7ffc64986e6e7573d9`.
-- The canonical ADR index and twelve ADR files exist in the current worktree.
+- The implementation began from base HEAD `90e98a6f74ea506c7bdabe7ffc64986e6e7573d9`.
+- The repository was inspected for handoff finalization on branch `phase/development-loop-architecture` at HEAD `bde6fb67acb39673a4ecc5c4cb8c58503421e0b5`.
+- The canonical ADR index, twelve ADR files, parent README change, and draft handoff are present in the implementation commit.
+- The implementation commit message is `Add DL-0.2 architecture decision records`.
+- Git reports 15 documentation files, 1,094 insertions, and 0 deletions for the implementation commit.
 - The index maps all twenty-two source decisions.
 - Required ADR sections, links, terminology, exact focused-correction terms, documentation-only scope, and whitespace were checked as recorded in this handoff.
 - Focused correction attempt 1 resolved all three focused-review findings; the supplied final architecture review result is `APPROVED`.
-- No implementation commit, handoff-finalization commit, source push, Vault proposal, Approval 2, or Vault write is claimed.
+- At the time of the implementation and initial handoff-draft operation, no commit or push had been performed. The implementation was subsequently committed as `bde6fb67acb39673a4ecc5c4cb8c58503421e0b5`.
+- No handoff-finalization commit hash is claimed. Source push, Vault proposal, Approval 2, and Vault write remain pending.
 
 ### Project-owner-confirmed operational facts
 
 - The DL-0.2 final focused architecture review result is `APPROVED`.
 - One focused correction attempt was used out of the maximum three.
-- The current workflow state for this handoff operation is `PREPARING_HANDOFF`.
+- The current workflow state for this handoff operation is `FINALIZING_HANDOFF`.
 
 ### Proposed future behavior
 
 - DL-0.3, DL-0.4, and DL-0.5 remain future documentation milestones before the explicit human Architecture Freeze Gate.
 - SDK/app-server Codex integration, Skills, routing, workflow composition, external-orchestrator adapters, and parallel execution remain future-only.
-- The next source-side action after approved handoff review is implementation commit 1.
+- The next source-side action is the documentation-only handoff-finalization commit. After it exists, both source commits must be pushed and verified before `SOURCE_COMPLETED` may be authorized.
 
 ### Unresolved assumptions
 
 - Exact later implementation choices remain subject to approved Milestone Contracts and their evidence.
 - Pending source and Vault lifecycle fields must be finalized only from actual later evidence.
+- The handoff-finalization commit hash must be observed from Git history after that commit exists; it cannot reliably be embedded in the commit that creates it. Later source evidence or a Vault proposal may record the observed hash without modifying this handoff again.
 
 ## Repository and vault impact
 
 | Field | Value |
 | --- | --- |
-| Source repository documentation changed | Yes: the listed Development Loop documentation and this handoff draft. |
+| Source repository documentation changed | Yes: the implementation commit contains the listed Development Loop documentation and the draft handoff; this finalization modifies only the handoff. |
 | Runtime implementation changed | No |
 | Dependency files changed | No |
 | Agent repository files changed | No |
 | Vault files changed | No |
 | Capability Registry changed | No |
-| Implementation commit | Pending |
-| Handoff-finalization commit | Pending |
+| Implementation commit | `bde6fb67acb39673a4ecc5c4cb8c58503421e0b5` |
+| Implementation commit message | `Add DL-0.2 architecture decision records` |
+| Verified implementation commit scope | 15 documentation files, 1,094 insertions |
+| Handoff-finalization commit | Not yet created; verify from Git history after creation |
 | Source push | Pending |
+| Source milestone state | Not yet `SOURCE_COMPLETED` |
 | Vault proposal created | No; status Pending |
 | Approval 2 | Pending |
 | Vault lifecycle | Pending |
+| Architecture Freeze | Pending; not complete |
 | Human review required | Yes: handoff review and later explicit Architecture Freeze Gate. |
 
 A Knowledge Handoff does not authorize Vault writes or Capability Registry changes.
@@ -266,8 +299,10 @@ A Knowledge Handoff does not authorize Vault writes or Capability Registry chang
 - [x] Final architecture review result recorded as `APPROVED`.
 - [x] Architecture Freeze explicitly recorded as incomplete.
 - [x] Runtime, dependency, agent, Vault, and Capability Registry non-changes recorded.
-- [x] Implementation commit recorded as Pending.
-- [x] Handoff-finalization commit recorded as Pending.
+- [x] Implementation commit hash, message, and verified scope recorded.
+- [x] Handoff-finalization commit recorded as not yet created; no hash invented.
 - [x] Source push recorded as Pending.
+- [x] Source milestone recorded as not yet `SOURCE_COMPLETED`.
 - [x] Vault proposal and Approval 2 recorded as Pending.
 - [x] Post-draft repository and supplemental verification refreshed.
+- [x] Finalization-only diff verified.
