@@ -19,6 +19,7 @@ Architecture status: **canonical DL-0.1 specification capturing approved archite
 9. [API and agent contracts](08-api-agent-contracts.md)
 10. [Human interaction model](09-human-interaction-model.md)
 11. [Implementation roadmap](10-implementation-roadmap.md)
+12. [DL-0.2 Architecture Decision Records](adrs/README.md)
 
 ## Canonical terminology
 
