@@ -13,16 +13,18 @@ authorize Vault or Capability Registry changes.
 | Phase | DL-P0 Architecture Freeze and Bootstrap |
 | Milestone ID | DL-0.3 |
 | Milestone name | Panam Repository Instructions |
-| Workflow state | `PREPARING_HANDOFF` |
+| Workflow state | `FINALIZING_HANDOFF` |
 | Repository instructions implementation | `APPROVED` |
-| Handoff draft | `PREPARED` |
+| Handoff content | `FINALIZED` |
 | Focused correction attempts used | 0 of maximum 3 |
 | Date | 2026-08-03 |
 | Authoring agent | Codex |
 | Related branch | `phase/development-loop-architecture` |
 | Base HEAD | `610161e45edaeec5fcec19e134e615dccfd6bbbd` |
-| Implementation commit | Pending |
-| Handoff-finalization commit | Pending |
+| Related implementation commit | `1cc72bd42cdba9e63441a96f7133921168d0388b` |
+| Implementation commit message | `Add DL-0.3 repository instructions` |
+| Verified implementation commit scope | 3 files changed, 407 insertions, 1 deletion |
+| Handoff-finalization commit | Not yet created |
 | Source push | Pending |
 | Source milestone state | Not yet `SOURCE_COMPLETED` |
 | Vault proposal | Pending |
@@ -30,7 +32,7 @@ authorize Vault or Capability Registry changes.
 | Vault lifecycle | Pending |
 | Architecture Freeze | Pending; not complete |
 | Previous handoff | `docs/handoffs/dl-0-2-architecture-decision-records.md` |
-| Next expected step | Approved implementation commit, then handoff finalization, source push, and source verification |
+| Next expected step | Create the documentation-only handoff-finalization commit, then push and verify both source commits |
 
 ## Task
 
@@ -43,6 +45,17 @@ DL-0.3 follows the [DL-0.1 specification](../development-loop/README.md) and
 the [DL-0.2 ADR package](../development-loop/adrs/README.md). The independent
 repository-instructions review result is `APPROVED`; no focused correction was
 required.
+
+## Implementation and review history
+
+1. Root `AGENTS.md` was created for the complete Panam APP repository.
+2. The Development Loop README was updated with the repository-instructions
+   link.
+3. Independent repository-instructions review returned `APPROVED`.
+4. No focused correction was required.
+5. The approved package was committed as
+   `1cc72bd42cdba9e63441a96f7133921168d0388b` with message
+   `Add DL-0.3 repository instructions`.
 
 ## What changed
 
@@ -79,20 +92,21 @@ instruction hierarchy.
 | --- | --- | --- |
 | Created | `AGENTS.md` | Canonical root repository instructions. |
 | Modified | `docs/development-loop/README.md` | Adds `../../AGENTS.md` to reading order as item 12. |
-| Created | `docs/handoffs/dl-0-3-panam-repository-instructions.md` | This PREPARING_HANDOFF draft. |
+| Created | `docs/handoffs/dl-0-3-panam-repository-instructions.md` | This finalized source-handoff content; its finalization commit remains separate. |
 
 ## Tests performed
 
 | Check | Command or method | Result | Notes |
 | --- | --- | --- | --- |
 | Pre-edit branch and base inspection | `git branch --show-current`; `git rev-parse HEAD` | Passed | `phase/development-loop-architecture`; `610161e45edaeec5fcec19e134e615dccfd6bbbd`. |
-| Pre-edit worktree and tracking inspection | `git status --short`; `git status -sb`; `git rev-list --left-right --count HEAD...origin/phase/development-loop-architecture` | Passed | Only expected DL-0.3 implementation paths were changed; divergence was `0 0`. |
+| Draft-era worktree and tracking inspection | `git status --short`; `git status -sb`; `git rev-list --left-right --count HEAD...origin/phase/development-loop-architecture` | Passed | At the implementation and handoff-draft operation, only expected DL-0.3 paths were changed; divergence was `0 0`. |
+| Implementation commit inspection | `git branch --show-current`; `git rev-parse HEAD`; `git status --short`; `git show --stat --oneline --decorate HEAD` | Passed | Clean tree at `1cc72bd42cdba9e63441a96f7133921168d0388b`; message and verified 3-file, 407-insertion, 1-deletion scope match. |
 | Required-file inspection | Read-only PowerShell `Test-Path` checks | Passed | Root instructions and this approved handoff path exist. |
 | Required-AGENTS-section inspection | Read-only PowerShell heading check | Passed | All required operational sections are present. |
 | Markdown-link resolution | Read-only PowerShell resolution check | Passed | Links from `AGENTS.md`, the Development Loop README, and this handoff resolve. |
 | Reading-order link inspection | Read-only content check | Passed | README links `[Panam Repository Instructions](../../AGENTS.md)` as item 12. |
 | Instruction and architecture-boundary inspection | Read-only content check | Passed | State Machine authority, claim/evidence boundary, Approval 2, sequential v1, pending Freeze, and future-only extensions are explicit. |
-| Changed-path and filesystem inspection | `git status --short` plus approved-path check | Passed | Only `AGENTS.md`, `docs/development-loop/README.md`, and this handoff are changed. |
+| Draft-era changed-path and filesystem inspection | `git status --short` plus approved-path check | Passed | During implementation and draft preparation, only `AGENTS.md`, `docs/development-loop/README.md`, and this handoff changed. |
 | Whitespace and tracked-diff validation | `git diff --check`; read-only trailing-whitespace check | Passed | `git diff --check` exit `0`; no trailing whitespace in all three changed files. |
 
 Skipped tests:
@@ -141,8 +155,9 @@ integration.
 ## Known limitations
 
 - This is an instruction and handoff artifact, not Development Loop runtime.
-- Implementation commit, handoff-finalization commit, source push, source
-  verification, Vault proposal, Approval 2, and Vault lifecycle remain pending.
+- The implementation commit exists; handoff-finalization commit, source push,
+  source verification, Vault proposal, Approval 2, and Vault lifecycle remain
+  pending.
 - `SOURCE_COMPLETED` and `COMPLETED` are not claimed.
 - Git reported only its normal LF-to-CRLF working-copy warning for the tracked
   README; whitespace validation itself passed.
@@ -170,12 +185,16 @@ commit, push, Vault approval, or completion authorization.
   changed.
 - Relative links resolve, changed-path inspection passed, and `git diff --check`
   returned exit code `0`.
+- The implementation was subsequently committed as
+  `1cc72bd42cdba9e63441a96f7133921168d0388b` with message
+  `Add DL-0.3 repository instructions`; Git reports 3 files changed, 407
+  insertions, and 1 deletion.
 
 ### Project-owner-confirmed operational facts
 
 - Independent repository-instructions review result: `APPROVED`.
 - Focused correction attempts used: 0 of maximum 3.
-- Current workflow state: `PREPARING_HANDOFF`.
+- Current workflow state: `FINALIZING_HANDOFF`.
 
 The review found root scope and nested inheritance correct; precedence preserves
 global safety, repository policy, contracts, approvals, and bounded tasks;
@@ -197,16 +216,20 @@ DL-0.4 missing agent role specifications
 -> explicit human Architecture Freeze Gate
 ```
 
-The source sequence after this draft remains approved implementation commit,
-handoff finalization, handoff-finalization commit, approved phase-branch push,
-source verification, then possible State-Machine evaluation of
+The source sequence after this finalized handoff content remains the
+handoff-finalization commit, approved phase-branch push, source verification,
+then possible State-Machine evaluation of
 `SOURCE_COMPLETED`; the Vault lifecycle remains separately approval-bound.
 
 ### Unresolved assumptions
 
-The actual implementation-commit and handoff-finalization-commit hashes must be
-observed from Git after their respective commits exist. No approval, external
-effect, or future lifecycle state may be inferred from this handoff draft.
+The implementation commit is verified. The handoff-finalization commit had not
+yet been created when this document was finalized. Its hash must be verified
+from Git history after the documentation-only finalization commit is created; a
+commit cannot reliably contain its own final hash. Later source evidence and the
+Vault proposal may record that observed hash without modifying this handoff
+again. No approval, external effect, or future lifecycle state may be inferred
+from this handoff.
 
 ## Repository and vault impact
 
@@ -221,9 +244,11 @@ effect, or future lifecycle state may be inferred from this handoff draft.
 | `Panam_Runtime` changed | No |
 | Vault files changed | No |
 | Capability Registry changed | No |
-| Staging, commit, push, Pull Request, or merge | No |
-| Implementation commit | Pending |
-| Handoff-finalization commit | Pending |
+| Finalization-operation staging, commit, push, Pull Request, or merge | No |
+| Implementation commit | `1cc72bd42cdba9e63441a96f7133921168d0388b` |
+| Implementation commit message | `Add DL-0.3 repository instructions` |
+| Verified implementation commit scope | 3 files changed, 407 insertions, 1 deletion |
+| Handoff-finalization commit | Not yet created; verify from Git after creation |
 | Source push | Pending |
 | Source milestone state | Not yet `SOURCE_COMPLETED` |
 | Vault proposal / Approval 2 / Vault lifecycle | Pending / Pending / Pending |
@@ -240,8 +265,9 @@ effect, or future lifecycle state may be inferred from this handoff draft.
 - [x] Independent `APPROVED` review and 0-of-3 focused-correction result.
 - [x] Actual branch, base HEAD, validation commands, path/link results, and
   `git diff --check` result.
-- [x] Pending commit, push, source-completion, Vault, Approval 2, and Freeze
-  lifecycle fields; no completion claim.
+- [x] Verified implementation commit and pending finalization-commit, push,
+  source-completion, Vault, Approval 2, and Freeze lifecycle fields; no
+  completion claim.
 - [x] Explicit out-of-scope confirmation: no runtime, dependency, schema,
   migration, agent-role, Vault, `AI_Agents`, `Panam_Runtime`, Capability
   Registry, stage, commit, push, Pull Request, or merge action.
