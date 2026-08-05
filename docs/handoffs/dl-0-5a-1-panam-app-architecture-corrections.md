@@ -1,14 +1,19 @@
 ---
 type: source-handoff
 milestone_id: DL-0.5A.1
-workflow_state: PREPARING_HANDOFF
+workflow_state: FINALIZING_HANDOFF
 implementation_review: APPROVED
 focused_correction_attempts: 2 of maximum 3
 residual_blocking_findings: None
 reviewed_bundle: "C:\Panam_Runtime\development-runs\dl-0-5\pre-freeze-corrections\review\dl-0-5a-1-panam-app-review-20260805-084354.zip"
 reviewed_bundle_sha256: 382280e67c624f4309851fa009642b303a9891af74f7b6a647ca0d14f3646ff2
-handoff_draft_verification: Pending
-implementation_commit: Pending
+handoff_draft_verification: PASSED
+draft_handoff_verification_evidence: "External read-only deterministic verification PASSED"
+precommit_implementation_diff_sha256: 42b8ec979d0e3ee0fed905d60deb0d1a177b53b5bf481f53665a9e633d35d7ab
+precommit_handoff_sha256: 8e9ad0047b631b26555e3ab90180c688871ebc5dc80066ef2c797e572d01927a
+implementation_commit: 5c8da08bd1fe818832635d9b270f71cf1b305b75
+implementation_commit_message: "Apply DL-0.5A.1 pre-freeze architecture corrections"
+implementation_commit_scope: "16 files changed, 288 insertions, 27 deletions"
 handoff_finalization_verification: Pending
 handoff_finalization_commit: Not yet created
 source_push: Pending
@@ -38,21 +43,26 @@ SHA-256 `382280e67c624f4309851fa009642b303a9891af74f7b6a647ca0d14f3646ff2`.
 
 ## Draft and finalization boundary
 
-After independent implementation review is `APPROVED`, Handoff Agent may update
-only this draft. Fresh draft verification must bind baseline, approved diff,
-paths, this handoff digest, Reviewer/evidence, correction count, status,
-lifecycle fields, and no premature claims before human implementation commit 1
-includes this draft and exact approved scope. Handoff Finalizer later modifies
-only this file with observed commit-1 facts. Fresh final verification precedes
-the human handoff-only finalization commit. This draft invents no future commit
-hash; source push remains pending until both commits and clean synchronized
-source verification exist.
+Independent implementation review is `APPROVED`, and the external read-only
+draft-handoff verification is `PASSED`. Human implementation commit 1 includes
+the exact approved 16-path scope and this draft's pre-commit content. Handoff
+Finalizer now modifies only this file with observed commit-1 facts. Fresh final
+verification precedes the human handoff-only finalization commit. This handoff
+invents no future finalization-commit hash; source push remains pending until
+both commits and clean synchronized source verification exist.
 
 ## Current lifecycle
 
-No implementation commit, finalization commit, source push, `SOURCE_COMPLETED`,
-`COMPLETED`, or Architecture Freeze claim exists. The State Machine remains the
-sole transition authority.
+Implementation commit 1 exists. The handoff-finalization commit, source push,
+`SOURCE_COMPLETED`, `COMPLETED`, and Architecture Freeze remain pending. The
+State Machine remains the sole transition authority.
+
+## Finalization boundary
+
+A commit cannot reliably contain its own final hash. The observed
+handoff-finalization commit may be recorded later in source evidence or Vault
+knowledge without modifying this handoff again. Final-handoff verification
+remains external evidence and is not written back into this handoff.
 
 ## Correction history
 
