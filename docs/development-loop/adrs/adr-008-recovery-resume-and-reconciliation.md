@@ -55,3 +55,11 @@ New specialist nodes must add node-specific reconciliation evidence and forbidde
 - [State Machine](../03-state-machine.md)
 - [Safety, Git, and approval policy](../05-safety-git-approval-policy.md)
 - [ADR-001: Outer-loop ownership and durable state](adr-001-outer-loop-ownership-and-durable-state.md)
+
+## DL-0.5A correction
+
+Fresh deterministic draft and final handoff-verification evidence is required
+before the respective human source commits. Evidence invalidates on relevant
+bound-state or artifact change; source Git remains phase-branch-only and the
+Approval-2 Vault exception remains Vault-only. This is future normative
+architecture, not runtime implementation.

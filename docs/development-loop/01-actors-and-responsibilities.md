@@ -40,3 +40,11 @@ No role may directly assign workflow state; only the [State Machine](03-state-ma
 ## Future considerations
 
 A manual ChatGPT adapter is a fallback; API-backed Planner and Reviewer automation are the primary target.
+
+## DL-0.5A handoff verification
+
+Verifier gains two deterministic modes, not a new role. Draft-handoff mode runs
+after Handoff Agent and before implementation commit 1; final-handoff mode runs
+after Handoff Finalizer and before the handoff-finalization commit. Handoff
+roles prepare only their bounded artifact, Reviewer remains advisory, and the
+State Machine alone authorizes transitions.

@@ -22,8 +22,8 @@ BLOCKED and CANCELLED are additional phase states. One phase has one long-lived 
 ```text
 DRAFT → FEASIBILITY_CHECKING → AWAITING_EXECUTION_APPROVAL
 → APPROVED_FOR_IMPLEMENTATION → PREPARING_RUN → IMPLEMENTING → VERIFYING
-→ REVIEWING → PREPARING_HANDOFF → COMMITTING_IMPLEMENTATION
-→ FINALIZING_HANDOFF → COMMITTING_HANDOFF → PUSHING_SOURCE → SOURCE_COMPLETED
+→ REVIEWING → PREPARING_HANDOFF → VERIFYING_HANDOFF_DRAFT → COMMITTING_IMPLEMENTATION
+→ FINALIZING_HANDOFF → VERIFYING_FINAL_HANDOFF → COMMITTING_HANDOFF → PUSHING_SOURCE → SOURCE_COMPLETED
 → PREPARING_VAULT_PROPOSAL → AWAITING_VAULT_APPROVAL → WRITING_TO_VAULT
 → VERIFYING_VAULT → COMMITTING_VAULT → PUSHING_VAULT → COMPLETED
 ```
@@ -51,3 +51,35 @@ The state machine does not replace adapters, execute commands itself, or trust a
 ## Future considerations
 
 Transition guards and exact event payload schemas are implemented after architecture freeze, not in DL-0.1.
+
+## DL-0.5A deterministic handoff-gate guards
+
+`VERIFYING_HANDOFF_DRAFT` binds baseline HEAD, approved diff and paths, handoff
+digest, Reviewer/evidence results, correction count, status, lifecycle fields,
+and absence of premature claims. `VERIFYING_FINAL_HANDOFF` binds implementation
+commit/tree/message/scope, finalized handoff digest, handoff-only diff, status,
+and no invented finalization hash. Relevant change invalidates evidence; only
+the State Machine may evaluate the gate.
+
+### Handoff-verification result transitions
+
+`VERIFYING_HANDOFF_DRAFT` has these result transitions:
+
+- fresh `PASSED` → `COMMITTING_IMPLEMENTATION`;
+- correctable `FAILED` within the remaining approved correction budget →
+  `PREPARING_HANDOFF`;
+- `BLOCKED` → `BLOCKED`, and `NEEDS_HUMAN_DECISION` →
+  `AWAITING_HUMAN_DECISION`.
+
+`VERIFYING_FINAL_HANDOFF` has these result transitions:
+
+- fresh `PASSED` → `COMMITTING_HANDOFF`;
+- correctable `FAILED` within the remaining approved correction budget →
+  `FINALIZING_HANDOFF`;
+- `BLOCKED` → `BLOCKED`, and `NEEDS_HUMAN_DECISION` →
+  `AWAITING_HUMAN_DECISION`.
+
+`PUSHING_SOURCE` may reach `SOURCE_COMPLETED` only after fresh source
+synchronization evidence confirms that local `HEAD` equals the approved remote
+branch `HEAD`, divergence is `0 0`, the worktree and index are clean, both
+expected commits exist, and no unexpected path or commit exists.

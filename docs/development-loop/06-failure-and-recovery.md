@@ -35,3 +35,11 @@ Recovery does not use destructive Git cleanup, automatic stash, branch deletion,
 ## Future considerations
 
 Concrete lease duration, process supervisor, and artifact-retention settings remain implementation decisions constrained by this recovery model.
+
+## DL-0.5A handoff-evidence recovery
+
+If a handoff, approved diff, Git state, review, verification evidence, approval,
+implementation commit, or branch changes, discard the affected verification
+result and gather fresh deterministic evidence. Never reuse draft evidence after
+commit 1 or final evidence after a handoff-only diff changes. Reconcile any
+ambiguous external effect before retry.

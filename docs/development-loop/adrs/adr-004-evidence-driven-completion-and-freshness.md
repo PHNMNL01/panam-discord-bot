@@ -59,3 +59,11 @@ Additional evidence types, reproducible environments, attestations, or signed pr
 - [Core data model](../04-core-data-model.md)
 - [Safety, Git, and approval policy](../05-safety-git-approval-policy.md)
 - [ADR-012: Codex adapter and verification hierarchy](adr-012-codex-adapter-and-verification-hierarchy.md)
+
+## DL-0.5A correction
+
+Fresh deterministic draft and final handoff-verification evidence is required
+before the respective human source commits. Evidence invalidates on relevant
+bound-state or artifact change; source Git remains phase-branch-only and the
+Approval-2 Vault exception remains Vault-only. This is future normative
+architecture, not runtime implementation.

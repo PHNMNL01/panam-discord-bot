@@ -56,3 +56,11 @@ An approved later milestone may select a supported interface and implement the p
 - [API and agent contracts](../08-api-agent-contracts.md)
 - [Implementation roadmap](../10-implementation-roadmap.md)
 - [ADR-004: Evidence-driven completion and freshness](adr-004-evidence-driven-completion-and-freshness.md)
+
+## DL-0.5A correction
+
+Fresh deterministic draft and final handoff-verification evidence is required
+before the respective human source commits. Evidence invalidates on relevant
+bound-state or artifact change; source Git remains phase-branch-only and the
+Approval-2 Vault exception remains Vault-only. This is future normative
+architecture, not runtime implementation.

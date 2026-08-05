@@ -48,3 +48,11 @@ DL-0.1 creates no schema. DL-P1 implements only the initial durable-foundation s
 ## Future considerations
 
 Artifact retention, encryption, and detailed migration mechanics require later policy and implementation work.
+
+## DL-0.5A handoff-verification evidence
+
+`verification_runs` and `artifacts` retain separate draft and final handoff
+results with mode, repository/branch, baseline or implementation binding, diff
+and handoff digests, paths, status, lifecycle fields, Reviewer/evidence binding,
+commands, and timestamp. Schema validation is mandatory but insufficient:
+fresh deterministic Git, filesystem, content, and digest evidence is required.

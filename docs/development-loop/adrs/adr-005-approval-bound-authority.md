@@ -54,3 +54,11 @@ Later policy engines or signed approval mechanisms may implement the same bindin
 - [Core data model](../04-core-data-model.md)
 - [Human interaction model](../09-human-interaction-model.md)
 - [ADR-004: Evidence-driven completion and freshness](adr-004-evidence-driven-completion-and-freshness.md)
+
+## DL-0.5A correction
+
+Fresh deterministic draft and final handoff-verification evidence is required
+before the respective human source commits. Evidence invalidates on relevant
+bound-state or artifact change; source Git remains phase-branch-only and the
+Approval-2 Vault exception remains Vault-only. This is future normative
+architecture, not runtime implementation.

@@ -17,10 +17,21 @@ flowchart LR
   R -->|NEEDS_FIX, max 3 fixes| C
   R -->|BLOCKED or NEEDS_HUMAN_DECISION| HD[Human-decision stop]
   R -->|APPROVED| H[Handoff Agent]
-  H --> I[Implementation commit]
+  H --> DV[Verifier draft-handoff verification]
+  DV -->|PASSED| IS[Human explicit implementation staging]
+  DV -->|correctable FAILED within approved budget| H
+  DV -->|BLOCKED or NEEDS_HUMAN_DECISION| HD
+  IS --> I[Human implementation commit 1]
   I --> HF[Handoff Finalizer]
-  HF --> G[Handoff-finalization commit and source push]
-  G --> S[SOURCE_COMPLETED]
+  HF --> FV[Verifier final-handoff verification]
+  FV -->|PASSED| HS[Human explicit handoff-only staging]
+  FV -->|correctable FAILED within approved budget| HF
+  FV -->|BLOCKED or NEEDS_HUMAN_DECISION| HD
+  HS --> HC[Human handoff-finalization commit 2]
+  HC --> SP[Human controlled source push]
+  SP --> SV[Source synchronization and reconciliation verification]
+  SV -->|PASSED| S[SOURCE_COMPLETED]
+  SV -->|FAILED, BLOCKED, or NEEDS_HUMAN_DECISION| HD
   S --> K[Knowledge Curator proposal artifact]
   K --> A2[Approval 2]
   A2 --> W[Vault Writer, verify, commit, push]
@@ -42,10 +53,12 @@ flowchart LR
 2. Approval 1 authorizes implementation, verification, up to three focused fixes, the two source commits, and their push.
 3. Codex implements; Verifier gathers deterministic evidence; Reviewer returns a decision.
 4. A NEEDS_FIX decision permits a focused fix that preserves the original Milestone Contract. After three failed focused fixes, the run is BLOCKED.
-5. After Verifier PASSED, Reviewer APPROVED, and policy success, the Handoff Agent creates the draft handoff with the implementation-commit field Pending.
-6. Panam creates implementation commit 1 containing implementation, tests, approved repository documentation, and the handoff draft. The Handoff Finalizer then inserts commit 1's real hash, finalizes evidence and next expected step, and prepares the handoff-only change for handoff-finalization commit 2. Panam pushes both to the approved phase branch.
-7. The run reaches SOURCE_COMPLETED. Knowledge Curator creates a runtime-artifact proposal, not a source-repository proposal file.
-8. Approval 2 authorizes only that exact proposal and named Vault paths. Vault changes are verified, committed, and pushed before COMPLETED.
+5. After Verifier `PASSED`, Reviewer `APPROVED`, and policy success, the Handoff Agent prepares the draft handoff with the implementation-commit field Pending.
+6. Verifier performs fresh deterministic draft-handoff verification. Only `PASSED` permits explicit staging of the exact approved implementation scope and draft, followed by human implementation commit 1. A correctable `FAILED` result returns to Handoff Agent within the remaining approved correction budget; `BLOCKED` or `NEEDS_HUMAN_DECISION` stops for a human decision.
+7. Handoff Finalizer then modifies only the handoff with commit-1 facts and final evidence. Verifier performs fresh deterministic final-handoff verification. Only `PASSED` permits explicit handoff-only staging and human handoff-finalization commit 2; correctable `FAILED` returns to Handoff Finalizer within the remaining approved correction budget, while `BLOCKED` or `NEEDS_HUMAN_DECISION` stops for a human decision.
+8. A human performs a controlled source push only to the approved phase branch. Fresh source synchronization and reconciliation verification must pass before the run reaches `SOURCE_COMPLETED`.
+9. After `SOURCE_COMPLETED`, Knowledge Curator creates a runtime-artifact proposal, not a source-repository proposal file.
+10. Approval 2 authorizes only that exact proposal and named Vault paths. Vault changes are verified, committed, and pushed before `COMPLETED`.
 
 ## Approved decisions
 
@@ -64,3 +77,12 @@ There is no automatic PR approval, merge, branch deletion, or next-milestone sta
 ## Future considerations
 
 The Phase Merge Package is a v1 output; branch integration remains human-controlled.
+
+## DL-0.5A commit gates
+
+The draft handoff and exact approved implementation scope remain uncommitted
+until independent review is `APPROVED` and draft verification is fresh `PASSED`.
+The human then creates implementation commit 1. Handoff Finalizer modifies only
+the handoff; fresh final verification is required before the human creates the
+handoff-only finalization commit. Both commits may be pushed only by a human to
+the approved source phase branch.

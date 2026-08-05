@@ -4,7 +4,7 @@
 
 This is the canonical repository-local specification for **Panam Development Loop** v1: an approval-driven, auditable orchestrator for one approved software milestone at a time.
 
-Architecture status: **canonical DL-0.1 specification capturing approved architecture decisions; pending the final DL-P0 read-only audit and Architecture Freeze Gate. Implementation has not started as part of DL-0.1.**
+Architecture status: **canonical DL-0.1 specification capturing approved architecture decisions. The initial DL-0.5 read-only audit returned `NEEDS_HUMAN_DECISION`; DL-0.5A corrections and a repeat audit remain before the explicit human Architecture Freeze Gate. No runtime implementation is claimed by this documentation package.**
 
 ## Document index and reading order
 
@@ -51,3 +51,9 @@ This specification records approved v1 decisions. It does not create Python modu
 ## Future considerations
 
 The physical Development Host may change, but the domain model must not depend on a particular PC, VM, or VDS.
+
+## DL-0.5A correction status
+
+DL-0.5A corrects stale current-state wording, source-versus-Vault Git policy,
+and deterministic handoff-verification gates. It does not grant Architecture
+Freeze or implement orchestration runtime.

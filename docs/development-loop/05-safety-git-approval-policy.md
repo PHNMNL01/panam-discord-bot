@@ -24,9 +24,30 @@ Capability Registry modification additionally requires an explicit approval flag
 
 ### Git policy
 
-Read-only Git operations may include status, diff, diff --check, branch, rev-parse, log, remote inspection, and ls-remote. Approved Git writes may create the approved phase branch, stage explicit approved files, commit, and push only to that phase branch.
+Read-only Git operations may include status, diff, diff --check, branch, rev-parse, log, remote inspection, and ls-remote. Source Git writes may create the approved phase branch, stage explicit approved files, commit, and push only to that approved phase branch; source main/master are forbidden. Vault Writer is the narrow Approval-2 exception only: it may make the approved commit and push to the exact bound Vault target branch, including Vault_work/main.
 
-Always forbidden: `git add .`, force push, force-with-lease, automatic merge, automatic rebase, reset --hard, git clean, automatic stash, branch deletion, automatic pull, push to main/master, and remote URL modification.
+Globally forbidden in every repository:
+
+- `git add .`
+- force push
+- force-with-lease
+- automatic merge
+- automatic rebase
+- reset --hard
+- git clean
+- automatic stash
+- branch deletion
+- automatic pull
+- remote URL modification
+
+Additionally forbidden for source repositories:
+
+- push to `main` or `master`
+
+Vault Writer remains allowed only under exact valid Approval 2 to commit and
+push to the exact bound Vault target branch, including `Vault_work/main`. This
+Vault-only exception does not permit force push, broad staging, automatic pull,
+remote changes, or any source-repository `main`/`master` push.
 
 Before each write, revalidate branch, remote, base commit, approval, changed paths, and evidence digest.
 
@@ -51,3 +72,11 @@ No agent is a security authority. This policy does not authorize current reposit
 ## Future considerations
 
 Project-specific protected-branch patterns, command registries, and forbidden-path lists require durable registry implementation.
+
+### Handoff verification before source commits
+
+Approval 1 binds both handoff-verification procedures. Fresh draft `PASSED`
+evidence is required before human implementation commit 1; fresh final `PASSED`
+evidence is required before human handoff-finalization commit 2. Scope, handoff,
+Git, review/evidence, approval, commit, or branch changes invalidate the result.
+Codex has no staging, commit, push, or transition authority.

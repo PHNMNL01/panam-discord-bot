@@ -21,10 +21,7 @@ model](docs/development-loop/06-failure-and-recovery.md), [agent
 contracts](docs/development-loop/08-api-agent-contracts.md), and
 [roadmap](docs/development-loop/10-implementation-roadmap.md).
 
-Architecture Freeze is pending. After DL-0.3 completes its full source and
-Vault lifecycle: DL-0.4 agent-role specifications, DL-0.5 read-only audit, and
-the explicit human Architecture Freeze Gate remain. Future extension points are
-not current capabilities.
+Architecture Freeze is pending. DL-0.1 through DL-0.4 have completed their approved source and Vault documentation lifecycles. The initial DL-0.5 read-only audit returned `NEEDS_HUMAN_DECISION`; DL-0.5A corrections, a repeat audit, and the explicit human Architecture Freeze Gate remain. Future extension points are not current capabilities.
 
 ## Instruction and authority precedence
 
@@ -156,3 +153,19 @@ summary, verification commands with actual results, `git diff --check`, final
 `git status --short`, and failures, skips, warnings, and residual risks.
 Explicitly confirm prohibited actions not performed. Include enough branch, HEAD,
 changed-path, and Git-state evidence for independent review.
+
+## DL-0.5A source and Vault Git boundary
+
+Source writes use only an explicitly approved phase branch. Source push to
+`main` or `master` is forbidden, and source staging, commits, and phase-branch
+push remain human-controlled unless a later exact contract authorizes them. The
+Approval-2 Vault Writer exception is Vault-only: it permits only the exact
+approved commit and push to the exact bound Vault target branch, including
+`Vault_work/main`; it never relaxes source policy.
+
+Fresh deterministic draft-handoff evidence is required after Handoff Agent and
+before implementation commit 1. Fresh deterministic final-handoff evidence is
+required after Handoff Finalizer and before the handoff-finalization commit.
+Only the State Machine evaluates evidence for transitions. These are future
+normative rules; no runtime, automated verifier, adapter, worker, or Skills
+implementation is claimed.

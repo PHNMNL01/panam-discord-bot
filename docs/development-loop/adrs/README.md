@@ -77,14 +77,23 @@ Mandatory v1 decisions govern durable ownership, graph semantics, typed transiti
 
 Outcome-based routing, a Skill Registry, reusable versioned Skills, graph composition, parallel execution, external-orchestrator adapters, and the Codex SDK or app-server integration are future extension points. This package defines constraints for them but does not present them as implemented capabilities.
 
-## DL-P0 dependency chain
+## Current DL-P0 dependency chain
+
+The authoritative current dependency chain is:
 
 ```text
 DL-0.2 ADR decisions
 -> DL-0.3 repository instructions
 -> DL-0.4 missing agent role specifications
--> DL-0.5 final read-only architecture audit
+-> initial DL-0.5 read-only audit returned NEEDS_HUMAN_DECISION
+-> DL-0.5A.1 Panam APP architecture corrections
+-> DL-0.5A.2 AI_Agents role/workflow corrections
+-> approved Vault lifecycle
+-> repeat DL-0.5 read-only audit
 -> explicit human Architecture Freeze Gate
 ```
 
-Architecture Freeze remains pending until that chain ends in the explicit human gate.
+Architecture Freeze remains pending until the explicit human gate. This chain
+preserves all historical ADR decisions and accepted statuses; it does not claim
+that the corrections, repeat audit, or Freeze Gate are complete or that runtime
+implementation exists.

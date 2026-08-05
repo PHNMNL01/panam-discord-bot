@@ -96,14 +96,17 @@ DL-P0 includes the canonical architecture specification, Architecture Decision R
 
 | Milestone | Canonical title | Objective | Principal boundary |
 |---|---|---|---|
-| DL-5.1 | Explicit Git Staging | Stage only approved source files. | Never `git add .`. |
-| DL-5.2 | Handoff Agent | Create the Pending handoff draft before commit 1. | No finalization or commit 2. |
-| DL-5.3 | Implementation Commit | Create approved source commit 1. | No push to main/master. |
-| DL-5.4 | Handoff Finalizer | Insert commit 1 hash and final evidence. | Handoff-only change; no third commit. |
-| DL-5.5 | Handoff Finalization Commit | Create source commit 2. | No unrelated source changes. |
-| DL-5.6 | Controlled Source Push | Push both commits to the approved phase branch. | No force push. |
-| DL-5.7 | Source Git Reconciliation | Reconcile interrupted commit/push operations. | No ambiguous retry. |
-| DL-5.8 | Source Completion UI | Present SOURCE_COMPLETED evidence. | SOURCE_COMPLETED is not terminal. |
+| DL-5.1 | Handoff Agent | Prepare the Pending handoff draft. | No implementation staging or commit. |
+| DL-5.2 | Deterministic Draft-Handoff Verification | Verify fresh draft-handoff evidence. | `PASSED` is required before implementation staging and commit. |
+| DL-5.3 | Explicit Implementation Staging | Stage the exact approved implementation scope and draft. | Never `git add .`. |
+| DL-5.4 | Implementation Commit | Create approved source commit 1. | No push to source `main` or `master`. |
+| DL-5.5 | Handoff Finalizer | Modify only the handoff after commit 1. | No implementation changes or third commit. |
+| DL-5.6 | Deterministic Final-Handoff Verification | Verify fresh final-handoff evidence. | `PASSED` is required before handoff-only staging and commit. |
+| DL-5.7 | Explicit Handoff-Only Staging | Stage only the finalized handoff. | No unrelated source changes. |
+| DL-5.8 | Handoff-Finalization Commit | Create source commit 2. | Contains only the handoff-only change. |
+| DL-5.9 | Controlled Source Push | Push to the approved source phase branch. | No source `main`/`master` or force push. |
+| DL-5.10 | Source Synchronization and Reconciliation Verification | Confirm local and remote equality, divergence `0 0`, and clean state. | Required before `SOURCE_COMPLETED`. |
+| DL-5.11 | Source Completion Evidence/UI | Present `SOURCE_COMPLETED` evidence. | Both expected commits must exist; `SOURCE_COMPLETED` is not terminal. |
 
 ### DL-P6 Vault Proposal and Knowledge Workflow
 
@@ -157,3 +160,18 @@ This roadmap is not authorization to begin a later phase or create implementatio
 ## Future considerations
 
 Milestone-level acceptance criteria, exact file plans, and pilot-project selection belong to approved contracts for the corresponding implementation phase.
+
+## DL-0.5A pre-freeze corrections
+
+The initial DL-0.5 audit returned `NEEDS_HUMAN_DECISION`. DL-0.5A.1 corrects
+Panam APP documentation, followed by DL-0.5A.2 AI_Agents corrections, an
+approved Vault lifecycle, and a repeat audit before the human Freeze Gate.
+The mandatory future DL-P5 sequence is Handoff Agent -> deterministic
+draft-handoff verification -> explicit implementation staging -> implementation
+commit 1 -> Handoff Finalizer -> deterministic final-handoff verification ->
+explicit handoff-only staging -> handoff-finalization commit 2 -> controlled
+source push -> source synchronization and reconciliation verification ->
+`SOURCE_COMPLETED` evidence/UI. Draft and final verification must each be fresh
+`PASSED` before their respective staging and commit; source push never targets
+`main` or `master`, and never uses force push. These are future normative
+requirements, not implemented runtime gates.

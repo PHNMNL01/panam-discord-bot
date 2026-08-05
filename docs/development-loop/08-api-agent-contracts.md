@@ -48,3 +48,12 @@ Contracts are not direct database commands and not a permission bypass. They can
 ## Future considerations
 
 Exact schema language and artifact encoding are deferred to DL-P1 and later adapter milestones.
+
+## DL-0.5A handoff-verification contracts
+
+Verifier accepts `draft-handoff` and `final-handoff` modes and returns `PASSED`,
+`FAILED`, `BLOCKED`, or `NEEDS_HUMAN_DECISION` with evidence digests. Draft mode
+binds baseline, approved diff, paths, handoff, Reviewer/evidence, corrections,
+status, and lifecycle fields. Final mode binds implementation commit/tree,
+message/scope, finalized handoff, handoff-only diff, status, and lifecycle
+fields. Neither contract authorizes a commit or transition.
