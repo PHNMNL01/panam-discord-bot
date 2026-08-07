@@ -2,9 +2,9 @@
 
 ## Status
 
-**DRAFT — pending fresh draft-handoff verification.**
+**FINALIZED — implementation commit 1 observed; pending fresh final-handoff verification.**
 
-This draft records the approved, uncommitted DL-P1.2 implementation candidate. It is not a source commit, push, `SOURCE_COMPLETED`, Vault lifecycle action, milestone completion, or phase closeout.
+This finalized handoff records the approved, committed DL-P1.2 implementation candidate. It is not a handoff-finalization commit, push, `SOURCE_COMPLETED`, Vault lifecycle action, milestone completion, or phase closeout.
 
 ## Milestone identity and lifecycle binding
 
@@ -13,7 +13,7 @@ This draft records the approved, uncommitted DL-P1.2 implementation candidate. I
 - Implementation result: `IMPLEMENTED` (primary attempt `1`; focused correction attempts `0`).
 - Independent verification: `PASSED`.
 - Independent advisory review: `APPROVED`; findings: none.
-- Implementation commit: **Pending**.
+- Implementation commit: **COMPLETED — `d1b30b426bebd5e69332f307676085334acd76b6`**.
 - Handoff-finalization commit: **Pending**.
 - Source push: **Pending**.
 - `SOURCE_COMPLETED`: **Pending**.
@@ -47,6 +47,16 @@ Aggregate implementation SHA-256: `a4d56db05c38a8d504b0d4ea2ecab1e7c9eb9acbe2620
 
 Aggregation method: sort the exact three relative paths lexicographically. For each path, update one SHA-256 stream with UTF-8 encoded relative path, one LF byte, raw file bytes, and one LF byte; no additional separator or metadata is included.
 
+## Implementation commit 1 binding
+
+- Commit: `d1b30b426bebd5e69332f307676085334acd76b6`.
+- Tree: `2ce429cd9a4e245a3a277c8d1f6b45869ae21750`.
+- Parent: `f64f01b8d52c625fc3cb2f6b68d2bef02c21b837`.
+- Message: `Implement DL-P1.2 phase and milestone contracts`.
+- Committed scope: `docs/handoffs/dl-p1-2-phase-and-milestone-contracts.md`, `panam_development_loop/__init__.py`, `panam_development_loop/models.py`, and `panam_development_loop_poc_test.py`.
+
+This observed implementation commit is distinct from the still-pending handoff-finalization commit 2.
+
 ## Implemented contract behavior
 
 - `ContractVersion` accepts only version `"1"`; `PhaseContract` has explicit project/phase identity, and `MilestoneContract` has explicit project/phase/milestone identity plus the required objective, scope, exclusions, acceptance criteria, allowed paths, forbidden paths, verification plan, and stop conditions.
@@ -75,6 +85,12 @@ Verification directory: `C:\Panam_Runtime\development-runs\dl-p1-2\verification\
 - Independent semantic assertions passed, `git diff --check` passed, exact changed-path scope and source digest matched, and no unauthorized side effects were found.
 - The restricted-sandbox temporary-directory failure is recorded as an environment condition; it was not accepted as a passing run. A fresh elevated rerun passed.
 
+## Draft-handoff verification binding
+
+- Directory: `C:\Panam_Runtime\development-runs\dl-p1-2\handoff-verification\draft-verification-20260807-095852`.
+- Mode and verdict: `draft-handoff`, `PASSED`.
+- `VERIFICATION-REPORT.md`: 5158 bytes, SHA-256 `bce911a055d181c1750716e5182a768834bdd5be368a507de6a37315a8e40b5d`.
+- Final-handoff verification: **Pending — not yet run**.
 ## Independent review binding
 
 Review directory: `C:\Panam_Runtime\development-runs\dl-p1-2\review\review-20260807-093913`.
@@ -89,6 +105,6 @@ DL-P1.2 intentionally defers filesystem path resolution and project-specific/cas
 
 ## Invalidation and next safe lifecycle action
 
-This draft requires fresh deterministic `DRAFT-HANDOFF VERIFICATION` before any human implementation staging or implementation commit. That verification must bind the exact approved implementation diff and paths, this draft's bytes and digest, branch/baseline, review and verification evidence, correction count, current Git state, pending lifecycle fields, and absence of premature completion claims. Any relevant source, contract, evidence, review, branch/HEAD, Git-state, or handoff-byte change invalidates the resulting evidence.
+This finalized handoff requires fresh deterministic `FINAL-HANDOFF VERIFICATION` before any handoff-only staging or handoff-finalization commit 2. That verification must bind implementation commit 1, this finalized handoff's bytes and digest, the exact handoff-only diff, branch/Git state, review and verification evidence, correction count, pending lifecycle fields, and absence of premature completion claims. Any relevant source, contract, evidence, review, branch/HEAD, Git-state, or handoff-byte change invalidates the resulting evidence.
 
-No staging or commit is authorized by this draft. The next safe lifecycle action is `FRESH DRAFT-HANDOFF VERIFICATION`.
+No handoff-only staging or commit 2 is authorized by this finalized handoff. The next safe lifecycle action is `FRESH FINAL-HANDOFF VERIFICATION`.
