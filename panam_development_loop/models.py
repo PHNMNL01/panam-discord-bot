@@ -228,6 +228,262 @@ class MilestoneContract:
         return hashlib.sha256(self.canonical_json().encode("utf-8")).hexdigest()
 
 
+class ApprovalVersion(str, Enum):
+    """The approval-model version supported by the DL-P1.3 slice."""
+
+    V1 = "1"
+
+
+class ApprovalKind(str, Enum):
+    """Stable discriminators for the architecture-recognized approval gates."""
+
+    PHASE_START_APPROVAL = "PHASE_START_APPROVAL"
+    APPROVAL_1 = "APPROVAL_1"
+    APPROVAL_2 = "APPROVAL_2"
+
+
+class ApprovalTargetKind(str, Enum):
+    """Stable discriminators for an approval's external target."""
+
+    SOURCE_REPOSITORY = "SOURCE_REPOSITORY"
+    VAULT = "VAULT"
+
+
+class ApprovalValidationCode(str, Enum):
+    """Stable reasons for rejecting an invalid approval binding."""
+
+    UNSUPPORTED_VERSION = "UNSUPPORTED_VERSION"
+    INVALID_KIND = "INVALID_KIND"
+    INVALID_IDENTITY = "INVALID_IDENTITY"
+    EMPTY_REQUIRED_VALUE = "EMPTY_REQUIRED_VALUE"
+    INVALID_DIGEST = "INVALID_DIGEST"
+    DUPLICATE_VALUE = "DUPLICATE_VALUE"
+    INVALID_PATH = "INVALID_PATH"
+
+
+class ApprovalValidationError(ValueError):
+    """Raised when an ApprovalBinding is invalid."""
+
+    def __init__(self, code: ApprovalValidationCode, field_name: str) -> None:
+        self.code = code
+        self.field_name = field_name
+        super().__init__(f"{code.value}: {field_name}")
+
+
+def _validate_approval_text(
+    value: object,
+    field_name: str,
+    code: ApprovalValidationCode,
+) -> str:
+    if not isinstance(value, str) or not value or value != value.strip():
+        raise ApprovalValidationError(code, field_name)
+    if any(ord(character) < 32 or ord(character) == 127 for character in value):
+        raise ApprovalValidationError(code, field_name)
+    return value
+
+
+def _coerce_approval_version(value: object) -> ApprovalVersion:
+    if isinstance(value, ApprovalVersion):
+        return value
+    if isinstance(value, str):
+        try:
+            return ApprovalVersion(value)
+        except ValueError:
+            pass
+    raise ApprovalValidationError(ApprovalValidationCode.UNSUPPORTED_VERSION, "approval_version")
+
+
+def _coerce_approval_kind(value: object) -> ApprovalKind:
+    if isinstance(value, ApprovalKind):
+        return value
+    if isinstance(value, str):
+        try:
+            return ApprovalKind(value)
+        except ValueError:
+            pass
+    raise ApprovalValidationError(ApprovalValidationCode.INVALID_KIND, "approval_kind")
+
+
+def _coerce_approval_target_kind(value: object) -> ApprovalTargetKind:
+    if isinstance(value, ApprovalTargetKind):
+        return value
+    if isinstance(value, str):
+        try:
+            return ApprovalTargetKind(value)
+        except ValueError:
+            pass
+    raise ApprovalValidationError(ApprovalValidationCode.INVALID_KIND, "target_kind")
+
+
+def _validate_subject_digest(value: object) -> str:
+    if (
+        not isinstance(value, str)
+        or len(value) != 64
+        or any(character not in "0123456789abcdef" for character in value)
+    ):
+        raise ApprovalValidationError(ApprovalValidationCode.INVALID_DIGEST, "subject_digest")
+    return value
+
+
+def _validate_approval_values(
+    value: object,
+    field_name: str,
+    *,
+    required: bool,
+) -> tuple[str, ...]:
+    if not isinstance(value, tuple):
+        raise ApprovalValidationError(ApprovalValidationCode.EMPTY_REQUIRED_VALUE, field_name)
+    if required and not value:
+        raise ApprovalValidationError(ApprovalValidationCode.EMPTY_REQUIRED_VALUE, field_name)
+    values = tuple(
+        _validate_approval_text(item, field_name, ApprovalValidationCode.EMPTY_REQUIRED_VALUE)
+        for item in value
+    )
+    if len(set(values)) != len(values):
+        raise ApprovalValidationError(ApprovalValidationCode.DUPLICATE_VALUE, field_name)
+    return tuple(sorted(values))
+
+
+def _validate_approval_paths(value: object) -> tuple[str, ...]:
+    if not isinstance(value, tuple):
+        raise ApprovalValidationError(ApprovalValidationCode.EMPTY_REQUIRED_VALUE, "allowed_paths")
+    paths = []
+    for item in value:
+        path = _validate_approval_text(
+            item,
+            "allowed_paths",
+            ApprovalValidationCode.EMPTY_REQUIRED_VALUE,
+        )
+        if "\\" in path or path.startswith("/") or path.startswith("//"):
+            raise ApprovalValidationError(ApprovalValidationCode.INVALID_PATH, "allowed_paths")
+        if len(path) >= 2 and path[0].isalpha() and path[1] == ":":
+            raise ApprovalValidationError(ApprovalValidationCode.INVALID_PATH, "allowed_paths")
+        if any(character in path for character in "*?[]{}"):
+            raise ApprovalValidationError(ApprovalValidationCode.INVALID_PATH, "allowed_paths")
+        if any(not segment or segment in {".", ".."} for segment in path.split("/")):
+            raise ApprovalValidationError(ApprovalValidationCode.INVALID_PATH, "allowed_paths")
+        paths.append(path)
+    if len(set(paths)) != len(paths):
+        raise ApprovalValidationError(ApprovalValidationCode.DUPLICATE_VALUE, "allowed_paths")
+    return tuple(sorted(paths))
+
+
+@dataclass(frozen=True)
+class ApprovalBinding:
+    """A pure, versioned binding for one human approval record."""
+
+    approval_id: str
+    approval_version: ApprovalVersion | str
+    approval_kind: ApprovalKind | str
+    subject_id: str
+    subject_digest: str
+    target_kind: ApprovalTargetKind | str
+    target_id: str
+    target_branch: str
+    base_commit: str
+    allowed_actions: tuple[str, ...]
+    allowed_paths: tuple[str, ...]
+    approver_id: str
+    approved_at: str
+
+    def __post_init__(self) -> None:
+        object.__setattr__(
+            self,
+            "approval_id",
+            _validate_approval_text(
+                self.approval_id,
+                "approval_id",
+                ApprovalValidationCode.INVALID_IDENTITY,
+            ),
+        )
+        object.__setattr__(self, "approval_version", _coerce_approval_version(self.approval_version))
+        object.__setattr__(self, "approval_kind", _coerce_approval_kind(self.approval_kind))
+        object.__setattr__(
+            self,
+            "subject_id",
+            _validate_approval_text(
+                self.subject_id,
+                "subject_id",
+                ApprovalValidationCode.INVALID_IDENTITY,
+            ),
+        )
+        object.__setattr__(self, "subject_digest", _validate_subject_digest(self.subject_digest))
+        object.__setattr__(self, "target_kind", _coerce_approval_target_kind(self.target_kind))
+        object.__setattr__(
+            self,
+            "target_id",
+            _validate_approval_text(
+                self.target_id,
+                "target_id",
+                ApprovalValidationCode.INVALID_IDENTITY,
+            ),
+        )
+        object.__setattr__(
+            self,
+            "target_branch",
+            _validate_approval_text(
+                self.target_branch,
+                "target_branch",
+                ApprovalValidationCode.EMPTY_REQUIRED_VALUE,
+            ),
+        )
+        object.__setattr__(
+            self,
+            "base_commit",
+            _validate_approval_text(
+                self.base_commit,
+                "base_commit",
+                ApprovalValidationCode.EMPTY_REQUIRED_VALUE,
+            ),
+        )
+        object.__setattr__(
+            self,
+            "allowed_actions",
+            _validate_approval_values(self.allowed_actions, "allowed_actions", required=True),
+        )
+        object.__setattr__(self, "allowed_paths", _validate_approval_paths(self.allowed_paths))
+        object.__setattr__(
+            self,
+            "approver_id",
+            _validate_approval_text(
+                self.approver_id,
+                "approver_id",
+                ApprovalValidationCode.INVALID_IDENTITY,
+            ),
+        )
+        object.__setattr__(
+            self,
+            "approved_at",
+            _validate_approval_text(
+                self.approved_at,
+                "approved_at",
+                ApprovalValidationCode.EMPTY_REQUIRED_VALUE,
+            ),
+        )
+
+    def canonical_json(self) -> str:
+        return _canonical_json(
+            {
+                "allowed_actions": list(self.allowed_actions),
+                "allowed_paths": list(self.allowed_paths),
+                "approval_id": self.approval_id,
+                "approval_kind": self.approval_kind.value,
+                "approval_version": self.approval_version.value,
+                "approved_at": self.approved_at,
+                "approver_id": self.approver_id,
+                "base_commit": self.base_commit,
+                "subject_digest": self.subject_digest,
+                "subject_id": self.subject_id,
+                "target_branch": self.target_branch,
+                "target_id": self.target_id,
+                "target_kind": self.target_kind.value,
+            }
+        )
+
+    def sha256_digest(self) -> str:
+        return hashlib.sha256(self.canonical_json().encode("utf-8")).hexdigest()
+
+
 @dataclass(frozen=True)
 class DevelopmentRun:
     run_id: str

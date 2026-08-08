@@ -8,6 +8,13 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from panam_development_loop import (
+    ApprovalBinding,
+    ApprovalKind,
+    ApprovalTargetKind,
+    ApprovalValidationCode,
+    ApprovalValidationError,
+    ApprovalVersion,
+    DevelopmentRun,
     ContractValidationCode,
     ContractValidationError,
     ContractVersion,
@@ -315,6 +322,129 @@ class ContractModelTest(unittest.TestCase):
             milestone.sha256_digest()
             self.assertEqual(before, set(Path(directory).iterdir()))
 
+
+
+
+class ApprovalBindingTest(unittest.TestCase):
+    def _approval(self, **changes: object) -> ApprovalBinding:
+        values: dict[str, object] = {
+            "approval_id": "approval-1",
+            "approval_version": "1",
+            "approval_kind": "APPROVAL_1",
+            "subject_id": "DL-P1.3",
+            "subject_digest": "a" * 64,
+            "target_kind": "SOURCE_REPOSITORY",
+            "target_id": "Panam_APP",
+            "target_branch": "phase/panam-dl-p1",
+            "base_commit": "base-commit",
+            "allowed_actions": ("verify", "implement"),
+            "allowed_paths": (
+                "panam_development_loop/models.py",
+                "panam_development_loop/__init__.py",
+            ),
+            "approver_id": "human",
+            "approved_at": "2026-08-07T12:00:00Z",
+        }
+        values.update(changes)
+        return ApprovalBinding(**values)  # type: ignore[arg-type]
+
+    def _assert_code(self, code: ApprovalValidationCode, factory: object) -> None:
+        with self.assertRaises(ApprovalValidationError) as raised:
+            factory()  # type: ignore[operator]
+        self.assertEqual(code, raised.exception.code)
+
+    def test_development_run_shape_remains_unchanged_and_immutable(self) -> None:
+        run = DevelopmentRun(
+            "run-1",
+            "contract-digest",
+            DevelopmentRunState.DRAFT,
+            0,
+            "created",
+            "updated",
+        )
+        self.assertEqual(
+            (
+                "run_id",
+                "milestone_contract_digest",
+                "current_state",
+                "state_version",
+                "created_at",
+                "updated_at",
+            ),
+            tuple(run.__dataclass_fields__),
+        )
+        with self.assertRaises(FrozenInstanceError):
+            run.run_id = "other"  # type: ignore[misc]
+
+    def test_valid_binding_is_immutable_canonical_and_normalized(self) -> None:
+        approval = self._approval()
+        reordered = self._approval(
+            allowed_actions=("implement", "verify"),
+            allowed_paths=(
+                "panam_development_loop/__init__.py",
+                "panam_development_loop/models.py",
+            ),
+        )
+        self.assertEqual(ApprovalVersion.V1, approval.approval_version)
+        self.assertEqual(ApprovalKind.APPROVAL_1, approval.approval_kind)
+        self.assertEqual(ApprovalTargetKind.SOURCE_REPOSITORY, approval.target_kind)
+        self.assertEqual(("implement", "verify"), approval.allowed_actions)
+        self.assertEqual(
+            (
+                "panam_development_loop/__init__.py",
+                "panam_development_loop/models.py",
+            ),
+            approval.allowed_paths,
+        )
+        self.assertEqual(approval.canonical_json(), reordered.canonical_json())
+        self.assertEqual(approval.sha256_digest(), reordered.sha256_digest())
+        self.assertNotIn(": ", approval.canonical_json())
+        with self.assertRaises(FrozenInstanceError):
+            approval.approver_id = "other"  # type: ignore[misc]
+
+    def test_kinds_and_invalid_bindings_are_deterministic(self) -> None:
+        self.assertEqual(
+            ("PHASE_START_APPROVAL", "APPROVAL_1", "APPROVAL_2"),
+            tuple(value.value for value in ApprovalKind),
+        )
+        self.assertEqual(
+            ("SOURCE_REPOSITORY", "VAULT"),
+            tuple(value.value for value in ApprovalTargetKind),
+        )
+        self.assertEqual((), self._approval(allowed_paths=()).allowed_paths)
+        cases = (
+            (ApprovalValidationCode.UNSUPPORTED_VERSION, {"approval_version": "2"}),
+            (ApprovalValidationCode.INVALID_KIND, {"approval_kind": "OTHER"}),
+            (ApprovalValidationCode.INVALID_KIND, {"target_kind": "OTHER"}),
+            (ApprovalValidationCode.INVALID_IDENTITY, {"approval_id": ""}),
+            (ApprovalValidationCode.INVALID_IDENTITY, {"approval_id": "approval\n1"}),
+            (ApprovalValidationCode.EMPTY_REQUIRED_VALUE, {"target_branch": " "}),
+            (ApprovalValidationCode.EMPTY_REQUIRED_VALUE, {"allowed_actions": ()}),
+            (ApprovalValidationCode.EMPTY_REQUIRED_VALUE, {"allowed_actions": ["implement"]}),
+            (ApprovalValidationCode.EMPTY_REQUIRED_VALUE, {"allowed_paths": ["models.py"]}),
+            (ApprovalValidationCode.INVALID_DIGEST, {"subject_digest": "A" * 64}),
+            (ApprovalValidationCode.DUPLICATE_VALUE, {"allowed_actions": ("implement", "implement")}),
+            (ApprovalValidationCode.DUPLICATE_VALUE, {"allowed_paths": ("package/model.py", "package/model.py")}),
+            (ApprovalValidationCode.INVALID_PATH, {"allowed_paths": ("package/../model.py",)}),
+        )
+        for code, changes in cases:
+            with self.subTest(code=code, changes=changes):
+                self._assert_code(code, lambda changes=changes: self._approval(**changes))
+
+    def test_digest_changes_and_operations_have_no_authority_or_side_effect(self) -> None:
+        approval = self._approval()
+        self.assertEqual(approval.sha256_digest(), self._approval().sha256_digest())
+        self.assertNotEqual(
+            approval.sha256_digest(),
+            self._approval(subject_digest="b" * 64).sha256_digest(),
+        )
+        self.assertFalse(hasattr(approval, "approve"))
+        self.assertFalse(hasattr(approval, "execute"))
+        with tempfile.TemporaryDirectory() as directory:
+            before = set(Path(directory).iterdir())
+            approval.canonical_json()
+            approval.sha256_digest()
+            self.assertEqual(before, set(Path(directory).iterdir()))
 
 if __name__ == "__main__":
     unittest.main()

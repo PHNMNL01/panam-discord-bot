@@ -2,6 +2,12 @@
 
 from .models import (
     AcceptedStateEvent,
+    ApprovalBinding,
+    ApprovalKind,
+    ApprovalTargetKind,
+    ApprovalValidationCode,
+    ApprovalValidationError,
+    ApprovalVersion,
     ContractValidationCode,
     ContractValidationError,
     ContractVersion,
@@ -19,6 +25,12 @@ from .transition_service import TransitionService
 
 __all__ = [
     "AcceptedStateEvent",
+    "ApprovalBinding",
+    "ApprovalKind",
+    "ApprovalTargetKind",
+    "ApprovalValidationCode",
+    "ApprovalValidationError",
+    "ApprovalVersion",
     "ContractValidationCode",
     "ContractValidationError",
     "ContractVersion",
