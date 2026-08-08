@@ -4,7 +4,7 @@
 
 Handoff draft
 
-- Implementation commit: Pending
+- Implementation commit: d14c5feb07f666b4c7dfa5096668e5f0b6ad4593
 - Handoff finalization commit: Pending
 - Source push: Pending
 - SOURCE_COMPLETED: Not reached
@@ -12,9 +12,23 @@ Handoff draft
 - Vault write: Not started
 - Milestone COMPLETED: Not reached
 
-This is an uncommitted source handoff draft. It records the verified DL-P1.3
-implementation candidate and does not authorize a Git operation, lifecycle
+This is an uncommitted handoff-only finalization change. It records the verified
+DL-P1.3 implementation commit and does not authorize a Git operation, lifecycle
 transition, Approval 2, Vault work, or any future effect.
+
+## Implementation commit 1 provenance
+
+- Commit: `d14c5feb07f666b4c7dfa5096668e5f0b6ad4593`.
+- Tree: `968e7e8f8cfac198992f93ec3b5494ccd26a4662`.
+- Parent: `f490556c8facecc87162ee03713d7f2cde811ac1`.
+- Message: `Implement DL-P1.3 run and approval models`.
+- Exact committed scope:
+  - `docs/handoffs/dl-p1-3-run-and-approval-models.md`
+  - `panam_development_loop/__init__.py`
+  - `panam_development_loop/models.py`
+  - `panam_development_loop_poc_test.py`
+
+The later handoff-finalization commit remains pending and is not known yet.
 
 ## Milestone objective
 
@@ -193,8 +207,11 @@ fields do not constitute a permission bypass or live authorization mechanism.
 
 ## Next lifecycle action
 
-Fresh deterministic Verifier mode: `draft-handoff`.
+Fresh deterministic Verifier mode: `final-handoff`.
 
-That verification has not yet happened. It must bind this exact handoff draft,
-the approved implementation source, repository state, and lifecycle
-placeholders before any human-authorized implementation staging or commit.
+The draft-handoff verification passed before implementation commit 1. The
+final-handoff verification has not yet happened. It must bind this exact
+handoff-only change, implementation commit 1, repository state, and lifecycle
+placeholders before any human-authorized handoff-finalization staging or commit.
+
+Next safe lifecycle action: `HUMAN DL-P1.3 FINAL-HANDOFF VERIFICATION DECISION`.
