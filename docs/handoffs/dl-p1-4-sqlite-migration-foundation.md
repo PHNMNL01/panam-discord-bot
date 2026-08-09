@@ -1,16 +1,17 @@
-# DL-P1.4 SQLite Migration Foundation — Pre-Commit Source Handoff Draft
+# DL-P1.4 SQLite Migration Foundation — Post-Implementation-Commit Handoff
 
 ## Status and authority boundary
 
-**PRE-COMMIT HANDOFF DRAFT**
+**POST-IMPLEMENTATION-COMMIT HANDOFF — FINALIZATION PENDING**
 
-This draft describes the verified and reviewed uncommitted DL-P1.4 candidate.
-It is not an implementation commit, handoff-finalization commit, source push,
+Implementation commit 1 now records the verified and reviewed DL-P1.4
+candidate. Handoff finalization commit 2 does not yet exist, final-handoff
+verification has not yet occurred, and this is not a source push,
 `SOURCE_COMPLETED`, Vault action, or milestone completion record.
 
-- Implementation commit: **Pending**
+- Implementation commit: **1062cc9c640eb3281ace47752923074ba5058261**
 - Handoff-finalization commit: **Pending**
-- Source push: **Pending**
+- Source push: **Pending — not performed**
 - `SOURCE_COMPLETED`: **Pending — not claimed**
 - Vault / Approval 2 / milestone `COMPLETED`: **Pending — not authorized**
 
@@ -49,12 +50,17 @@ independently revalidated by this milestone.
 - Repository: `C:\Panam_APP`
 - Branch: `phase/panam-dl-p1-1-durable-state-transition-kernel-poc`
 - Baseline HEAD: `f214c853e83de4baa6fde43263421850149a37ef`
+- Current HEAD / implementation commit: `1062cc9c640eb3281ace47752923074ba5058261`
+- Implementation commit parent: `f214c853e83de4baa6fde43263421850149a37ef`
+- Implementation commit subject: `Implement DL-P1.4 SQLite migration foundation`
 - Upstream: `origin/phase/panam-dl-p1-1-durable-state-transition-kernel-poc`
 - Divergence before this draft: `0 ahead / 0 behind`
+- Current divergence after implementation commit: `1 ahead / 0 behind`
 - Remote: `https://github.com/PHNMNL01/panam-discord-bot.git`
 - Staged paths before this draft: none
 
-The implementation candidate is intentionally uncommitted and unstaged. Its
+Before implementation commit 1, the candidate was intentionally uncommitted and
+unstaged. Its pre-commit
 aggregate SHA-256 is
 `BEA9DBD874700AEBD5032C0148AC09DF47BECCDAF8B57C140E3FC8E62AAD4165`.
 The aggregate is SHA-256 over lexically sorted UTF-8 manifest lines in the form
@@ -65,6 +71,15 @@ The aggregate is SHA-256 over lexically sorted UTF-8 manifest lines in the form
 | `panam_development_loop/sqlite_migrations.py` | untracked, unstaged | 8,534 | `299FE176D9275425AF777F930222DE20F4394911551E61465BF1135160D67FEE` |
 | `panam_development_loop/sqlite_store.py` | modified, unstaged | 3,747 | `88013D5D1F18FA63726EA0C6AA1F60EFA674A201D2313ACFBE272DE939701634` |
 | `panam_development_loop_poc_test.py` | modified, unstaged | 34,196 | `07BFD69505FF312DD031E9B4B80BCF1659579FEA84FADE0CBF26D1AB49B5965A` |
+
+Implementation commit 1 contains exactly these approved paths:
+
+1. `panam_development_loop/sqlite_migrations.py`
+2. `panam_development_loop/sqlite_store.py`
+3. `panam_development_loop_poc_test.py`
+4. `docs/handoffs/dl-p1-4-sqlite-migration-foundation.md`
+
+The commit is local only; no source push has occurred.
 
 ## Implementation scope and summary
 
@@ -141,6 +156,21 @@ Fresh advisory review:
   `BEA9DBD874700AEBD5032C0148AC09DF47BECCDAF8B57C140E3FC8E62AAD4165`.
 - Conclusion: `No unresolved implementation findings.`
 
+Historical draft-handoff verification before implementation commit 1:
+
+- Verifier mode: `draft-handoff`; verdict: `PASSED` at `2026-08-09T13:02:24.9127531Z`.
+- Verified pre-commit handoff SHA-256:
+  `666BF7C6E8329D722A883E15DDB35193BB2BC694BC1150829377B20CD5F057F0`.
+- Verified candidate aggregate:
+  `BEA9DBD874700AEBD5032C0148AC09DF47BECCDAF8B57C140E3FC8E62AAD4165`.
+- Verified exactly the three implementation candidate paths plus the handoff draft,
+  with no staged paths, both commit fields `Pending`, and `git diff --check` passed;
+  no material draft-handoff findings remained.
+
+This is historical deterministic pre-commit evidence, not newly executed during
+this correction. It is distinct from the later `final-handoff` verification,
+which returned `FAILED` for the then-current handoff.
+
 ## Tests and constraints
 
 The direct suite covers fresh migration 1, supplied ledger timestamp,
@@ -168,15 +198,15 @@ directories and left no attributable repository residue.
 
 ## Required next lifecycle step and freshness
 
-The required next step is fresh deterministic **Verifier — draft-handoff mode**
-against the exact four-path uncommitted worktree: the three implementation
-candidate paths plus this handoff draft. A `PASSED` result is required before
-any later explicit human implementation staging or implementation commit 1.
+The required next step is fresh deterministic **Verifier — final-handoff mode**
+against implementation commit 1 and this handoff-only finalization diff. A
+`PASSED` result is required before any later explicit human handoff-only staging
+or handoff-finalization commit 2.
 
 This draft and the associated evidence are invalidated by any relevant change to
 the contract, feasibility result, Approval 1, Architecture Freeze authority,
 repository/branch/HEAD/upstream state, candidate bytes or paths, this handoff's
 bytes, verification/review evidence, correction history, or governing policy.
 
-No staging, commit, push, handoff finalization, source completion, Vault work,
-or lifecycle transition is authorized by this draft.
+This finalized handoff authorizes no staging, commit, push, source completion,
+Vault work, or lifecycle transition.
