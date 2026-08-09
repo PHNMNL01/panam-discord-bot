@@ -26,6 +26,14 @@ from panam_development_loop import (
     TransitionRequest,
     TransitionService,
 )
+from panam_development_loop.sqlite_migrations import (
+    Migration,
+    MigrationError,
+    MigrationFailureCode,
+    PRODUCTION_MIGRATIONS,
+    apply_migrations,
+    validate_migration_registry,
+)
 
 
 class FixedValues:
@@ -445,6 +453,301 @@ class ApprovalBindingTest(unittest.TestCase):
             approval.canonical_json()
             approval.sha256_digest()
             self.assertEqual(before, set(Path(directory).iterdir()))
+
+class SqliteMigrationTest(unittest.TestCase):
+    """Focused DL-P1.4 migration and legacy-version-1 compatibility coverage."""
+
+    def setUp(self) -> None:
+        self._temporary_directory = tempfile.TemporaryDirectory()
+        self.directory = Path(self._temporary_directory.name)
+
+    def tearDown(self) -> None:
+        self._temporary_directory.cleanup()
+
+    def _path(self, name: str = "migration.sqlite3") -> Path:
+        return self.directory / name
+
+    def _connection(self, path: Path) -> sqlite3.Connection:
+        connection = sqlite3.connect(path)
+        connection.row_factory = sqlite3.Row
+        connection.execute("PRAGMA foreign_keys = ON")
+        return connection
+
+    @staticmethod
+    def _schema_snapshot(connection: sqlite3.Connection) -> list[tuple[str, str, str]]:
+        return [
+            (row["type"], row["name"], row["sql"])
+            for row in connection.execute(
+                "SELECT type, name, sql FROM sqlite_master WHERE name NOT LIKE 'sqlite_%' ORDER BY type, name"
+            )
+        ]
+
+    @staticmethod
+    def _ledger_snapshot(connection: sqlite3.Connection) -> list[tuple[int, str]]:
+        if connection.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'schema_migrations'"
+        ).fetchone() is None:
+            return []
+        return [
+            (row["version"], row["applied_at"])
+            for row in connection.execute(
+                "SELECT version, applied_at FROM schema_migrations ORDER BY version"
+            )
+        ]
+
+    def _create_existing_version_one_database(self, path: Path) -> None:
+        connection = self._connection(path)
+        try:
+            connection.execute(
+                """
+                CREATE TABLE schema_migrations (
+                    version INTEGER PRIMARY KEY,
+                    applied_at TEXT NOT NULL
+                )
+                """
+            )
+            connection.execute(
+                """
+                CREATE TABLE development_runs (
+                    run_id TEXT PRIMARY KEY,
+                    milestone_contract_digest TEXT NOT NULL,
+                    current_state TEXT NOT NULL,
+                    state_version INTEGER NOT NULL,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                )
+                """
+            )
+            connection.execute(
+                """
+                CREATE TABLE state_events (
+                    event_id TEXT PRIMARY KEY,
+                    run_id TEXT NOT NULL REFERENCES development_runs(run_id),
+                    from_state TEXT NOT NULL,
+                    to_state TEXT NOT NULL,
+                    transition_reason TEXT NOT NULL,
+                    occurred_at TEXT NOT NULL,
+                    state_version INTEGER NOT NULL,
+                    UNIQUE(run_id, state_version)
+                )
+                """
+            )
+            connection.execute("INSERT INTO schema_migrations VALUES(1, 'legacy-applied-at')")
+            connection.execute(
+                "INSERT INTO development_runs VALUES('legacy-run', 'legacy-digest', 'DRAFT', 1, 'created', 'updated')"
+            )
+            connection.execute(
+                "INSERT INTO state_events VALUES('legacy-event', 'legacy-run', 'DRAFT', 'FEASIBILITY_CHECKING', 'ACCEPTED', 'event-at', 1)"
+            )
+            connection.commit()
+        finally:
+            connection.close()
+
+    def _assert_history_rejected_without_mutation(
+        self,
+        connection: sqlite3.Connection,
+        registry: tuple[Migration, ...] = PRODUCTION_MIGRATIONS,
+    ) -> MigrationError:
+        before_schema = self._schema_snapshot(connection)
+        before_ledger = self._ledger_snapshot(connection)
+        with self.assertRaises(MigrationError) as raised:
+            apply_migrations(connection, "new-at", registry)
+        self.assertEqual(before_schema, self._schema_snapshot(connection))
+        self.assertEqual(before_ledger, self._ledger_snapshot(connection))
+        return raised.exception
+
+    def test_fresh_database_applies_production_version_one_once(self) -> None:
+        path = self._path()
+        SqliteRunStore(path).initialize("first-at")
+        connection = self._connection(path)
+        try:
+            self.assertEqual([(1, "first-at")], self._ledger_snapshot(connection))
+            self.assertEqual(
+                ["development_runs", "schema_migrations", "state_events"],
+                [row["name"] for row in connection.execute(
+                    "SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%' ORDER BY name"
+                )],
+            )
+        finally:
+            connection.close()
+
+    def test_current_initialization_is_idempotent_and_preserves_timestamp(self) -> None:
+        path = self._path()
+        store = SqliteRunStore(path)
+        store.initialize("first-at")
+        connection = self._connection(path)
+        try:
+            before_schema = self._schema_snapshot(connection)
+            before_ledger = self._ledger_snapshot(connection)
+        finally:
+            connection.close()
+        store.initialize("second-at")
+        connection = self._connection(path)
+        try:
+            self.assertEqual(before_schema, self._schema_snapshot(connection))
+            self.assertEqual(before_ledger, self._ledger_snapshot(connection))
+        finally:
+            connection.close()
+
+    def test_independent_existing_version_one_data_is_accepted_unchanged(self) -> None:
+        path = self._path()
+        self._create_existing_version_one_database(path)
+        connection = self._connection(path)
+        try:
+            before_schema = self._schema_snapshot(connection)
+            before_ledger = self._ledger_snapshot(connection)
+            before_runs = [tuple(row) for row in connection.execute("SELECT * FROM development_runs")]
+            before_events = [tuple(row) for row in connection.execute("SELECT * FROM state_events ORDER BY state_version")]
+        finally:
+            connection.close()
+        SqliteRunStore(path).initialize("new-at")
+        connection = self._connection(path)
+        try:
+            self.assertEqual(before_schema, self._schema_snapshot(connection))
+            self.assertEqual(before_ledger, self._ledger_snapshot(connection))
+            self.assertEqual(before_runs, [tuple(row) for row in connection.execute("SELECT * FROM development_runs")])
+            self.assertEqual(before_events, [tuple(row) for row in connection.execute("SELECT * FROM state_events ORDER BY state_version")])
+        finally:
+            connection.close()
+
+    def test_private_contiguous_registry_applies_in_order(self) -> None:
+        registry = (
+            Migration(1, ("CREATE TABLE schema_migrations (version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL)",)),
+            Migration(2, ("CREATE TABLE synthetic_second (value TEXT NOT NULL)",)),
+        )
+        connection = self._connection(self._path())
+        try:
+            apply_migrations(connection, "synthetic-at", registry)
+            self.assertEqual([(1, "synthetic-at"), (2, "synthetic-at")], self._ledger_snapshot(connection))
+            self.assertIsNotNone(connection.execute("SELECT name FROM sqlite_master WHERE name = 'synthetic_second'").fetchone())
+        finally:
+            connection.close()
+
+    def test_failed_synthetic_migration_rolls_back_only_its_effects(self) -> None:
+        registry = (
+            Migration(1, ("CREATE TABLE schema_migrations (version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL)",)),
+            Migration(2, ("CREATE TABLE failed_effect (value TEXT NOT NULL)", "INSERT INTO absent_table VALUES(1)")),
+        )
+        connection = self._connection(self._path())
+        try:
+            with self.assertRaises(MigrationError) as raised:
+                apply_migrations(connection, "synthetic-at", registry)
+            self.assertEqual(MigrationFailureCode.MIGRATION_EXECUTION_FAILED, raised.exception.code)
+            self.assertIsInstance(raised.exception.__cause__, sqlite3.Error)
+            self.assertEqual([(1, "synthetic-at")], self._ledger_snapshot(connection))
+            self.assertIsNone(connection.execute("SELECT name FROM sqlite_master WHERE name = 'failed_effect'").fetchone())
+        finally:
+            connection.close()
+
+    def test_failed_ledger_insert_rolls_back_schema_effect(self) -> None:
+        registry = (
+            Migration(1, ("CREATE TABLE initial_effect (value TEXT NOT NULL)",)),
+            Migration(2, ("CREATE TABLE rolled_back_effect (value TEXT NOT NULL)",)),
+        )
+        connection = self._connection(self._path())
+        try:
+            connection.execute("CREATE TABLE schema_migrations (version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL)")
+            connection.execute("CREATE TABLE initial_effect (value TEXT NOT NULL)")
+            connection.execute("INSERT INTO schema_migrations VALUES(1, 'first-at')")
+            connection.execute(
+                "CREATE TRIGGER reject_second_ledger_entry BEFORE INSERT ON schema_migrations WHEN NEW.version = 2 BEGIN SELECT RAISE(ABORT, 'reject version two'); END"
+            )
+            connection.commit()
+            with self.assertRaises(MigrationError) as raised:
+                apply_migrations(connection, "second-at", registry)
+            self.assertEqual(MigrationFailureCode.MIGRATION_EXECUTION_FAILED, raised.exception.code)
+            self.assertIsInstance(raised.exception.__cause__, sqlite3.IntegrityError)
+            self.assertEqual([(1, "first-at")], self._ledger_snapshot(connection))
+            self.assertIsNone(connection.execute("SELECT name FROM sqlite_master WHERE name = 'rolled_back_effect'").fetchone())
+            self.assertIsNotNone(connection.execute("SELECT name FROM sqlite_master WHERE name = 'reject_second_ledger_entry'").fetchone())
+        finally:
+            connection.close()
+
+    def test_malformed_registries_are_rejected_before_database_creation(self) -> None:
+        cases = (
+            (Migration(1, ()),),
+            (Migration(1, ("SELECT 1",)), Migration(1, ("SELECT 2",))),
+            (Migration(2, ("SELECT 2",)), Migration(1, ("SELECT 1",))),
+            (Migration(0, ("SELECT 1",)),),
+            (Migration(True, ("SELECT 1",)),),
+            (Migration(1, ("SELECT 1",)), Migration(3, ("SELECT 3",))),
+            (Migration(1, ("BEGIN IMMEDIATE",)),),
+        )
+        path = self._path("must-not-exist.sqlite3")
+        for registry in cases:
+            with self.subTest(registry=registry):
+                with self.assertRaises(MigrationError) as raised:
+                    validate_migration_registry(registry)
+                self.assertEqual(MigrationFailureCode.INVALID_REGISTRY, raised.exception.code)
+                self.assertFalse(path.exists())
+
+    def test_nonempty_database_without_ledger_is_rejected(self) -> None:
+        connection = self._connection(self._path())
+        try:
+            connection.execute("CREATE TABLE unrecorded (value TEXT NOT NULL)")
+            connection.commit()
+            self.assertEqual(MigrationFailureCode.INVALID_APPLIED_HISTORY, self._assert_history_rejected_without_mutation(connection).code)
+        finally:
+            connection.close()
+
+    def test_empty_ledger_is_rejected_unchanged(self) -> None:
+        connection = self._connection(self._path())
+        try:
+            connection.execute("CREATE TABLE schema_migrations (version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL)")
+            connection.commit()
+            self.assertEqual(MigrationFailureCode.INVALID_APPLIED_HISTORY, self._assert_history_rejected_without_mutation(connection).code)
+        finally:
+            connection.close()
+
+    def test_malformed_and_nonprefix_history_is_rejected_unchanged(self) -> None:
+        synthetic_registry = (
+            Migration(1, ("CREATE TABLE first (value TEXT NOT NULL)",)),
+            Migration(2, ("CREATE TABLE second (value TEXT NOT NULL)",)),
+            Migration(3, ("CREATE TABLE third (value TEXT NOT NULL)",)),
+        )
+        connection = self._connection(self._path())
+        try:
+            connection.execute("CREATE TABLE schema_migrations (version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL)")
+            connection.execute("INSERT INTO schema_migrations VALUES(1, 'first-at')")
+            connection.execute("INSERT INTO schema_migrations VALUES(3, 'third-at')")
+            connection.commit()
+            self.assertEqual(MigrationFailureCode.INVALID_APPLIED_HISTORY, self._assert_history_rejected_without_mutation(connection, synthetic_registry).code)
+        finally:
+            connection.close()
+
+    def test_malformed_ledger_and_unknown_future_history_are_rejected_unchanged(self) -> None:
+        malformed = self._connection(self._path("malformed.sqlite3"))
+        future = self._connection(self._path("future.sqlite3"))
+        try:
+            malformed.execute("CREATE TABLE schema_migrations (version TEXT PRIMARY KEY, applied_at TEXT NOT NULL)")
+            malformed.execute("INSERT INTO schema_migrations VALUES('1', 'first-at')")
+            malformed.commit()
+            self.assertEqual(MigrationFailureCode.INVALID_APPLIED_HISTORY, self._assert_history_rejected_without_mutation(malformed).code)
+            future.execute("CREATE TABLE schema_migrations (version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL)")
+            future.execute("INSERT INTO schema_migrations VALUES(2, 'future-at')")
+            future.commit()
+            self.assertEqual(MigrationFailureCode.UNKNOWN_FUTURE_VERSION, self._assert_history_rejected_without_mutation(future).code)
+        finally:
+            malformed.close()
+            future.close()
+
+    def test_nonpositive_and_duplicate_history_are_rejected_unchanged(self) -> None:
+        nonpositive = self._connection(self._path("nonpositive.sqlite3"))
+        duplicate = self._connection(self._path("duplicate.sqlite3"))
+        try:
+            nonpositive.execute("CREATE TABLE schema_migrations (version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL)")
+            nonpositive.execute("INSERT INTO schema_migrations VALUES(0, 'zero-at')")
+            nonpositive.commit()
+            self.assertEqual(MigrationFailureCode.INVALID_APPLIED_HISTORY, self._assert_history_rejected_without_mutation(nonpositive).code)
+            duplicate.execute("CREATE TABLE schema_migrations (version INTEGER NOT NULL, applied_at TEXT NOT NULL)")
+            duplicate.execute("INSERT INTO schema_migrations VALUES(1, 'first-at')")
+            duplicate.execute("INSERT INTO schema_migrations VALUES(1, 'duplicate-at')")
+            duplicate.commit()
+            self.assertEqual(MigrationFailureCode.INVALID_APPLIED_HISTORY, self._assert_history_rejected_without_mutation(duplicate).code)
+        finally:
+            nonpositive.close()
+            duplicate.close()
+
 
 if __name__ == "__main__":
     unittest.main()

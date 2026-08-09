@@ -5,6 +5,7 @@ from pathlib import Path
 from typing import Optional
 
 from .models import AcceptedStateEvent, DevelopmentRun, DevelopmentRunState
+from .sqlite_migrations import initialize_database
 
 
 class SqliteRunStore:
@@ -14,41 +15,7 @@ class SqliteRunStore:
         self._database_path = Path(database_path)
 
     def initialize(self, applied_at: str) -> None:
-        connection = self._connect()
-        try:
-            connection.executescript(
-                """
-                CREATE TABLE IF NOT EXISTS schema_migrations (
-                    version INTEGER PRIMARY KEY,
-                    applied_at TEXT NOT NULL
-                );
-                CREATE TABLE IF NOT EXISTS development_runs (
-                    run_id TEXT PRIMARY KEY,
-                    milestone_contract_digest TEXT NOT NULL,
-                    current_state TEXT NOT NULL,
-                    state_version INTEGER NOT NULL,
-                    created_at TEXT NOT NULL,
-                    updated_at TEXT NOT NULL
-                );
-                CREATE TABLE IF NOT EXISTS state_events (
-                    event_id TEXT PRIMARY KEY,
-                    run_id TEXT NOT NULL REFERENCES development_runs(run_id),
-                    from_state TEXT NOT NULL,
-                    to_state TEXT NOT NULL,
-                    transition_reason TEXT NOT NULL,
-                    occurred_at TEXT NOT NULL,
-                    state_version INTEGER NOT NULL,
-                    UNIQUE(run_id, state_version)
-                );
-                """
-            )
-            connection.execute(
-                "INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES(1, ?)",
-                (applied_at,),
-            )
-            connection.commit()
-        finally:
-            connection.close()
+        initialize_database(self._database_path, applied_at)
 
     def create_run(
         self,
