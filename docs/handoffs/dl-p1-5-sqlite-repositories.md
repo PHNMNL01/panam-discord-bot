@@ -1,17 +1,18 @@
-# DL-P1.5 SQLite Repositories — Pre-Commit Handoff
+# DL-P1.5 SQLite Repositories — Finalized Pre-Push Handoff
 
 ## Status and authority boundary
 
-**DRAFT — PRE-COMMIT HANDOFF**
+**FINALIZED — PRE-PUSH HANDOFF**
 
-This is the provenance handoff for the verified and Reviewer-approved DL-P1.5
-implementation candidate. The candidate and this draft are intentionally
-uncommitted and unstaged. This artifact is not an implementation commit, source
-push, `SOURCE_COMPLETED` decision, Vault action, or milestone completion record.
+This is the finalized provenance handoff for the verified and Reviewer-approved
+DL-P1.5 implementation candidate. Source commit 1 now exists locally; this
+handoff-only finalization change is intentionally uncommitted and unstaged.
+This artifact is not a source push, `SOURCE_COMPLETED` decision, Vault action,
+or milestone completion record.
 
 | Lifecycle field | Current fact |
 |---|---|
-| Implementation commit | **PENDING** |
+| Implementation commit / source commit 1 | **CREATED LOCALLY** — `845d09395bfd85c1ba61808035e955bd55ca7eb8` |
 | Handoff-finalization commit | **PENDING** |
 | Source push | **PENDING** |
 | Source synchronization verification | **PENDING** |
@@ -19,13 +20,17 @@ push, `SOURCE_COMPLETED` decision, Vault action, or milestone completion record.
 | Vault proposal | **PENDING** |
 | Approval 2 | **PENDING** |
 | Vault write | **PENDING** |
-| Vault commit/push | **PENDING** |
+| Vault commit | **PENDING** |
+| Vault push | **PENDING** |
+| Vault synchronization verification | **PENDING** |
 | Vault lifecycle | **PENDING** |
 | Overall milestone | **NOT COMPLETED** |
 
-Handoff draft authority is `HAD-DL-P1.5-HANDOFF-DRAFT-001`. It authorizes
-creation of exactly this file and grants no Git write, source-completion, Vault,
-Approval 2, milestone-completion, or lifecycle-transition authority.
+The pre-commit draft was created under `HAD-DL-P1.5-HANDOFF-DRAFT-001` and
+verified in draft-handoff mode. This working-tree finalization is authorized by
+`HAD-DL-P1.5-HANDOFF-FINALIZER-001`. Neither authority grants a Git write,
+source-completion, Vault, Approval 2, milestone-completion, or lifecycle-
+transition authority.
 
 ## Milestone identity and objective
 
@@ -46,11 +51,14 @@ No new architecture decision was introduced by DL-P1.5.
 
 - Repository: `C:\Panam_APP`.
 - Branch: `phase/panam-dl-p1-1-durable-state-transition-kernel-poc`.
-- Baseline and current HEAD: `b6b18a26b7b188ee6401b4ab012e632c69fd4cfe`.
-- Upstream: `origin/phase/panam-dl-p1-1-durable-state-transition-kernel-poc`.
-- Live remote HEAD at handoff preflight:
+- Commit-1 parent / pre-commit baseline:
   `b6b18a26b7b188ee6401b4ab012e632c69fd4cfe`.
-- Divergence: `0 ahead / 0 behind`.
+- Current local HEAD / source commit 1:
+  `845d09395bfd85c1ba61808035e955bd55ca7eb8`.
+- Upstream: `origin/phase/panam-dl-p1-1-durable-state-transition-kernel-poc`.
+- Live remote HEAD at finalization preflight:
+  `b6b18a26b7b188ee6401b4ab012e632c69fd4cfe`.
+- Divergence: `1 ahead / 0 behind`.
 - Remote: `https://github.com/PHNMNL01/panam-discord-bot.git`.
 - Staged paths: none.
 
@@ -67,10 +75,139 @@ It is SHA-256 over lexically sorted UTF-8 manifest lines in the form
 | `panam_development_loop/sqlite_repositories.py` | CREATE | 17,615 | `D5000DC2A0499F40D5E4FB4AEE3E6102EA177A20F75B778972FA2DFE686B0D04` |
 | `panam_development_loop_poc_test.py` | UPDATE | 58,585 | `B39B77E00E6A9C05A0B662185100CE24AD991319B1A7E696EEB3E3A4E4493358` |
 
-After this draft was created, the expected and authorized dirty set became
-exactly these five implementation paths plus
-`docs/handoffs/dl-p1-5-sqlite-repositories.md`. The two repository modules and
-this handoff are untracked; no path is staged.
+Source commit 1 contains exactly these five implementation paths plus the
+verified pre-commit handoff draft. The only expected working-tree change after
+this finalization is this unstaged handoff path; no implementation path is
+modified.
+
+## Source commit 1
+
+- Result: `COMMIT_CREATED` on the local phase branch.
+- SHA: `845d09395bfd85c1ba61808035e955bd55ca7eb8`.
+- Parent: `b6b18a26b7b188ee6401b4ab012e632c69fd4cfe`.
+- Subject: `Implement DL-P1.5 SQLite repositories`.
+- Path count: `6`.
+- Content: the exact five verified implementation paths above plus this
+  independently verified pre-commit handoff draft.
+- Push state: `NOT PUSHED`.
+- Remote synchronization: `NOT YET VERIFIED AT COMMIT-2 TIP`.
+- Draft-handoff Verifier: `PASSED` under
+  `HAD-DL-P1.5-DRAFT-HANDOFF-VERIFIER-001`.
+
+The committed path set is exactly:
+
+1. `docs/handoffs/dl-p1-5-sqlite-repositories.md`
+2. `panam_development_loop/__init__.py`
+3. `panam_development_loop/repositories.py`
+4. `panam_development_loop/sqlite_migrations.py`
+5. `panam_development_loop/sqlite_repositories.py`
+6. `panam_development_loop_poc_test.py`
+
+## Pre-finalization draft and final-handoff verification history
+
+The handoff version committed in source commit 1 was the exact independently
+verified pre-finalization draft:
+
+- Status: `DRAFT — PRE-COMMIT HANDOFF`.
+- Bytes: `18,475`.
+- SHA-256:
+  `2DC755B41D24C579D34C9F9E787C27228BBC2ECC49B32F7B23783327A19B290C`.
+- Draft-Handoff Verifier authority:
+  `HAD-DL-P1.5-DRAFT-HANDOFF-VERIFIER-001`.
+- Draft-Handoff Verifier result: `PASSED`.
+
+The later Handoff Finalizer changed this handoff only in the working tree after
+source commit 1. The first Final-Handoff Verifier under
+`HAD-DL-P1.5-FINAL-HANDOFF-VERIFIER-001` returned `FAILED` because the first
+finalized version omitted this explicit pre-finalization draft byte-size and
+SHA-256 binding. This bounded provenance correction is authorized by
+`HAD-DL-P1.5-HANDOFF-PROVENANCE-CORRECTION-001`. A fresh
+`FINAL-HANDOFF VERIFICATION` remains `PENDING`.
+
+The historical finalized-handoff identity chain is:
+
+- First Handoff Finalizer authority:
+  `HAD-DL-P1.5-HANDOFF-FINALIZER-001`; result: `FINALIZED`. It produced
+  `FINALIZED — PRE-PUSH HANDOFF`, 19,781 bytes, SHA-256
+  `52D633A26C165C58C0F597DD44F0256BCC4EF7D38989FD9168F5D8E1DB143EE4`.
+  Final-Handoff Verifier 001 evaluated this exact handoff and returned
+  `FAILED`.
+- First handoff provenance correction authority:
+  `HAD-DL-P1.5-HANDOFF-PROVENANCE-CORRECTION-001`; result: `CORRECTED`;
+  class: `HANDOFF PROVENANCE CORRECTION`. It produced
+  `FINALIZED — PRE-PUSH HANDOFF`, 21,035 bytes, SHA-256
+  `DE291B333EC6399681DF44B3418304C14441A9402DA4BD7D272C728B64DAC1E9`.
+  This was not an implementation correction.
+- Final-Handoff Verifier generation 2 authority:
+  `HAD-DL-P1.5-FINAL-HANDOFF-VERIFIER-002`; result:
+  `NEEDS_HUMAN_DECISION`. It established
+  `PRE_FINALIZATION_BINDING_RESOLVED: true` for the 18,475-byte committed
+  draft identified above and verified under
+  `HAD-DL-P1.5-DRAFT-HANDOFF-VERIFIER-001` with result `PASSED`.
+
+## Aggregate-manifest reconstruction reconciliation
+
+The recorded implementation candidate aggregate remains
+`8A981D6B9A1602DE61ECD2D350D38E58D33E3F549B573D52FD446C7E8C54A07D`;
+no aggregate or implementation rebaseline occurred.
+
+- Final-Handoff Verifier generation 2:
+  `HAD-DL-P1.5-FINAL-HANDOFF-VERIFIER-002` returned
+  `NEEDS_HUMAN_DECISION` because the canonical aggregate-manifest
+  serialization was not sufficiently bound for independent reconstruction.
+- The attempted reconciliation
+  `HAD-DL-P1.5-AGGREGATE-MANIFEST-RECONCILIATION-001` also returned
+  `NEEDS_HUMAN_DECISION`; it made no handoff write and observed the
+  non-canonical 567-byte SHA-256
+  `8AC1B712D609989DFE8359339E8406E67B6A5DFB5D46682A54233B30B672DBFE`.
+- The deterministic diagnostic
+  `HAD-DL-P1.5-AGGREGATE-RECONSTRUCTION-DIAGNOSTIC-001` returned
+  `DIAGNOSED`: `LITERAL_ESCAPE_SEQUENCES_USED_INSTEAD_OF_CONTROL_BYTES`.
+- Human reconciliation
+  `HAD-DL-P1.5-AGGREGATE-MANIFEST-RECONCILIATION-002` records the
+  552-byte canonical manifest and aggregate
+  `8A981D6B9A1602DE61ECD2D350D38E58D33E3F549B573D52FD446C7E8C54A07D`
+  with status `CONFIRMED CORRECT`. Aggregate rebaseline, implementation
+  rebaseline, implementation mutation, and implementation correction
+  consumption are all `NO`.
+- The bounded Handoff Finalizer execution under
+  `HAD-DL-P1.5-AGGREGATE-MANIFEST-RECONCILIATION-002` returned
+  `RECONCILED`. It produced `FINALIZED — PRE-PUSH HANDOFF`, 24,711 bytes,
+  SHA-256
+  `0EA9E8F044DF522689C6960943EC4A9B386A2E4C9FC6B31B1438012BAE58BFDD`.
+- Final-Handoff Verifier generation 3 under
+  `HAD-DL-P1.5-FINAL-HANDOFF-VERIFIER-003` returned `FAILED` at
+  `2026-08-10T18:19:22.2824420+02:00` solely because five established
+  historical bindings were not yet explicit. Its deterministic handoff,
+  source, manifest, implementation, Runtime, technical, budget, lifecycle,
+  and `git diff --check` checks otherwise passed.
+
+The canonical aggregate manifest has exactly five lexically sorted,
+repository-relative forward-slash records, encoded as UTF-8 without BOM. It
+has no header, footer, leading blank line, or trailing blank record. Each
+record is exactly path bytes, control byte `0x09`, ASCII decimal byte count,
+control byte `0x09`, uppercase ASCII SHA-256, and control byte `0x0A`.
+The fifth record also ends in exactly one `0x0A`; no CR byte is present.
+
+| Path | Bytes | SHA-256 | Serialized bytes |
+|---|---:|---|---:|
+| `panam_development_loop/__init__.py` | 1790 | `7D2B328F441B364B2211608E4FA786B639474586C7C2F878356E7C7F123C4062` | 105 |
+| `panam_development_loop/repositories.py` | 2231 | `040D6FCDC0E66E495C157C9DBC8D36999828EC97B88591E679DAF76827DD57C7` | 109 |
+| `panam_development_loop/sqlite_migrations.py` | 11387 | `BFD51E8D6172C650A6762CEC8BB4FB1DBFC09A9894366C0AE0C1805535111329` | 115 |
+| `panam_development_loop/sqlite_repositories.py` | 17615 | `D5000DC2A0499F40D5E4FB4AEE3E6102EA177A20F75B778972FA2DFE686B0D04` | 117 |
+| `panam_development_loop_poc_test.py` | 58585 | `B39B77E00E6A9C05A0B662185100CE24AD991319B1A7E696EEB3E3A4E4493358` | 106 |
+
+The exact canonical serialized manifest is 552 bytes and has SHA-256
+`8A981D6B9A1602DE61ECD2D350D38E58D33E3F549B573D52FD446C7E8C54A07D`.
+Its control-byte counts are 10 TABs (`0x09`), 5 LFs (`0x0A`), 0 CRs
+(`0x0D`), and 0 separator backslashes (`0x5C`).
+
+The prior non-canonical 567-byte result is fully explained: it used literal
+escape text `\t` and `\n` as separator bytes `0x5C 0x74` and
+`0x5C 0x6E`, rather than canonical `0x09` and `0x0A`. Three separators
+per record across five records made 15 literal escapes; each was one byte
+longer than its corresponding control byte, yielding exactly 15 extra bytes.
+Fresh `FINAL-HANDOFF VERIFICATION` remains `PENDING`.
 
 ## Contract, feasibility, and Approval 1
 
@@ -369,23 +506,19 @@ No reusable capability classification is made by this handoff. Any future
 Capability Registry or Vault proposal requires its separate evidence and human
 approval lifecycle.
 
-## Current Git state and future commit 1
+## Current Git state and future commit 2
 
-At draft creation, source HEAD remains
-`b6b18a26b7b188ee6401b4ab012e632c69fd4cfe`, divergence remains
-`0 ahead / 0 behind`, and staged paths remain empty. The dirty set is exactly:
+Current local HEAD is source commit 1
+`845d09395bfd85c1ba61808035e955bd55ca7eb8`; the live remote remains at
+`b6b18a26b7b188ee6401b4ab012e632c69fd4cfe`, so divergence is
+`1 ahead / 0 behind`. No path is staged. The exact expected finalization
+working-tree diff is this one handoff path only.
 
-1. `panam_development_loop/__init__.py` — UPDATE;
-2. `panam_development_loop/repositories.py` — CREATE;
-3. `panam_development_loop/sqlite_migrations.py` — UPDATE;
-4. `panam_development_loop/sqlite_repositories.py` — CREATE;
-5. `panam_development_loop_poc_test.py` — UPDATE;
-6. `docs/handoffs/dl-p1-5-sqlite-repositories.md` — CREATE.
-
-Only as an expected future lifecycle step, after independent draft-handoff
-verification and separate Human Git Authority, implementation commit 1 is
-expected to contain those exact six paths. No staging or commit is authorized
-or claimed here, and no commit SHA is invented.
+Only as an expected future lifecycle step, after independent final-handoff
+verification and separate Human Git Authority, handoff-finalization commit 2
+is expected to contain exactly
+`docs/handoffs/dl-p1-5-sqlite-repositories.md` and no implementation path.
+Commit 2 does not yet exist; no SHA or subject is invented here.
 
 ## Known limitations and unresolved questions
 
@@ -397,12 +530,13 @@ DL-P1.5 does not alter that documentation.
 
 ## Next safe gate and freshness
 
-The next safe gate is a fresh independent **Verifier in draft-handoff
-verification mode**. It must bind this draft's exact on-disk bytes and detached
-SHA-256, the five-file candidate aggregate and individual digests, branch,
-unchanged HEAD, live remote, exact six-path dirty set, empty staging state,
-Verifier/Reviewer chronology, correction count, and all pending lifecycle
-fields. Only the State Machine may consume a passing result.
+The next safe gate is a fresh independent **Verifier in final-handoff
+verification mode**. It must bind source commit 1's hash, parent, subject,
+tree, and six-path scope; this finalized handoff's exact on-disk bytes and
+detached SHA-256; the handoff-only working-tree diff; branch, live remote,
+divergence, empty staging state, Verifier/Reviewer chronology, correction
+count, and all pending lifecycle fields. Only the State Machine may consume a
+passing result.
 
 This handoff and its evidence are invalidated by any relevant change to the
 contract, either Feasibility artifact, Approval 1, handoff authority,
@@ -411,9 +545,9 @@ branch, HEAD, upstream/live remote, divergence, candidate paths or bytes, this
 handoff's bytes, deterministic verification, Reviewer evidence, correction
 history, staging state, or lifecycle facts.
 
-The Handoff Agent grants no authority to invoke the Verifier, stage, commit,
-push, finalize this handoff, declare `SOURCE_COMPLETED`, start Vault work, or
-perform any lifecycle transition.
+The Handoff Finalizer grants no authority to invoke the Verifier, stage, commit,
+push, declare `SOURCE_COMPLETED`, start Vault work, or perform any lifecycle
+transition.
 
 ## Provenance chronology
 
@@ -433,8 +567,39 @@ perform any lifecycle transition.
 8. Independent Verifier returned `PASSED` with no material findings.
 9. Advisory Reviewer returned `APPROVED` with no material findings and no
    correction recommendation.
-10. `HAD-DL-P1.5-HANDOFF-DRAFT-001` authorized this exact pre-commit handoff
+10. `HAD-DL-P1.5-HANDOFF-DRAFT-001` authorized the exact pre-commit handoff
     draft.
-11. Independent draft-handoff verification, Git authority, both source commits,
-    source push/synchronization, source completion, and the separate Vault
-    lifecycle all remain pending.
+11. Independent draft-handoff Verifier returned `PASSED`.
+12. Source commit 1 `845d09395bfd85c1ba61808035e955bd55ca7eb8` was created
+    locally with the exact six verified paths.
+13. Handoff Finalizer 001 returned `FINALIZED` and produced the first
+    finalized handoff: 19,781 bytes, SHA-256
+    `52D633A26C165C58C0F597DD44F0256BCC4EF7D38989FD9168F5D8E1DB143EE4`.
+14. The first Final-Handoff Verifier under
+    `HAD-DL-P1.5-FINAL-HANDOFF-VERIFIER-001` returned `FAILED` for the missing
+    explicit pre-finalization draft byte-size/SHA-256 provenance binding.
+15. `HAD-DL-P1.5-HANDOFF-PROVENANCE-CORRECTION-001` returned `CORRECTED`
+    and produced the 21,035-byte handoff with SHA-256
+    `DE291B333EC6399681DF44B3418304C14441A9402DA4BD7D272C728B64DAC1E9`.
+16. Final-Handoff Verifier generation 2 under
+    `HAD-DL-P1.5-FINAL-HANDOFF-VERIFIER-002` returned
+    `NEEDS_HUMAN_DECISION` for the aggregate-manifest serialization ambiguity
+    after establishing `PRE_FINALIZATION_BINDING_RESOLVED: true`.
+17. Aggregate Manifest Reconciliation 001 returned
+    `NEEDS_HUMAN_DECISION` without writing the handoff.
+18. Aggregate Reconstruction Diagnostic under
+    `HAD-DL-P1.5-AGGREGATE-RECONSTRUCTION-DIAGNOSTIC-001` returned
+    `DIAGNOSED`, identifying literal escape sequences instead of control
+    bytes.
+19. `HAD-DL-P1.5-AGGREGATE-MANIFEST-RECONCILIATION-002` recorded the
+    canonical aggregate as `CONFIRMED CORRECT` without rebaseline.
+20. The bounded Handoff Finalizer execution under that authority returned
+    `RECONCILED` and produced the 24,711-byte handoff with SHA-256
+    `0EA9E8F044DF522689C6960943EC4A9B386A2E4C9FC6B31B1438012BAE58BFDD`.
+21. Final-Handoff Verifier generation 3 under
+    `HAD-DL-P1.5-FINAL-HANDOFF-VERIFIER-003` returned `FAILED`.
+22. `HAD-DL-P1.5-FINAL-HANDOFF-PROVENANCE-CORRECTION-002` returned
+    `CORRECTED` for this bounded historical provenance correction.
+23. Fresh final-handoff verification remains `PENDING`.
+    Handoff-finalization commit 2, source push/synchronization, source
+    completion, and the separate Vault lifecycle all remain pending.
