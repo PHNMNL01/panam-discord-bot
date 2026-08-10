@@ -1,4 +1,4 @@
-"""Focused deterministic tests for the DL-P1.1 and DL-P1.2 slices."""
+"""Focused deterministic tests for the DL-P1.1 through DL-P1.5 slices."""
 
 import sqlite3
 import tempfile
@@ -21,6 +21,11 @@ from panam_development_loop import (
     DevelopmentRunState,
     MilestoneContract,
     PhaseContract,
+    RepositoryError,
+    RepositoryFailureCode,
+    SqliteApprovalBindingRepository,
+    SqliteMilestoneContractRepository,
+    SqlitePhaseContractRepository,
     SqliteRunStore,
     TransitionReasonCode,
     TransitionRequest,
@@ -455,7 +460,7 @@ class ApprovalBindingTest(unittest.TestCase):
             self.assertEqual(before, set(Path(directory).iterdir()))
 
 class SqliteMigrationTest(unittest.TestCase):
-    """Focused DL-P1.4 migration and legacy-version-1 compatibility coverage."""
+    """DL-P1.4 regression and legacy-version-1 compatibility coverage."""
 
     def setUp(self) -> None:
         self._temporary_directory = tempfile.TemporaryDirectory()
@@ -556,14 +561,21 @@ class SqliteMigrationTest(unittest.TestCase):
         self.assertEqual(before_ledger, self._ledger_snapshot(connection))
         return raised.exception
 
-    def test_fresh_database_applies_production_version_one_once(self) -> None:
+    def test_fresh_database_applies_current_production_registry_once(self) -> None:
         path = self._path()
         SqliteRunStore(path).initialize("first-at")
         connection = self._connection(path)
         try:
-            self.assertEqual([(1, "first-at")], self._ledger_snapshot(connection))
+            self.assertEqual([(1, "first-at"), (2, "first-at")], self._ledger_snapshot(connection))
             self.assertEqual(
-                ["development_runs", "schema_migrations", "state_events"],
+                [
+                    "approvals",
+                    "development_runs",
+                    "milestone_contracts",
+                    "phases",
+                    "schema_migrations",
+                    "state_events",
+                ],
                 [row["name"] for row in connection.execute(
                     "SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%' ORDER BY name"
                 )],
@@ -589,13 +601,16 @@ class SqliteMigrationTest(unittest.TestCase):
         finally:
             connection.close()
 
-    def test_independent_existing_version_one_data_is_accepted_unchanged(self) -> None:
+    def test_independent_existing_version_one_data_is_upgraded_without_replay(self) -> None:
         path = self._path()
         self._create_existing_version_one_database(path)
         connection = self._connection(path)
         try:
-            before_schema = self._schema_snapshot(connection)
-            before_ledger = self._ledger_snapshot(connection)
+            before_schema = {
+                row[1]: row[2]
+                for row in self._schema_snapshot(connection)
+                if row[0] == "table"
+            }
             before_runs = [tuple(row) for row in connection.execute("SELECT * FROM development_runs")]
             before_events = [tuple(row) for row in connection.execute("SELECT * FROM state_events ORDER BY state_version")]
         finally:
@@ -603,8 +618,17 @@ class SqliteMigrationTest(unittest.TestCase):
         SqliteRunStore(path).initialize("new-at")
         connection = self._connection(path)
         try:
-            self.assertEqual(before_schema, self._schema_snapshot(connection))
-            self.assertEqual(before_ledger, self._ledger_snapshot(connection))
+            after_schema = {
+                row[1]: row[2]
+                for row in self._schema_snapshot(connection)
+                if row[0] == "table"
+            }
+            for table_name, table_sql in before_schema.items():
+                self.assertEqual(table_sql, after_schema[table_name])
+            self.assertEqual(
+                [(1, "legacy-applied-at"), (2, "new-at")],
+                self._ledger_snapshot(connection),
+            )
             self.assertEqual(before_runs, [tuple(row) for row in connection.execute("SELECT * FROM development_runs")])
             self.assertEqual(before_events, [tuple(row) for row in connection.execute("SELECT * FROM state_events ORDER BY state_version")])
         finally:
@@ -724,7 +748,7 @@ class SqliteMigrationTest(unittest.TestCase):
             malformed.commit()
             self.assertEqual(MigrationFailureCode.INVALID_APPLIED_HISTORY, self._assert_history_rejected_without_mutation(malformed).code)
             future.execute("CREATE TABLE schema_migrations (version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL)")
-            future.execute("INSERT INTO schema_migrations VALUES(2, 'future-at')")
+            future.execute("INSERT INTO schema_migrations VALUES(3, 'future-at')")
             future.commit()
             self.assertEqual(MigrationFailureCode.UNKNOWN_FUTURE_VERSION, self._assert_history_rejected_without_mutation(future).code)
         finally:
@@ -747,6 +771,484 @@ class SqliteMigrationTest(unittest.TestCase):
         finally:
             nonpositive.close()
             duplicate.close()
+
+
+class SqliteRepositoryTest(unittest.TestCase):
+    """Focused DL-P1.5 repository behavior and failure-boundary coverage."""
+
+    def setUp(self) -> None:
+        self._temporary_directory = tempfile.TemporaryDirectory()
+        self.directory = Path(self._temporary_directory.name)
+        self.database_path = self.directory / "repositories.sqlite3"
+        SqliteRunStore(self.database_path).initialize("initialized-at")
+
+    def tearDown(self) -> None:
+        self._temporary_directory.cleanup()
+
+    @staticmethod
+    def _phase(phase_id: str = "DL-P1") -> PhaseContract:
+        return PhaseContract("panam", phase_id, "1")
+
+    @staticmethod
+    def _milestone(milestone_id: str = "DL-P1.5", phase_id: str = "DL-P1") -> MilestoneContract:
+        return MilestoneContract(
+            project_id="panam",
+            phase_id=phase_id,
+            milestone_id=milestone_id,
+            contract_version="1",
+            objective="Persist café contracts ✓",
+            scope=("SQLite repositories", "canonical JSON"),
+            exclusions=(),
+            acceptance_criteria=("durable", "deterministic"),
+            allowed_paths=("panam_development_loop/repositories.py",),
+            forbidden_paths=("runtime",),
+            verification_plan=("focused tests", "full regression"),
+            stop_conditions=("scope change", "test failure"),
+        )
+
+    @staticmethod
+    def _approval(
+        approval_id: str = "approval-1",
+        approval_kind: str = "APPROVAL_1",
+        target_kind: str = "SOURCE_REPOSITORY",
+    ) -> ApprovalBinding:
+        return ApprovalBinding(
+            approval_id=approval_id,
+            approval_version="1",
+            approval_kind=approval_kind,
+            subject_id="DL-P1.5",
+            subject_digest="a" * 64,
+            target_kind=target_kind,
+            target_id="Panam_APP",
+            target_branch="phase/panam-dl-p1",
+            base_commit="b6b18a26",
+            allowed_actions=("verify", "implement"),
+            allowed_paths=(
+                "panam_development_loop/sqlite_repositories.py",
+                "panam_development_loop/repositories.py",
+            ),
+            approver_id="human-č",
+            approved_at="2026-08-10T10:00:00Z",
+        )
+
+    def _assert_code(self, code: RepositoryFailureCode, operation: object) -> RepositoryError:
+        with self.assertRaises(RepositoryError) as raised:
+            operation()  # type: ignore[operator]
+        self.assertEqual(code, raised.exception.code)
+        return raised.exception
+
+    def test_phase_create_reopen_missing_duplicate_and_immutable_api(self) -> None:
+        contract = self._phase()
+        repository = SqlitePhaseContractRepository(self.database_path)
+        self.assertIs(contract, repository.create(contract))
+        reopened = SqlitePhaseContractRepository(self.database_path)
+        self.assertEqual(contract, reopened.get("panam", "DL-P1"))
+        self.assertEqual(contract.sha256_digest(), reopened.get("panam", "DL-P1").sha256_digest())  # type: ignore[union-attr]
+        self.assertIsNone(reopened.get("panam", "missing"))
+        error = self._assert_code(
+            RepositoryFailureCode.DUPLICATE_ENTITY,
+            lambda: reopened.create(contract),
+        )
+        self.assertIsInstance(error.__cause__, sqlite3.IntegrityError)
+        for method_name in ("update", "upsert", "replace", "delete", "list"):
+            self.assertFalse(hasattr(repository, method_name))
+
+    def test_milestone_round_trip_preserves_unicode_tuples_order_and_relationship(self) -> None:
+        SqlitePhaseContractRepository(self.database_path).create(self._phase())
+        contract = self._milestone()
+        repository = SqliteMilestoneContractRepository(self.database_path)
+        self.assertIs(contract, repository.create(contract))
+        reopened = SqliteMilestoneContractRepository(self.database_path)
+        loaded = reopened.get("panam", "DL-P1", "DL-P1.5")
+        self.assertEqual(contract, loaded)
+        self.assertEqual(("focused tests", "full regression"), loaded.verification_plan)  # type: ignore[union-attr]
+        self.assertEqual(contract.sha256_digest(), loaded.sha256_digest())  # type: ignore[union-attr]
+        self.assertIsNone(reopened.get("panam", "DL-P1", "missing"))
+        self._assert_code(
+            RepositoryFailureCode.DUPLICATE_ENTITY,
+            lambda: reopened.create(contract),
+        )
+        connection = sqlite3.connect(self.database_path)
+        try:
+            row = connection.execute(
+                "SELECT objective, scope_json, exclusions_json, verification_plan_json FROM milestone_contracts"
+            ).fetchone()
+            self.assertEqual("Persist café contracts ✓", row[0])
+            self.assertEqual('["SQLite repositories","canonical JSON"]', row[1])
+            self.assertEqual("[]", row[2])
+            self.assertEqual('["focused tests","full regression"]', row[3])
+        finally:
+            connection.close()
+
+    def test_milestone_requires_composite_phase_parent_and_persists_nothing_on_failure(self) -> None:
+        repository = SqliteMilestoneContractRepository(self.database_path)
+        error = self._assert_code(
+            RepositoryFailureCode.RELATIONSHIP_VIOLATION,
+            lambda: repository.create(self._milestone()),
+        )
+        self.assertIsInstance(error.__cause__, sqlite3.IntegrityError)
+        connection = sqlite3.connect(self.database_path)
+        try:
+            self.assertEqual(0, connection.execute("SELECT COUNT(*) FROM milestone_contracts").fetchone()[0])
+        finally:
+            connection.close()
+
+    def test_approval_round_trip_preserves_all_current_kinds_and_structured_values(self) -> None:
+        fixtures = (
+            self._approval("approval-phase", "PHASE_START_APPROVAL"),
+            self._approval("approval-one", "APPROVAL_1"),
+            self._approval("approval-two", "APPROVAL_2", "VAULT"),
+        )
+        repository = SqliteApprovalBindingRepository(self.database_path)
+        for binding in fixtures:
+            self.assertIs(binding, repository.create(binding))
+        reopened = SqliteApprovalBindingRepository(self.database_path)
+        for binding in fixtures:
+            with self.subTest(binding=binding.approval_id):
+                loaded = reopened.get(binding.approval_id)
+                self.assertEqual(binding, loaded)
+                self.assertEqual(binding.sha256_digest(), loaded.sha256_digest())  # type: ignore[union-attr]
+        self.assertIsNone(reopened.get("missing"))
+        self._assert_code(
+            RepositoryFailureCode.DUPLICATE_ENTITY,
+            lambda: reopened.create(fixtures[0]),
+        )
+        connection = sqlite3.connect(self.database_path)
+        try:
+            row = connection.execute(
+                "SELECT allowed_actions_json, allowed_paths_json, approver_id FROM approvals WHERE approval_id = 'approval-one'"
+            ).fetchone()
+            self.assertEqual('["implement","verify"]', row[0])
+            self.assertEqual(
+                '["panam_development_loop/repositories.py","panam_development_loop/sqlite_repositories.py"]',
+                row[1],
+            )
+            self.assertEqual("human-č", row[2])
+        finally:
+            connection.close()
+
+    def test_invalid_lookup_identity_fails_before_sqlite_access(self) -> None:
+        missing_path = self.directory / "must-not-exist.sqlite3"
+        repositories_and_calls = (
+            (SqlitePhaseContractRepository(missing_path), lambda repo: repo.get("", "DL-P1")),
+            (SqliteMilestoneContractRepository(missing_path), lambda repo: repo.get("panam", " padded", "DL-P1.5")),
+            (SqliteApprovalBindingRepository(missing_path), lambda repo: repo.get("approval\n1")),
+            (SqliteApprovalBindingRepository(missing_path), lambda repo: repo.get(1)),
+        )
+        for repository, operation in repositories_and_calls:
+            with self.subTest(repository=type(repository).__name__):
+                self._assert_code(
+                    RepositoryFailureCode.INVALID_IDENTITY,
+                    lambda repository=repository, operation=operation: operation(repository),
+                )
+                self.assertFalse(missing_path.exists())
+
+    def test_digest_uniqueness_conflict_is_duplicate_and_preserves_snapshot(self) -> None:
+        contract = self._phase("DL-P2")
+        connection = sqlite3.connect(self.database_path)
+        try:
+            connection.execute(
+                "INSERT INTO phases VALUES(?, ?, ?, ?)",
+                ("panam", "other-phase", "1", contract.sha256_digest()),
+            )
+            connection.commit()
+            before = connection.execute("SELECT * FROM phases ORDER BY project_id, phase_id").fetchall()
+        finally:
+            connection.close()
+        self._assert_code(
+            RepositoryFailureCode.DUPLICATE_ENTITY,
+            lambda: SqlitePhaseContractRepository(self.database_path).create(contract),
+        )
+        connection = sqlite3.connect(self.database_path)
+        try:
+            self.assertEqual(before, connection.execute("SELECT * FROM phases ORDER BY project_id, phase_id").fetchall())
+        finally:
+            connection.close()
+
+    def test_corrupt_payloads_fail_closed_with_bounded_categories(self) -> None:
+        phase_repository = SqlitePhaseContractRepository(self.database_path)
+        milestone_repository = SqliteMilestoneContractRepository(self.database_path)
+        approval_repository = SqliteApprovalBindingRepository(self.database_path)
+        phase_repository.create(self._phase())
+        milestone_repository.create(self._milestone())
+        milestone_repository.create(self._milestone("DL-P1.5-shape"))
+        milestone_repository.create(self._milestone("DL-P1.5-scalar"))
+        approval_repository.create(self._approval("approval-invalid-kind"))
+        approval_repository.create(self._approval("approval-unsupported"))
+        connection = sqlite3.connect(self.database_path)
+        try:
+            connection.execute("UPDATE phases SET contract_version = '2'")
+            connection.execute(
+                "UPDATE milestone_contracts SET scope_json = '{bad json' WHERE milestone_id = 'DL-P1.5'"
+            )
+            connection.execute(
+                "UPDATE milestone_contracts SET scope_json = '{}' WHERE milestone_id = 'DL-P1.5-shape'"
+            )
+            connection.execute(
+                "UPDATE milestone_contracts SET objective = '' WHERE milestone_id = 'DL-P1.5-scalar'"
+            )
+            connection.execute(
+                "UPDATE approvals SET approval_kind = 'UNKNOWN' WHERE approval_id = 'approval-invalid-kind'"
+            )
+            connection.execute(
+                "UPDATE approvals SET approval_version = '2' WHERE approval_id = 'approval-unsupported'"
+            )
+            connection.commit()
+        finally:
+            connection.close()
+        self._assert_code(
+            RepositoryFailureCode.UNSUPPORTED_PERSISTED_VERSION,
+            lambda: phase_repository.get("panam", "DL-P1"),
+        )
+        self._assert_code(
+            RepositoryFailureCode.MALFORMED_PERSISTED_PAYLOAD,
+            lambda: milestone_repository.get("panam", "DL-P1", "DL-P1.5"),
+        )
+        for milestone_id in ("DL-P1.5-shape", "DL-P1.5-scalar"):
+            self._assert_code(
+                RepositoryFailureCode.MALFORMED_PERSISTED_PAYLOAD,
+                lambda milestone_id=milestone_id: milestone_repository.get(
+                    "panam", "DL-P1", milestone_id
+                ),
+            )
+        self._assert_code(
+            RepositoryFailureCode.MALFORMED_PERSISTED_PAYLOAD,
+            lambda: approval_repository.get("approval-invalid-kind"),
+        )
+        self._assert_code(
+            RepositoryFailureCode.UNSUPPORTED_PERSISTED_VERSION,
+            lambda: approval_repository.get("approval-unsupported"),
+        )
+
+    def test_digest_mismatch_fails_closed(self) -> None:
+        repository = SqlitePhaseContractRepository(self.database_path)
+        repository.create(self._phase())
+        connection = sqlite3.connect(self.database_path)
+        try:
+            connection.execute("UPDATE phases SET contract_digest = ?", ("f" * 64,))
+            connection.commit()
+        finally:
+            connection.close()
+        self._assert_code(
+            RepositoryFailureCode.MALFORMED_PERSISTED_PAYLOAD,
+            lambda: repository.get("panam", "DL-P1"),
+        )
+
+    def test_missing_stale_future_and_incomplete_schema_are_not_repaired(self) -> None:
+        missing = self.directory / "missing.sqlite3"
+        self._assert_code(
+            RepositoryFailureCode.SCHEMA_MISMATCH,
+            lambda: SqlitePhaseContractRepository(missing).get("panam", "DL-P1"),
+        )
+        self.assertFalse(missing.exists())
+
+        stale = self.directory / "stale.sqlite3"
+        connection = sqlite3.connect(stale)
+        try:
+            connection.execute("CREATE TABLE schema_migrations (version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL)")
+            connection.execute("INSERT INTO schema_migrations VALUES(1, 'old')")
+            connection.commit()
+        finally:
+            connection.close()
+        self._assert_code(
+            RepositoryFailureCode.SCHEMA_MISMATCH,
+            lambda: SqliteApprovalBindingRepository(stale).get("approval"),
+        )
+
+        future = self.directory / "future.sqlite3"
+        SqliteRunStore(future).initialize("at")
+        connection = sqlite3.connect(future)
+        try:
+            connection.execute("INSERT INTO schema_migrations VALUES(3, 'future')")
+            connection.commit()
+        finally:
+            connection.close()
+        self._assert_code(
+            RepositoryFailureCode.SCHEMA_MISMATCH,
+            lambda: SqlitePhaseContractRepository(future).get("panam", "DL-P1"),
+        )
+
+        malformed = self.directory / "malformed.sqlite3"
+        SqliteRunStore(malformed).initialize("at")
+        connection = sqlite3.connect(malformed)
+        try:
+            connection.execute("DELETE FROM schema_migrations WHERE version = 1")
+            connection.commit()
+        finally:
+            connection.close()
+        self._assert_code(
+            RepositoryFailureCode.SCHEMA_MISMATCH,
+            lambda: SqlitePhaseContractRepository(malformed).get("panam", "DL-P1"),
+        )
+
+        incomplete = self.directory / "incomplete.sqlite3"
+        SqliteRunStore(incomplete).initialize("at")
+        connection = sqlite3.connect(incomplete)
+        try:
+            connection.execute("DROP TABLE approvals")
+            connection.commit()
+        finally:
+            connection.close()
+        self._assert_code(
+            RepositoryFailureCode.SCHEMA_MISMATCH,
+            lambda: SqliteApprovalBindingRepository(incomplete).get("approval"),
+        )
+
+    def test_busy_write_fails_immediately_rolls_back_and_closes_for_all_adapters(self) -> None:
+        phase_repository = SqlitePhaseContractRepository(self.database_path)
+        milestone_repository = SqliteMilestoneContractRepository(self.database_path)
+        approval_repository = SqliteApprovalBindingRepository(self.database_path)
+        phase_repository.create(self._phase())
+        blocker = sqlite3.connect(self.database_path)
+        try:
+            blocker.execute("BEGIN IMMEDIATE")
+            operations = (
+                lambda: phase_repository.create(self._phase("DL-P2")),
+                lambda: milestone_repository.create(self._milestone()),
+                lambda: approval_repository.create(self._approval()),
+            )
+            for operation in operations:
+                self._assert_code(RepositoryFailureCode.SQLITE_OPERATIONAL_FAILURE, operation)
+        finally:
+            blocker.rollback()
+            blocker.close()
+        phase_repository.create(self._phase("DL-P2"))
+        milestone_repository.create(self._milestone())
+        approval_repository.create(self._approval())
+
+    def test_independent_databases_do_not_share_entities(self) -> None:
+        second_path = self.directory / "second.sqlite3"
+        SqliteRunStore(second_path).initialize("at")
+        SqlitePhaseContractRepository(self.database_path).create(self._phase())
+        self.assertIsNone(SqlitePhaseContractRepository(second_path).get("panam", "DL-P1"))
+
+
+class SqliteMigrationTwoTest(unittest.TestCase):
+    """Focused DL-P1.5 production migration and validator coverage."""
+
+    def setUp(self) -> None:
+        self._temporary_directory = tempfile.TemporaryDirectory()
+        self.directory = Path(self._temporary_directory.name)
+
+    def tearDown(self) -> None:
+        self._temporary_directory.cleanup()
+
+    def _connection(self, name: str) -> sqlite3.Connection:
+        connection = sqlite3.connect(self.directory / name)
+        connection.row_factory = sqlite3.Row
+        connection.execute("PRAGMA foreign_keys = ON")
+        return connection
+
+    @staticmethod
+    def _install_independent_v1(connection: sqlite3.Connection) -> None:
+        connection.execute("CREATE TABLE schema_migrations (version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL)")
+        connection.execute(
+            "CREATE TABLE development_runs (run_id TEXT PRIMARY KEY, milestone_contract_digest TEXT NOT NULL, current_state TEXT NOT NULL, state_version INTEGER NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL)"
+        )
+        connection.execute(
+            "CREATE TABLE state_events (event_id TEXT PRIMARY KEY, run_id TEXT NOT NULL REFERENCES development_runs(run_id), from_state TEXT NOT NULL, to_state TEXT NOT NULL, transition_reason TEXT NOT NULL, occurred_at TEXT NOT NULL, state_version INTEGER NOT NULL, UNIQUE(run_id, state_version))"
+        )
+        connection.execute("INSERT INTO schema_migrations VALUES(1, 'legacy-at')")
+        connection.execute("INSERT INTO development_runs VALUES('run', 'digest', 'DRAFT', 1, 'created', 'updated')")
+        connection.execute("INSERT INTO state_events VALUES('event', 'run', 'DRAFT', 'FEASIBILITY_CHECKING', 'ACCEPTED', 'event-at', 1)")
+        connection.commit()
+
+    def test_exact_production_registry_and_identifier_tokens_are_accepted(self) -> None:
+        validated = validate_migration_registry(
+            PRODUCTION_MIGRATIONS,
+            require_production_version=True,
+        )
+        self.assertEqual([1, 2], [migration.version for migration in validated])
+        self.assertIn("base_commit", PRODUCTION_MIGRATIONS[1].statements[2])
+        for identifier in ("base_commit", "commit_hash", "rollback_reason"):
+            with self.subTest(identifier=identifier):
+                result = validate_migration_registry(
+                    (Migration(1, (f"CREATE TABLE token_test ({identifier} TEXT NOT NULL)",)),)
+                )
+                self.assertEqual(1, result[0].version)
+
+    def test_actual_forbidden_operations_remain_rejected_case_insensitively(self) -> None:
+        statements = (
+            "  begin   immediate  ",
+            "CoMmIt",
+            "\trollback \n",
+            "savePOINT nested",
+            " ReLeAsE nested ",
+            "vacuum",
+            " AtTaCh database 'x' AS y",
+            "detach database y",
+        )
+        for statement in statements:
+            with self.subTest(statement=statement):
+                with self.assertRaises(MigrationError) as raised:
+                    validate_migration_registry((Migration(1, (statement,)),))
+                self.assertEqual(MigrationFailureCode.INVALID_REGISTRY, raised.exception.code)
+
+    def test_migration_two_schema_and_composite_foreign_key_are_exactly_enforced(self) -> None:
+        path = self.directory / "schema.sqlite3"
+        SqliteRunStore(path).initialize("at")
+        connection = sqlite3.connect(path)
+        connection.row_factory = sqlite3.Row
+        connection.execute("PRAGMA foreign_keys = ON")
+        try:
+            tables = [
+                row[0]
+                for row in connection.execute(
+                    "SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%' ORDER BY name"
+                )
+            ]
+            self.assertEqual(
+                ["approvals", "development_runs", "milestone_contracts", "phases", "schema_migrations", "state_events"],
+                tables,
+            )
+            foreign_keys = connection.execute("PRAGMA foreign_key_list(milestone_contracts)").fetchall()
+            self.assertEqual(2, len(foreign_keys))
+            self.assertEqual({("project_id", "project_id"), ("phase_id", "phase_id")}, {(row[3], row[4]) for row in foreign_keys})
+            self.assertEqual({"RESTRICT"}, {row[5] for row in foreign_keys})
+            self.assertEqual({"RESTRICT"}, {row[6] for row in foreign_keys})
+        finally:
+            connection.close()
+
+    def test_migration_two_statement_failure_rolls_back_schema_and_preserves_v1(self) -> None:
+        connection = self._connection("statement-failure.sqlite3")
+        try:
+            self._install_independent_v1(connection)
+            failing_registry = (
+                PRODUCTION_MIGRATIONS[0],
+                Migration(2, (PRODUCTION_MIGRATIONS[1].statements[0], "INSERT INTO absent_table VALUES(1)")),
+            )
+            with self.assertRaises(MigrationError) as raised:
+                apply_migrations(connection, "new-at", failing_registry)
+            self.assertEqual(MigrationFailureCode.MIGRATION_EXECUTION_FAILED, raised.exception.code)
+            self.assertEqual([(1, "legacy-at")], [tuple(row) for row in connection.execute("SELECT * FROM schema_migrations")])
+            self.assertIsNone(connection.execute("SELECT name FROM sqlite_master WHERE name = 'phases'").fetchone())
+            self.assertEqual(1, connection.execute("SELECT COUNT(*) FROM development_runs").fetchone()[0])
+            self.assertEqual(1, connection.execute("SELECT COUNT(*) FROM state_events").fetchone()[0])
+        finally:
+            connection.close()
+
+    def test_rejected_version_two_ledger_insert_rolls_back_all_production_tables(self) -> None:
+        connection = self._connection("ledger-failure.sqlite3")
+        try:
+            self._install_independent_v1(connection)
+            connection.execute(
+                "CREATE TRIGGER reject_v2 BEFORE INSERT ON schema_migrations WHEN NEW.version = 2 BEGIN SELECT RAISE(ABORT, 'reject'); END"
+            )
+            connection.commit()
+            with self.assertRaises(MigrationError) as raised:
+                apply_migrations(connection, "new-at", PRODUCTION_MIGRATIONS)
+            self.assertEqual(MigrationFailureCode.MIGRATION_EXECUTION_FAILED, raised.exception.code)
+            self.assertEqual([(1, "legacy-at")], [tuple(row) for row in connection.execute("SELECT * FROM schema_migrations")])
+            for table_name in ("phases", "milestone_contracts", "approvals"):
+                self.assertIsNone(
+                    connection.execute(
+                        "SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?",
+                        (table_name,),
+                    ).fetchone()
+                )
+            self.assertEqual(("run", "digest", "DRAFT", 1, "created", "updated"), tuple(connection.execute("SELECT * FROM development_runs").fetchone()))
+        finally:
+            connection.close()
 
 
 if __name__ == "__main__":

@@ -1,4 +1,4 @@
-"""Internal controlled SQLite migration support for the DL-P1.4 schema."""
+"""Internal controlled SQLite migration support through the DL-P1.5 schema."""
 
 import re
 import sqlite3
@@ -67,11 +67,73 @@ PRODUCTION_MIGRATIONS = (
             """,
         ),
     ),
+    Migration(
+        version=2,
+        statements=(
+            """
+            CREATE TABLE phases (
+                project_id TEXT NOT NULL,
+                phase_id TEXT NOT NULL,
+                contract_version TEXT NOT NULL,
+                contract_digest TEXT NOT NULL UNIQUE
+                    CHECK(length(contract_digest) = 64
+                          AND contract_digest NOT GLOB '*[^0-9a-f]*'),
+                PRIMARY KEY(project_id, phase_id)
+            )
+            """,
+            """
+            CREATE TABLE milestone_contracts (
+                project_id TEXT NOT NULL,
+                phase_id TEXT NOT NULL,
+                milestone_id TEXT NOT NULL,
+                contract_version TEXT NOT NULL,
+                objective TEXT NOT NULL,
+                scope_json TEXT NOT NULL,
+                exclusions_json TEXT NOT NULL,
+                acceptance_criteria_json TEXT NOT NULL,
+                allowed_paths_json TEXT NOT NULL,
+                forbidden_paths_json TEXT NOT NULL,
+                verification_plan_json TEXT NOT NULL,
+                stop_conditions_json TEXT NOT NULL,
+                contract_digest TEXT NOT NULL UNIQUE
+                    CHECK(length(contract_digest) = 64
+                          AND contract_digest NOT GLOB '*[^0-9a-f]*'),
+                PRIMARY KEY(project_id, phase_id, milestone_id),
+                FOREIGN KEY(project_id, phase_id)
+                    REFERENCES phases(project_id, phase_id)
+                    ON UPDATE RESTRICT ON DELETE RESTRICT
+            )
+            """,
+            """
+            CREATE TABLE approvals (
+                approval_id TEXT PRIMARY KEY,
+                approval_version TEXT NOT NULL,
+                approval_kind TEXT NOT NULL,
+                subject_id TEXT NOT NULL,
+                subject_digest TEXT NOT NULL
+                    CHECK(length(subject_digest) = 64
+                          AND subject_digest NOT GLOB '*[^0-9a-f]*'),
+                target_kind TEXT NOT NULL,
+                target_id TEXT NOT NULL,
+                target_branch TEXT NOT NULL,
+                base_commit TEXT NOT NULL,
+                allowed_actions_json TEXT NOT NULL,
+                allowed_paths_json TEXT NOT NULL,
+                approver_id TEXT NOT NULL,
+                approved_at TEXT NOT NULL,
+                binding_digest TEXT NOT NULL UNIQUE
+                    CHECK(length(binding_digest) = 64
+                          AND binding_digest NOT GLOB '*[^0-9a-f]*')
+            )
+            """,
+        ),
+    ),
 )
 
 _FORBIDDEN_OPERATION_TOKENS = frozenset(
     {"BEGIN", "COMMIT", "ROLLBACK", "SAVEPOINT", "RELEASE", "VACUUM", "ATTACH", "DETACH"}
 )
+_SQL_IDENTIFIER_OR_KEYWORD_TOKEN = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 
 
 def validate_migration_registry(
@@ -95,7 +157,7 @@ def validate_migration_registry(
         for statement in migration.statements:
             if not isinstance(statement, str) or not statement.strip():
                 raise MigrationError(MigrationFailureCode.INVALID_REGISTRY, "statement")
-            tokens = frozenset(re.findall(r"[A-Za-z]+", statement.upper()))
+            tokens = frozenset(_SQL_IDENTIFIER_OR_KEYWORD_TOKEN.findall(statement.upper()))
             if tokens & _FORBIDDEN_OPERATION_TOKENS:
                 raise MigrationError(MigrationFailureCode.INVALID_REGISTRY, "transaction control")
         versions.append(migration.version)
@@ -106,13 +168,13 @@ def validate_migration_registry(
         raise MigrationError(MigrationFailureCode.INVALID_REGISTRY, "declared order")
     if versions != list(range(1, len(versions) + 1)):
         raise MigrationError(MigrationFailureCode.INVALID_REGISTRY, "contiguous versions")
-    if require_production_version and versions != [1]:
+    if require_production_version and versions != [1, 2]:
         raise MigrationError(MigrationFailureCode.INVALID_REGISTRY, "production version")
     return registry
 
 
 def initialize_database(database_path: Path, applied_at: str) -> None:
-    """Initialize an explicit production database path through migration version 1."""
+    """Initialize an explicit production database path through migration version 2."""
 
     registry = validate_migration_registry(PRODUCTION_MIGRATIONS, require_production_version=True)
     connection = sqlite3.connect(database_path)

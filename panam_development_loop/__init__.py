@@ -19,6 +19,18 @@ from .models import (
     TransitionRequest,
     TransitionResult,
 )
+from .repositories import (
+    ApprovalBindingRepository,
+    MilestoneContractRepository,
+    PhaseContractRepository,
+    RepositoryError,
+    RepositoryFailureCode,
+)
+from .sqlite_repositories import (
+    SqliteApprovalBindingRepository,
+    SqliteMilestoneContractRepository,
+    SqlitePhaseContractRepository,
+)
 from .sqlite_store import SqliteRunStore
 from .transition_policy import TransitionPolicy
 from .transition_service import TransitionService
@@ -26,6 +38,7 @@ from .transition_service import TransitionService
 __all__ = [
     "AcceptedStateEvent",
     "ApprovalBinding",
+    "ApprovalBindingRepository",
     "ApprovalKind",
     "ApprovalTargetKind",
     "ApprovalValidationCode",
@@ -37,7 +50,14 @@ __all__ = [
     "DevelopmentRun",
     "DevelopmentRunState",
     "MilestoneContract",
+    "MilestoneContractRepository",
     "PhaseContract",
+    "PhaseContractRepository",
+    "RepositoryError",
+    "RepositoryFailureCode",
+    "SqliteApprovalBindingRepository",
+    "SqliteMilestoneContractRepository",
+    "SqlitePhaseContractRepository",
     "SqliteRunStore",
     "TransitionPolicy",
     "TransitionReasonCode",
