@@ -1,36 +1,78 @@
-# DL-P1.6 State Machine v1 Transition Evaluation — Pre-Commit Source Handoff
+# DL-P1.6 State Machine v1 Transition Evaluation — Post-Commit-1 Source Handoff
 
 ## Status and authority boundary
 
-\`STATUS: DRAFT\`
+\`STATUS: FINALIZED_PENDING_VERIFICATION\`
 
-\`HANDOFF_TYPE: PRE_COMMIT_SOURCE_HANDOFF\`
+\`HANDOFF_TYPE: POST_COMMIT_1_SOURCE_HANDOFF\`
 
 \`FINAL: false\`
 
-\`COMMIT_1_STATUS: NOT_YET_CREATED\`
+\`PRE_COMMIT_DRAFT_STATUS: COMMITTED_IN_COMMIT_1\`
 
-\`COMMIT_1_SHA: NOT_AVAILABLE_PRE_COMMIT\`
+\`COMMIT_1_STATUS: CREATED\`
+
+\`COMMIT_1_SHA: 6673179b816cced5f8c16f13127f7f70c0b6310e\`
 
 \`COMMIT_1_PARENT: 3426da041a05dbc7d970cfe522a4ed6383df6cec\`
 
-\`COMMIT_1_SUBJECT: NOT_YET_AUTHORIZED\`
+\`COMMIT_1_PARENT_COUNT: 1\`
 
-\`COMMIT_1_BLOB_IDENTITIES: NOT_AVAILABLE_PRE_COMMIT\`
+\`COMMIT_1_SUBJECT: Implement DL-P1.6 state machine v1 transition evaluation\`
 
-\`COMMIT_1_TREE_PROVENANCE: NOT_AVAILABLE_PRE_COMMIT\`
+\`COMMIT_1_TREE: 4bea8e5fce7fdbd28e3b1725494ce88986256706\`
 
-\`COMMIT_1_VERIFICATION_STATUS: NOT_EXECUTED\`
+\`COMMIT_1_PATH_COUNT: 5\`
 
-\`HANDOFF_FINALIZATION_STATUS: NOT_AUTHORIZED\`
+\`COMMIT_1_EXECUTION_RESULT: COMMITTED\`
 
-\`DRAFT_HANDOFF_VERIFICATION_STATUS: NOT_EXECUTED\`
+\`COMMIT_1_BLOB_IDENTITIES: RECORDED_BELOW\`
 
-\`FINAL_HANDOFF_VERIFICATION_STATUS: NOT_EXECUTED\`
+\`COMMIT_1_TREE_PROVENANCE: RECORDED_ABOVE\`
+
+\`COMMIT_1_PROVENANCE_CHECK_STATUS: COMPLETED_WITHIN_SOURCE_GIT_COMMITTER_EXECUTION\`
+
+\`HANDOFF_FINALIZATION_STATUS: COMPLETED\`
+
+\`DRAFT_HANDOFF_VERIFICATION_STATUS: PASSED\`
+
+\`FINAL_HANDOFF_VERIFICATION_GENERATION_001_STATUS: FAILED\`
+
+\`FINAL_HANDOFF_VERIFICATION_GENERATION_001_ARTIFACT: 13690 bytes / 0698DDA3493AAEDF98FF3D940DD981AB050AF513DE913335D0F54F420799EB11\`
+
+\`FINAL_HANDOFF_VERIFICATION_GENERATION_001_CLASSIFICATIONS: HANDOFF_FACTUAL_DEFECT; HANDOFF_PROVENANCE_DEFECT\`
+
+\`HANDOFF_PROVENANCE_CORRECTION_001_STATUS: APPLIED\`
+
+\`FINAL_HANDOFF_VERIFICATION_GENERATION_002_STATUS: FAILED\`
+
+\`FINAL_HANDOFF_VERIFICATION_GENERATION_002_ARTIFACT: 17789 bytes / BFF40E676A948D0EA9CA78D7E6198CEDD90D02DDFB59545813EC919A2E3C0A4D\`
+
+\`FINAL_HANDOFF_VERIFICATION_GENERATION_002_CLASSIFICATION: HANDOFF_PROVENANCE_DEFECT\`
+
+\`FINAL_HANDOFF_VERIFICATION_GENERATION_002_REASON: historical generation-001 failure classifications were omitted from the handoff.\`
+
+\`HANDOFF_PROVENANCE_CORRECTION_002_STATUS: APPLIED\`
+
+\`HANDOFF_PROVENANCE_CORRECTION_002_PURPOSE: add the two missing historical generation-001 failure classifications and record generation-002 failure history.\`
+
+\`FRESH_FINAL_HANDOFF_VERIFICATION_GENERATION_003_STATUS: NOT_EXECUTED\`
+
+\`FRESH_FINAL_HANDOFF_VERIFICATION_GENERATION_003_ARTIFACT: NOT_AVAILABLE\`
+
+\`FRESH_FINAL_HANDOFF_VERIFICATION_GENERATION_003_RESULT: NOT_AVAILABLE\`
 
 \`COMMIT_2_STATUS: NOT_AUTHORIZED\`
 
+\`COMMIT_2_SHA: NOT_AVAILABLE\`
+
+\`COMMIT_2_PARENT: EXPECTED_TO_BE_COMMIT_1_BUT_NOT_YET_CREATED\`
+
+\`COMMIT_2_SUBJECT: NOT_YET_AUTHORIZED\`
+
 \`SOURCE_PUSH_STATUS: NOT_AUTHORIZED\`
+
+\`SOURCE_SYNC_VERIFICATION_STATUS: NOT_EXECUTED\`
 
 \`SOURCE_COMPLETION_STATUS: NOT_REACHED\`
 
@@ -38,11 +80,20 @@
 
 \`OVERALL_DL_P1_6_STATUS: NOT_COMPLETED\`
 
-This DRAFT was created under \`HAD-DL-P1.6-HANDOFF-DRAFT-001\`. It is a
-pre-commit provenance document for the exact verified and reviewed working-tree
-candidate. It is not final, staged, committed, pushed, source-completed,
-Vault-approved, or milestone-completed. Its creation authorizes no Git write or
-lifecycle transition.
+The historical PRE-COMMIT DRAFT was created under
+\`HAD-DL-P1.6-HANDOFF-DRAFT-001\` and independently verified under
+\`HAD-DL-P1.6-DRAFT-HANDOFF-VERIFIER-001\`. Commit 1 contains that exact
+verified DRAFT. This later working-tree generation was finalized under
+\`HAD-DL-P1.6-HANDOFF-FINALIZATION-001\` using the actual Commit-1 provenance.
+Final-Handoff Verification generation 001 failed, and Handoff Provenance
+Correction 001 has been applied to this final handoff candidate. Final-Handoff
+Verification generation 002 then failed because the handoff omitted the
+historical generation-001 failure classifications. Handoff Provenance
+Correction 002 has now recorded those classifications and the generation-002
+failure history. Fresh Independent Final-Handoff Verification generation 003
+has not been executed. The candidate is not staged for Commit 2, pushed,
+source-completed, Vault-approved, or milestone-completed. Neither finalization
+nor either correction authorizes a Git write or lifecycle transition.
 
 ## Milestone and approval binding
 
@@ -61,9 +112,59 @@ ownership, external effects, or DL-P1.7 execution behavior.
 | Feasibility Assessment 8 | \`C:\Panam_Runtime\development-runs\dl-p1-6\feasibility\FEASIBILITY-ASSESSMENT-8.md\`; 20431 bytes; \`0AB949DB4F96F207553A814C483595608D280A9C036DB958A20FBB747587C661\`; \`FEASIBLE_WITH_NON_BLOCKING_FINDINGS\`; \`READY_FOR_APPROVAL_1=true\` |
 | Fresh Verification 002 | \`C:\Panam_Runtime\development-runs\dl-p1-6\verification\IMPLEMENTATION-VERIFICATION-2.md\`; 13745 bytes; \`E260C82A91C55D7CDD33E0AE4342E76D07599378A6390515122BEC0326AA1609\`; \`PASSED\` |
 | Independent Reviewer | \`C:\Panam_Runtime\development-runs\dl-p1-6\review\IMPLEMENTATION-REVIEW.md\`; 10376 bytes; \`A5D532A7364BF362214556A19CB98432DCDECA227934BF5FEE391A52C3698C65\`; \`APPROVED\` |
+| Draft-Handoff Verification | \`C:\Panam_Runtime\development-runs\dl-p1-6\handoff-verification\DRAFT-HANDOFF-VERIFICATION.md\`; 11942 bytes; \`5526424A1589CDB6BC3FCA26425BFDB6E14BDEA61BC52D444175F44EC91C7802\`; \`PASSED\` |
 
 The approved implementation contract remains frozen. This handoff introduces no
 new architecture, design, or policy.
+
+## Authoritative Commit-1 provenance
+
+Commit 1 was created under \`HAD-DL-P1.6-GIT-COMMIT-1-001\`. Deterministic
+stage-0 index-blob and committed-blob provenance checks were completed within
+the authorized Source Git Committer execution; no separate Git-verifier role is
+claimed.
+
+- SHA: \`6673179b816cced5f8c16f13127f7f70c0b6310e\`.
+- Parent: \`3426da041a05dbc7d970cfe522a4ed6383df6cec\`.
+- Parent count: \`1\`.
+- Subject: \`Implement DL-P1.6 state machine v1 transition evaluation\`.
+- Tree: \`4bea8e5fce7fdbd28e3b1725494ce88986256706\`.
+- Changed path count: \`5\`.
+- Execution result: \`COMMITTED\`.
+
+Exact Commit-1 paths:
+
+1. \`docs/handoffs/dl-p1-6-state-machine-v1-transition-evaluation.md\`
+2. \`panam_development_loop/__init__.py\`
+3. \`panam_development_loop/models.py\`
+4. \`panam_development_loop/transition_policy.py\`
+5. \`panam_development_loop_poc_test.py\`
+
+| Path | Git blob OID | Committed bytes | Committed payload SHA-256 | Authorized raw bytes | Authorized raw SHA-256 | Provenance classification |
+|---|---|---:|---|---:|---|---|
+| \`panam_development_loop/__init__.py\` | \`7506604e4a02a268daa804d3b86ce7dba25ba086\` | 2865 | \`1DF5A1C0E11F7CF1B0A16CD24F202061808DDCCC745FD53F1807E24F01AF9FF3\` | 2865 | \`1DF5A1C0E11F7CF1B0A16CD24F202061808DDCCC745FD53F1807E24F01AF9FF3\` | \`IDENTITY\` |
+| \`panam_development_loop/models.py\` | \`157caf557be3a555f617052bb57d266c27de92bb\` | 39823 | \`B32B4C5809FE98FB4EE33771300ED9EDE5C3823635CC5DB9D0541F034956A2DB\` | 39823 | \`B32B4C5809FE98FB4EE33771300ED9EDE5C3823635CC5DB9D0541F034956A2DB\` | \`IDENTITY\` |
+| \`panam_development_loop/transition_policy.py\` | \`44be10ad62953a167e6842904793fdf587911010\` | 38053 | \`3EC1730614A6B3228D6594F59B00F4B21AFEB5FBDFA0D436E15758D570F63A92\` | 38053 | \`3EC1730614A6B3228D6594F59B00F4B21AFEB5FBDFA0D436E15758D570F63A92\` | \`IDENTITY\` |
+| \`panam_development_loop_poc_test.py\` | \`f3bc71c07bf3d2cfb347e21c908c45abf123a136\` | 105869 | \`30265382DE095819106F24EBE3C8D924C68DEF6E550218A582C59E204E09814E\` | 106588 | \`5FFFBC65DA7392E1E0A4960675376185034AD816730FC3F1C6A9789D21830AD3\` | \`LINE_ENDING_ONLY_TRANSFORM\` |
+| \`docs/handoffs/dl-p1-6-state-machine-v1-transition-evaluation.md\` | \`0061e4795e15c2bbe424ae4c585010b2db933154\` | 14935 | \`D2C2AB96573D457962639B8CA40901E12DD8CA8FF6C7F1125D2436CB31FC841D\` | 14935 | \`D2C2AB96573D457962639B8CA40901E12DD8CA8FF6C7F1125D2436CB31FC841D\` | \`IDENTITY\` |
+
+Four paths are \`IDENTITY\`; only
+\`panam_development_loop_poc_test.py\` is
+\`LINE_ENDING_ONLY_TRANSFORM\`. Its authorized raw payload is 106588 bytes /
+\`5FFFBC65DA7392E1E0A4960675376185034AD816730FC3F1C6A9789D21830AD3\`.
+It contains 719 CRLF sequences, 0 bare CR bytes, and 2440 LF delimiters.
+Replacing exactly those 719 CRLF sequences with LF produces 105869 bytes /
+\`30265382DE095819106F24EBE3C8D924C68DEF6E550218A582C59E204E09814E\`,
+which equals committed blob \`f3bc71c07bf3d2cfb347e21c908c45abf123a136\`
+byte-for-byte. Both payloads are valid UTF-8 without BOM and retain a final EOL;
+no line content, ordering, encoding, BOM, or other whitespace changed.
+
+Commit 1 still contains the historical independently verified PRE-COMMIT DRAFT
+as blob \`0061e4795e15c2bbe424ae4c585010b2db933154\`, 14935 bytes /
+\`D2C2AB96573D457962639B8CA40901E12DD8CA8FF6C7F1125D2436CB31FC841D\`,
+classified \`IDENTITY\` against the original raw DRAFT. The current finalized
+working-tree handoff is a later uncommitted generation; finalization did not
+and cannot mutate historical Commit 1.
 
 ## Exact implementation surface and persistence flags
 
@@ -262,22 +363,28 @@ The manifest is lexically sorted UTF-8 lines:
 LF. Git emitted informational LF-to-CRLF working-copy warnings for candidate
 paths.
 
-\`RAW WORKING-TREE IDENTITY\` and \`FUTURE COMMITTED GIT BLOB IDENTITY\` are
-different evidence categories. No Commit-1 blob identity exists. Future commit
-verification must compare committed blob bytes with this raw candidate and
-classify each path as \`IDENTITY\` or, only when exactly proven,
-\`LINE_ENDING_ONLY_TRANSFORM\`. No other transformation is silently accepted;
-no future blob SHA is fabricated.
+\`RAW WORKING-TREE IDENTITY\` and \`COMMITTED GIT BLOB IDENTITY\` are different
+evidence categories. At PRE-COMMIT DRAFT creation time, no Commit-1 blob
+identities existed. Commit 1 now exists, and its exact committed Git blob
+identities and provenance classifications are recorded above as authoritative
+Commit-1 provenance. The historical PRE-COMMIT rule against fabricating future
+blob identities remains part of the recorded provenance history, but it no
+longer describes the current post-Commit-1 state. Fresh verification must
+compare the actual established committed blob bytes and classifications with
+the raw candidate; no other transformation is silently accepted.
 
 ## Source base and deferred boundary
 
 - Branch: \`phase/panam-dl-p1-1-durable-state-transition-kernel-poc\`.
-- Pre-commit source HEAD: \`3426da041a05dbc7d970cfe522a4ed6383df6cec\`.
-- Tracking: matching.
-- Recorded/live synchronization entering handoff: \`0 behind / 0 ahead\`.
+- Commit-1 source HEAD: \`6673179b816cced5f8c16f13127f7f70c0b6310e\`.
+- Commit-1 parent and tracking HEAD: \`3426da041a05dbc7d970cfe522a4ed6383df6cec\`.
+- Local divergence: \`0 behind / 1 ahead\`.
+- Optional live refresh during finalization: \`UNAVAILABLE\`; connection to
+  GitHub port 443 through \`127.0.0.1\` failed. No live value is fabricated.
 - Staged candidate: \`no\`.
-- Committed candidate: \`no\`.
-- Commit 1: \`not yet created\`.
+- Committed candidate: \`yes, in Commit 1\`.
+- Commit 1: \`created\`.
+- Push: \`not authorized / not performed\`.
 
 DL-P1.6 does not implement DL-P1.7 expanded transactional transition service,
 state/state-version mutation, accepted-event persistence, retry execution or
@@ -294,7 +401,9 @@ Focused corrections: 1/3 consumed
 Focused corrections remaining: 2/3
 Focused Correction 2/3: NOT REQUIRED
 Focused Correction 3/3: NOT REQUIRED
-Handoff Agent consumes focused correction: no
+Handoff Finalizer consumes focused correction: no
+Handoff Provenance Correction 001 consumes focused implementation correction: no
+Handoff Provenance Correction 002 consumes focused implementation correction: no
 \`\`\`
 
 \`\`\`text
@@ -305,11 +414,15 @@ Independent Verification 001: FAILED
 Focused Correction 001: CORRECTED
 Fresh Independent Verification 002: PASSED
 Independent Reviewer: APPROVED
-Handoff DRAFT: CREATED
-Draft-handoff Verification: NOT EXECUTED
-Commit 1: NOT AUTHORIZED
-Handoff Finalization: NOT AUTHORIZED
-Final-handoff Verification: NOT EXECUTED
+PRE-COMMIT Handoff DRAFT: CREATED
+Draft-handoff Verification: PASSED
+Commit 1: CREATED
+Handoff Finalization: COMPLETED
+Final-Handoff Verification generation 001: FAILED
+Handoff Provenance Correction 001: APPLIED
+Final-Handoff Verification generation 002: FAILED
+Handoff Provenance Correction 002: APPLIED
+Fresh Final-Handoff Verification generation 003: NOT EXECUTED
 Commit 2: NOT AUTHORIZED
 Push: NOT AUTHORIZED
 Source synchronization verification: NOT EXECUTED
@@ -318,42 +431,45 @@ Approval 2: NOT GRANTED
 Overall DL-P1.6: NOT COMPLETED
 \`\`\`
 
-## Remaining two-commit source lifecycle
+## Finalization and remaining source lifecycle
 
-1. Handoff Agent creates this DRAFT.
-2. Independent Draft-Handoff Verifier verifies this DRAFT and candidate provenance.
-3. Human Git Commit-1 Authorization.
-4. Commit 1 contains the implementation candidate and verified DRAFT handoff.
-5. Handoff Finalizer receives actual Commit-1 evidence.
-6. Handoff Finalizer may modify only this handoff.
-7. Independent Final-Handoff Verifier verifies final handoff and Commit-1 provenance.
-8. Human Handoff-only Commit-2 Authorization.
-9. Commit 2 contains only final handoff modifications.
-10. Controlled approved phase-branch push.
-11. Fresh source synchronization verification.
-12. Human SOURCE_COMPLETION.
+1. The Handoff Finalizer created the finalized working-tree handoff candidate.
+2. Final-Handoff Verification generation 001 failed.
+3. Handoff Provenance Correction 001 corrected the bounded provenance defect.
+4. Final-Handoff Verification generation 002 failed because the handoff omitted
+   the historical generation-001 failure classifications.
+5. Handoff Provenance Correction 002 recorded those classifications and the
+   generation-002 failure history.
+6. A fresh Independent Final-Handoff Verifier generation 003 verifies the
+   corrected candidate against Commit 1 and both historical failed
+   Final-Handoff Verification generations.
+7. Separate Human Commit-2 Authorization.
+8. Commit 2 contains only the verified finalized handoff modification.
+9. Controlled push of the approved phase branch.
+10. Fresh source synchronization Verification.
+11. Human SOURCE_COMPLETION.
 
-Creation of this DRAFT does not authorize Commit 1. Before staging or commit,
-an independent Draft-Handoff Verifier must verify the exact DRAFT bytes/hash,
-candidate raw identities and aggregate, Approval 1, planning/Feasibility,
-Verification 001 FAILED history, Correction 001, Verification 002 PASSED,
-Reviewer APPROVED, source base, factual accuracy, candidate immutability,
-implementation surface and flags, pre-commit placeholders, and raw-versus-Git-
-blob distinction. Only after that verification passes may separate Human
-Git Commit-1 Authorization be considered.
+Steps 1 through 5 are complete. Fresh Final-Handoff Verification generation 003
+remains \`NOT_EXECUTED\`; its artifact and result remain \`NOT_AVAILABLE\`;
+Commit 2, its SHA, parent realization, and subject remain unavailable or
+unauthorized; push and source synchronization Verification have not occurred.
 
 ## Next safe gate and invalidation
 
-The next safe gate is a separate Human Authority for an independent
-Draft-Handoff Verifier bound to this exact DRAFT handoff identity and the exact
-candidate identities above.
+The next safe gate is a separate Human Authority for fresh Independent
+Final-Handoff Verification generation 003 bound to the exact Commit-1
+provenance, the historical verified PRE-COMMIT DRAFT identity, the immutable
+FAILED Final-Handoff Verification generation-001 and generation-002 evidence,
+the exact corrected finalized working-tree handoff identity, the unchanged
+candidate identities and aggregate, and the exact source state. That authority
+must inherit \`HAD-DL-P1.6-WATCHLIST-WORKSPACE-RECONCILIATION-001\`.
 
-This DRAFT is invalidated by relevant changes to the approved contract,
-Feasibility, Approval 1, verification or Reviewer evidence, candidate bytes,
-aggregate manifest, handoff bytes, repository identity, branch, HEAD, tracking
-or live remote state, divergence, staging, scope, or lifecycle facts.
+This finalized handoff candidate is invalidated by relevant changes to the
+approved contract, Feasibility, Approval 1, verification or Reviewer evidence,
+Commit-1 identity or blobs, candidate bytes, aggregate manifest, handoff bytes,
+repository identity, branch, HEAD, tracking or live remote state, divergence,
+staging, scope, or lifecycle facts.
 
-Do NOT stage, commit, push, finalize the handoff, write Vault, grant Approval
-2, perform source completion, or perform milestone completion under this
-Handoff Agent authority.
-
+Do NOT stage, create Commit 2, push, write Vault, grant Approval 2, perform
+source completion, or perform milestone completion under the Handoff Finalizer
+or Handoff Provenance Corrector authority.
