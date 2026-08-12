@@ -1,15 +1,19 @@
 """Focused deterministic tests for the DL-P1.1 through DL-P1.5 slices."""
 
+import re
 import sqlite3
 import tempfile
 import unittest
-from dataclasses import FrozenInstanceError
+from dataclasses import FrozenInstanceError, fields, replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from unittest.mock import patch
 
 from panam_development_loop import (
     ApprovalBinding,
     ApprovalKind,
+    ApprovalSnapshot,
+    ApprovalSnapshotStatus,
     ApprovalTargetKind,
     ApprovalValidationCode,
     ApprovalValidationError,
@@ -19,17 +23,36 @@ from panam_development_loop import (
     ContractValidationError,
     ContractVersion,
     DevelopmentRunState,
+    EscalationTrigger,
+    EvidenceKind,
+    EvidenceSnapshot,
+    EvidenceVerdict,
+    ExpectedEvidenceBinding,
     MilestoneContract,
     PhaseContract,
     RepositoryError,
+    RepositoryEvidenceBinding,
     RepositoryFailureCode,
     SqliteApprovalBindingRepository,
     SqliteMilestoneContractRepository,
     SqlitePhaseContractRepository,
     SqliteRunStore,
+    SnapshotProducerKind,
+    TransitionEvaluationDecision,
+    TransitionEvaluationReasonCode,
+    TransitionEvaluationRequest,
+    TransitionEvaluationResult,
+    TransitionPolicy,
     TransitionReasonCode,
+    TransitionRequirement,
     TransitionRequest,
     TransitionService,
+    TransitionRule,
+    TransitionRuleId,
+    TransitionRuleValidationCode,
+    TransitionRuleValidationError,
+    WorkflowEdgeType,
+    WorkflowNodeType,
 )
 from panam_development_loop.sqlite_migrations import (
     Migration,
@@ -53,6 +76,32 @@ class FixedValues:
 
     def identifier(self) -> str:
         return next(self._identifiers)
+
+
+class RaisingEquality:
+    def __init__(self) -> None:
+        self.invoked = False
+
+    def __eq__(self, other: object) -> bool:
+        self.invoked = True
+        raise RuntimeError("snapshot-version-equality-invoked")
+
+
+class ParsingOnlyDatetime:
+    def __new__(cls, *args: object, **kwargs: object) -> datetime:
+        return datetime(*args, **kwargs)  # type: ignore[arg-type]
+
+    @classmethod
+    def now(cls, *args: object, **kwargs: object) -> datetime:
+        raise AssertionError("wall-clock lookup invoked")
+
+    @classmethod
+    def utcnow(cls) -> datetime:
+        raise AssertionError("wall-clock lookup invoked")
+
+    @classmethod
+    def today(cls) -> datetime:
+        raise AssertionError("wall-clock lookup invoked")
 
 
 class TransitionServiceTest(unittest.TestCase):
@@ -1249,6 +1298,1142 @@ class SqliteMigrationTwoTest(unittest.TestCase):
             self.assertEqual(("run", "digest", "DRAFT", 1, "created", "updated"), tuple(connection.execute("SELECT * FROM development_runs").fetchone()))
         finally:
             connection.close()
+
+
+class TransitionEvaluationPolicyTest(unittest.TestCase):
+    """Deterministic contract coverage for the approved DL-P1.6 evaluator."""
+
+    def setUp(self) -> None:
+        self.policy = TransitionPolicy()
+
+    @staticmethod
+    def _contract(milestone_id: str = "DL-P1.6") -> MilestoneContract:
+        return MilestoneContract(
+            project_id="panam",
+            phase_id="DL-P1",
+            milestone_id=milestone_id,
+            contract_version="1",
+            objective="Implement pure transition evaluation",
+            scope=("deterministic evaluator", "typed transition policy"),
+            exclusions=("persistence",),
+            acceptance_criteria=("complete results", "fail closed"),
+            allowed_paths=("panam_development_loop/transition_policy.py",),
+            forbidden_paths=("panam_development_loop/transition_service.py",),
+            verification_plan=("focused tests", "full regression"),
+            stop_conditions=("scope change",),
+        )
+
+    @staticmethod
+    def _run(
+        contract: MilestoneContract,
+        state: DevelopmentRunState = DevelopmentRunState.DRAFT,
+        version: int = 3,
+    ) -> DevelopmentRun:
+        return DevelopmentRun(
+            run_id="run-p1-6",
+            milestone_contract_digest=contract.sha256_digest(),
+            current_state=state,
+            state_version=version,
+            created_at="2026-08-11T10:00:00Z",
+            updated_at="2026-08-11T10:01:00.000001Z",
+        )
+
+    @staticmethod
+    def _repository() -> RepositoryEvidenceBinding:
+        return RepositoryEvidenceBinding(
+            repository_id="Panam_APP",
+            branch="phase/panam-dl-p1",
+            head_commit="a" * 40,
+            worktree_digest="b" * 64,
+        )
+
+    @staticmethod
+    def _expected() -> ExpectedEvidenceBinding:
+        return ExpectedEvidenceBinding(
+            assessment_authority_id="HAD-DL-P1.6-FRESH-FEASIBILITY-007",
+            artifact_path=r"C:\Panam_Runtime\FEASIBILITY-ASSESSMENT-8.md",
+            artifact_byte_count=20431,
+            artifact_sha256="c" * 64,
+        )
+
+    def _unconditional_request(self, **changes: object) -> TransitionEvaluationRequest:
+        contract = self._contract()
+        values: dict[str, object] = {
+            "evaluation_version": "1",
+            "run": self._run(contract),
+            "rule_id": TransitionRuleId.P1_6_DRAFT_TO_FEASIBILITY_CHECKING_V1.value,
+            "requested_state": DevelopmentRunState.FEASIBILITY_CHECKING,
+            "edge_type": WorkflowEdgeType.UNCONDITIONAL,
+            "milestone_contract": contract,
+        }
+        values.update(changes)
+        return TransitionEvaluationRequest(**values)  # type: ignore[arg-type]
+
+    def _evidence_request(self, **changes: object) -> TransitionEvaluationRequest:
+        contract = self._contract()
+        run = self._run(contract, DevelopmentRunState.FEASIBILITY_CHECKING, 7)
+        repository = self._repository()
+        expected = self._expected()
+        evidence = EvidenceSnapshot(
+            snapshot_version="1",
+            producer_kind=SnapshotProducerKind.FEASIBILITY_ASSESSOR,
+            run_id=run.run_id,
+            milestone_id=contract.milestone_id,
+            milestone_contract_digest=contract.sha256_digest(),
+            source_state=run.current_state,
+            state_version=run.state_version,
+            rule_id=(
+                TransitionRuleId.P1_6_FEASIBILITY_CHECKING_TO_AWAITING_EXECUTION_APPROVAL_V1
+            ),
+            evidence_kind=EvidenceKind.FEASIBILITY_ASSESSMENT,
+            assessment_authority_id=expected.assessment_authority_id,
+            artifact_path=expected.artifact_path,
+            artifact_byte_count=expected.artifact_byte_count,
+            artifact_sha256=expected.artifact_sha256,
+            verdict=EvidenceVerdict.FEASIBLE_WITH_NON_BLOCKING_FINDINGS,
+            ready_for_approval_1=True,
+            assessed_at="2026-08-11T12:00:00Z",
+            repository_binding=repository,
+        )
+        values: dict[str, object] = {
+            "evaluation_version": "1",
+            "run": run,
+            "rule_id": (
+                TransitionRuleId.P1_6_FEASIBILITY_CHECKING_TO_AWAITING_EXECUTION_APPROVAL_V1.value
+            ),
+            "requested_state": DevelopmentRunState.AWAITING_EXECUTION_APPROVAL,
+            "edge_type": WorkflowEdgeType.EVIDENCE_GATED,
+            "milestone_contract": contract,
+            "expected_evidence": expected,
+            "repository_binding": repository,
+            "evidence_snapshots": (evidence,),
+        }
+        values.update(changes)
+        return TransitionEvaluationRequest(**values)  # type: ignore[arg-type]
+
+    def _assert_outcome(
+        self,
+        request: object,
+        decision: TransitionEvaluationDecision,
+        reason: TransitionEvaluationReasonCode,
+    ) -> TransitionEvaluationResult:
+        run = None
+        requested_state = None
+        rule_id = None
+        edge_type = None
+        version_is_lexically_valid = (
+            type(request) is TransitionEvaluationRequest
+            and type(request.evaluation_version) is str
+            and re.fullmatch(r"[1-9][0-9]*", request.evaluation_version, re.ASCII)
+            is not None
+        )
+        if (
+            version_is_lexically_valid
+            and type(request.run) is DevelopmentRun
+        ):
+            run = request.run
+            rule_id_is_lexically_valid = (
+                type(request.rule_id) is str
+                and 4 <= len(request.rule_id) <= 128
+                and re.fullmatch(
+                    r"[A-Z][A-Z0-9]*(?:_[A-Z0-9]+)*_V1",
+                    request.rule_id,
+                    re.ASCII,
+                )
+                is not None
+            )
+            if rule_id_is_lexically_valid and type(
+                request.requested_state
+            ) is DevelopmentRunState:
+                requested_state = request.requested_state
+                early_structure_is_valid = (
+                    type(request.edge_type) is WorkflowEdgeType
+                    and (
+                        request.node_type is None
+                        or type(request.node_type) is WorkflowNodeType
+                    )
+                    and type(request.evidence_snapshots) is tuple
+                    and (
+                        request.escalation_trigger is None
+                        or type(request.escalation_trigger) is EscalationTrigger
+                    )
+                )
+                contradiction = (
+                    request.retry_budget_snapshot is not None
+                    and request.escalation_trigger is not None
+                )
+                pair = (run.current_state, requested_state)
+                matched_rule = self.policy._RULES_BY_PAIR.get(pair)
+                requested_rule_id = next(
+                    (
+                        candidate
+                        for candidate in TransitionRuleId
+                        if candidate.value == request.rule_id
+                    ),
+                    None,
+                )
+                if (
+                    early_structure_is_valid
+                    and request.evaluation_version == "1"
+                    and not contradiction
+                    and matched_rule is not None
+                    and requested_rule_id is not None
+                ):
+                    rule_id = requested_rule_id
+                    requested_rule = self.policy._RULES_BY_ID[requested_rule_id]
+                    if (
+                        requested_rule.source_state is run.current_state
+                        and requested_rule.target_state is requested_state
+                        and request.edge_type is requested_rule.edge_type
+                    ):
+                        edge_type = requested_rule.edge_type
+
+        missing = {
+            TransitionEvaluationReasonCode.CONTRACT_REQUIRED: (
+                TransitionRequirement.CONTRACT,
+            ),
+            TransitionEvaluationReasonCode.REPOSITORY_BINDING_REQUIRED: (
+                TransitionRequirement.REPOSITORY,
+            ),
+            TransitionEvaluationReasonCode.EVIDENCE_REQUIRED: (
+                TransitionRequirement.EVIDENCE,
+            ),
+            TransitionEvaluationReasonCode.APPROVAL_REQUIRED: (
+                TransitionRequirement.APPROVAL,
+            ),
+        }.get(reason, ())
+        expected = TransitionEvaluationResult(
+            decision=decision,
+            reason_code=reason,
+            run_id=None if run is None else run.run_id,
+            current_state=None if run is None else run.current_state,
+            current_state_version=None if run is None else run.state_version,
+            requested_state=requested_state,
+            rule_id=rule_id,
+            edge_type=edge_type,
+            node_type=None,
+            missing_requirements=missing,
+        )
+        result = self.policy.evaluate(request)
+        self.assertEqual(expected, result)
+        return result
+
+    def _assert_rule_error(
+        self,
+        code: TransitionRuleValidationCode,
+        field_name: str,
+        operation: object,
+    ) -> None:
+        with self.assertRaises(TransitionRuleValidationError) as raised:
+            operation()  # type: ignore[operator]
+        self.assertEqual(code, raised.exception.code)
+        self.assertEqual(field_name, raised.exception.field_name)
+        self.assertEqual(f"{code.value}: {field_name}", str(raised.exception))
+
+    def test_public_vocabularies_shapes_defaults_and_immutability(self) -> None:
+        self.assertEqual(
+            [
+                "DETERMINISTIC",
+                "MODEL_CALL",
+                "SPECIALIST_AGENT",
+                "HUMAN_APPROVAL",
+                "EXTERNAL_EFFECT",
+            ],
+            [value.value for value in WorkflowNodeType],
+        )
+        self.assertEqual(
+            [
+                "UNCONDITIONAL",
+                "STATE_CONDITIONAL",
+                "EVIDENCE_GATED",
+                "APPROVAL_GATED",
+                "RETRY",
+                "ESCALATION",
+                "TERMINAL",
+            ],
+            [value.value for value in WorkflowEdgeType],
+        )
+        self.assertEqual(2, len(TransitionRuleId))
+        self.assertEqual(1, len(EvidenceKind))
+        self.assertEqual(5, len(EvidenceVerdict))
+        self.assertEqual(11, len(EscalationTrigger))
+        self.assertEqual(
+            [
+                "evaluation_version",
+                "run",
+                "rule_id",
+                "requested_state",
+                "edge_type",
+                "node_type",
+                "milestone_contract",
+                "expected_evidence",
+                "repository_binding",
+                "approval_snapshot",
+                "evidence_snapshots",
+                "retry_budget_snapshot",
+                "escalation_trigger",
+            ],
+            [item.name for item in fields(TransitionEvaluationRequest)],
+        )
+        self.assertEqual(
+            [
+                "decision",
+                "reason_code",
+                "run_id",
+                "current_state",
+                "current_state_version",
+                "requested_state",
+                "rule_id",
+                "edge_type",
+                "node_type",
+                "missing_requirements",
+                "side_effects_performed",
+            ],
+            [item.name for item in fields(TransitionEvaluationResult)],
+        )
+        omitted = TransitionEvaluationRequest()
+        explicit = TransitionEvaluationRequest(evidence_snapshots=())
+        self.assertEqual(omitted, explicit)
+        self.assertEqual((), omitted.evidence_snapshots)
+        self.assertIsNone(TransitionEvaluationRequest.__hash__)
+        with self.assertRaises(FrozenInstanceError):
+            omitted.evaluation_version = "1"  # type: ignore[misc]
+
+    def test_transition_rule_contract_validation_equality_and_hash(self) -> None:
+        self.assertEqual(
+            [
+                "rule_id",
+                "source_state",
+                "target_state",
+                "edge_type",
+                "requirements",
+                "node_type_constraint",
+                "evidence_kind_requirement",
+                "evidence_producer_kind_requirement",
+            ],
+            [item.name for item in fields(TransitionRule)],
+        )
+        self.assertEqual(
+            [
+                "WRONG_TYPE",
+                "RULE_ID_MALFORMED",
+                "SOURCE_EQUALS_TARGET",
+                "REQUIREMENTS_NOT_CANONICAL_TUPLE",
+                "REQUIREMENT_WRONG_TYPE",
+                "REQUIREMENTS_NON_CANONICAL_ORDER",
+                "DUPLICATE_REQUIREMENT",
+                "EDGE_REQUIREMENTS_INCOMPATIBLE",
+                "METADATA_INCOMPATIBLE",
+                "CONFLICTS_WITH_RULE_ID",
+            ],
+            [value.value for value in TransitionRuleValidationCode],
+        )
+        rule = TransitionRule(
+            TransitionRuleId.P1_6_DRAFT_TO_FEASIBILITY_CHECKING_V1,
+            DevelopmentRunState.DRAFT,
+            DevelopmentRunState.FEASIBILITY_CHECKING,
+            WorkflowEdgeType.UNCONDITIONAL,
+            (TransitionRequirement.CONTRACT,),
+        )
+        self.assertEqual(rule, replace(rule))
+        self.assertEqual(hash(rule), hash(replace(rule)))
+        self.assertEqual(1, len({rule, replace(rule)}))
+        with self.assertRaises(FrozenInstanceError):
+            rule.edge_type = WorkflowEdgeType.RETRY  # type: ignore[misc]
+
+        base = {
+            "rule_id": TransitionRuleId.P1_6_DRAFT_TO_FEASIBILITY_CHECKING_V1,
+            "source_state": DevelopmentRunState.DRAFT,
+            "target_state": DevelopmentRunState.FEASIBILITY_CHECKING,
+            "edge_type": WorkflowEdgeType.UNCONDITIONAL,
+            "requirements": (TransitionRequirement.CONTRACT,),
+        }
+        cases = (
+            (
+                TransitionRuleValidationCode.WRONG_TYPE,
+                "rule_id",
+                {"rule_id": rule.rule_id.value},
+            ),
+            (
+                TransitionRuleValidationCode.SOURCE_EQUALS_TARGET,
+                "source_state/target_state",
+                {"target_state": DevelopmentRunState.DRAFT},
+            ),
+            (
+                TransitionRuleValidationCode.REQUIREMENTS_NOT_CANONICAL_TUPLE,
+                "requirements",
+                {"requirements": [TransitionRequirement.CONTRACT]},
+            ),
+            (
+                TransitionRuleValidationCode.REQUIREMENT_WRONG_TYPE,
+                "requirements[0]",
+                {"requirements": ("CONTRACT",)},
+            ),
+            (
+                TransitionRuleValidationCode.REQUIREMENTS_NON_CANONICAL_ORDER,
+                "requirements",
+                {
+                    "requirements": (
+                        TransitionRequirement.REPOSITORY,
+                        TransitionRequirement.CONTRACT,
+                    )
+                },
+            ),
+            (
+                TransitionRuleValidationCode.DUPLICATE_REQUIREMENT,
+                "requirements",
+                {
+                    "requirements": (
+                        TransitionRequirement.CONTRACT,
+                        TransitionRequirement.CONTRACT,
+                    )
+                },
+            ),
+            (
+                TransitionRuleValidationCode.EDGE_REQUIREMENTS_INCOMPATIBLE,
+                "requirements",
+                {"requirements": ()},
+            ),
+            (
+                TransitionRuleValidationCode.METADATA_INCOMPATIBLE,
+                "node_type_constraint",
+                {"node_type_constraint": WorkflowNodeType.DETERMINISTIC},
+            ),
+            (
+                TransitionRuleValidationCode.CONFLICTS_WITH_RULE_ID,
+                "source_state",
+                {
+                    "source_state": DevelopmentRunState.FEASIBILITY_CHECKING,
+                    "target_state": DevelopmentRunState.AWAITING_EXECUTION_APPROVAL,
+                },
+            ),
+        )
+        for code, field_name, changes in cases:
+            values = dict(base)
+            values.update(changes)
+            with self.subTest(code=code):
+                self._assert_rule_error(
+                    code,
+                    field_name,
+                    lambda values=values: TransitionRule(**values),  # type: ignore[arg-type]
+                )
+
+        precedence_cases = (
+            (
+                TransitionRuleValidationCode.WRONG_TYPE,
+                "rule_id",
+                {"rule_id": "BAD", "source_state": "DRAFT"},
+            ),
+            (
+                TransitionRuleValidationCode.WRONG_TYPE,
+                "source_state",
+                {"source_state": "DRAFT", "target_state": "TARGET"},
+            ),
+            (
+                TransitionRuleValidationCode.SOURCE_EQUALS_TARGET,
+                "source_state/target_state",
+                {
+                    "target_state": DevelopmentRunState.DRAFT,
+                    "edge_type": "UNCONDITIONAL",
+                },
+            ),
+            (
+                TransitionRuleValidationCode.WRONG_TYPE,
+                "edge_type",
+                {
+                    "edge_type": "UNCONDITIONAL",
+                    "requirements": [TransitionRequirement.CONTRACT],
+                },
+            ),
+            (
+                TransitionRuleValidationCode.REQUIREMENTS_NOT_CANONICAL_TUPLE,
+                "requirements",
+                {
+                    "requirements": ["CONTRACT"],
+                    "node_type_constraint": "DETERMINISTIC",
+                },
+            ),
+            (
+                TransitionRuleValidationCode.REQUIREMENT_WRONG_TYPE,
+                "requirements[0]",
+                {"requirements": ("CONTRACT", TransitionRequirement.CONTRACT)},
+            ),
+            (
+                TransitionRuleValidationCode.REQUIREMENTS_NON_CANONICAL_ORDER,
+                "requirements",
+                {
+                    "requirements": (
+                        TransitionRequirement.REPOSITORY,
+                        TransitionRequirement.CONTRACT,
+                        TransitionRequirement.CONTRACT,
+                    )
+                },
+            ),
+            (
+                TransitionRuleValidationCode.DUPLICATE_REQUIREMENT,
+                "requirements",
+                {
+                    "requirements": (
+                        TransitionRequirement.CONTRACT,
+                        TransitionRequirement.CONTRACT,
+                    ),
+                    "node_type_constraint": "DETERMINISTIC",
+                },
+            ),
+            (
+                TransitionRuleValidationCode.WRONG_TYPE,
+                "evidence_kind_requirement",
+                {
+                    "evidence_kind_requirement": "FEASIBILITY_ASSESSMENT",
+                    "evidence_producer_kind_requirement": "FEASIBILITY_ASSESSOR",
+                },
+            ),
+            (
+                TransitionRuleValidationCode.EDGE_REQUIREMENTS_INCOMPATIBLE,
+                "requirements",
+                {
+                    "edge_type": WorkflowEdgeType.EVIDENCE_GATED,
+                    "requirements": (TransitionRequirement.CONTRACT,),
+                    "node_type_constraint": WorkflowNodeType.DETERMINISTIC,
+                },
+            ),
+        )
+        for code, field_name, changes in precedence_cases:
+            values = dict(base)
+            values.update(changes)
+            with self.subTest(precedence=code, changes=changes):
+                self._assert_rule_error(
+                    code,
+                    field_name,
+                    lambda values=values: TransitionRule(**values),  # type: ignore[arg-type]
+                )
+
+        self.assertNotIn(
+            "CONTRADICTORY_REQUIREMENTS",
+            {value.value for value in TransitionRuleValidationCode},
+        )
+
+    def test_registry_is_exact_immutable_and_legacy_allows_is_preserved(self) -> None:
+        rules = self.policy._RULES_BY_ID
+        self.assertEqual(set(TransitionRuleId), set(rules))
+        self.assertEqual(2, len(rules))
+        with self.assertRaises(TypeError):
+            rules[TransitionRuleId.P1_6_DRAFT_TO_FEASIBILITY_CHECKING_V1] = rules[  # type: ignore[index]
+                TransitionRuleId.P1_6_DRAFT_TO_FEASIBILITY_CHECKING_V1
+            ]
+        allowed_pairs = {
+            (
+                DevelopmentRunState.DRAFT,
+                DevelopmentRunState.FEASIBILITY_CHECKING,
+            ),
+            (
+                DevelopmentRunState.FEASIBILITY_CHECKING,
+                DevelopmentRunState.AWAITING_EXECUTION_APPROVAL,
+            ),
+        }
+        for source in DevelopmentRunState:
+            for target in DevelopmentRunState:
+                self.assertEqual(
+                    (source, target) in allowed_pairs,
+                    self.policy.allows(source, target),
+                )
+        self.assertTrue(
+            all(
+                other.source_state is not rule.source_state
+                for rule in rules.values()
+                for other in rules.values()
+                if other is not rule
+            )
+        )
+
+    def test_stage_one_version_and_validation_progress(self) -> None:
+        self._assert_outcome(
+            object(),
+            TransitionEvaluationDecision.INVALID,
+            TransitionEvaluationReasonCode.REQUEST_NOT_EVALUATION_REQUEST,
+        )
+        self._assert_outcome(
+            TransitionEvaluationRequest(),
+            TransitionEvaluationDecision.INVALID,
+            TransitionEvaluationReasonCode.REQUEST_REQUIRED_FIELD_MISSING,
+        )
+        self._assert_outcome(
+            TransitionEvaluationRequest(evaluation_version=1),  # type: ignore[arg-type]
+            TransitionEvaluationDecision.INVALID,
+            TransitionEvaluationReasonCode.REQUEST_WRONG_TYPE,
+        )
+        self._assert_outcome(
+            TransitionEvaluationRequest(evaluation_version="01"),
+            TransitionEvaluationDecision.INVALID,
+            TransitionEvaluationReasonCode.EVALUATION_VERSION_MALFORMED,
+        )
+        unsupported = self._unconditional_request(evaluation_version="2")
+        self._assert_outcome(
+            unsupported,
+            TransitionEvaluationDecision.UNSUPPORTED,
+            TransitionEvaluationReasonCode.EVALUATION_VERSION_UNSUPPORTED,
+        )
+        invalid_rule = self._unconditional_request(rule_id="bad")
+        rule_result = self._assert_outcome(
+            invalid_rule,
+            TransitionEvaluationDecision.INVALID,
+            TransitionEvaluationReasonCode.REQUEST_RULE_ID_MALFORMED,
+        )
+        self.assertEqual(invalid_rule.run.run_id, rule_result.run_id)  # type: ignore[union-attr]
+        self.assertIsNone(rule_result.requested_state)
+        invalid_trigger = self._unconditional_request(escalation_trigger="NO_PROGRESS_STOP")
+        trigger_result = self._assert_outcome(
+            invalid_trigger,
+            TransitionEvaluationDecision.INVALID,
+            TransitionEvaluationReasonCode.ESCALATION_SNAPSHOT_MALFORMED,
+        )
+        self.assertEqual(DevelopmentRunState.FEASIBILITY_CHECKING, trigger_result.requested_state)
+        self.assertIsNone(trigger_result.rule_id)
+        self.assertIsNone(trigger_result.edge_type)
+        self.assertIsNone(trigger_result.node_type)
+        self._assert_outcome(
+            self._unconditional_request(evidence_snapshots=None),
+            TransitionEvaluationDecision.INVALID,
+            TransitionEvaluationReasonCode.REQUEST_WRONG_TYPE,
+        )
+
+    def test_exact_four_by_four_pair_behavior(self) -> None:
+        registered = {
+            (
+                DevelopmentRunState.DRAFT,
+                DevelopmentRunState.FEASIBILITY_CHECKING,
+            ),
+            (
+                DevelopmentRunState.FEASIBILITY_CHECKING,
+                DevelopmentRunState.AWAITING_EXECUTION_APPROVAL,
+            ),
+        }
+        for source in DevelopmentRunState:
+            for target in DevelopmentRunState:
+                pair = (source, target)
+                if pair == (
+                    DevelopmentRunState.DRAFT,
+                    DevelopmentRunState.FEASIBILITY_CHECKING,
+                ):
+                    request = self._unconditional_request()
+                elif pair == (
+                    DevelopmentRunState.FEASIBILITY_CHECKING,
+                    DevelopmentRunState.AWAITING_EXECUTION_APPROVAL,
+                ):
+                    request = self._evidence_request()
+                else:
+                    contract = self._contract()
+                    request = TransitionEvaluationRequest(
+                        evaluation_version="1",
+                        run=self._run(contract, source),
+                        rule_id=(
+                            TransitionRuleId.P1_6_DRAFT_TO_FEASIBILITY_CHECKING_V1.value
+                        ),
+                        requested_state=target,
+                        edge_type=WorkflowEdgeType.UNCONDITIONAL,
+                    )
+                with self.subTest(source=source, target=target):
+                    if pair in registered:
+                        self._assert_outcome(
+                            request,
+                            TransitionEvaluationDecision.ALLOWED,
+                            TransitionEvaluationReasonCode.RULE_ALLOWED,
+                        )
+                    else:
+                        self._assert_outcome(
+                            request,
+                            TransitionEvaluationDecision.DENIED,
+                            TransitionEvaluationReasonCode.REGISTRY_NO_REGISTERED_TRANSITION,
+                        )
+
+    def test_registered_coherence_contract_and_surplus_precedence(self) -> None:
+        self._assert_outcome(
+            self._unconditional_request(rule_id="P1_6_UNKNOWN_V1"),
+            TransitionEvaluationDecision.UNSUPPORTED,
+            TransitionEvaluationReasonCode.REGISTRY_RULE_ID_UNSUPPORTED,
+        )
+        self._assert_outcome(
+            self._unconditional_request(
+                rule_id=(
+                    TransitionRuleId.P1_6_FEASIBILITY_CHECKING_TO_AWAITING_EXECUTION_APPROVAL_V1.value
+                )
+            ),
+            TransitionEvaluationDecision.INVALID,
+            TransitionEvaluationReasonCode.REGISTRY_RULE_SOURCE_MISMATCH,
+        )
+        self._assert_outcome(
+            self._unconditional_request(edge_type=WorkflowEdgeType.RETRY),
+            TransitionEvaluationDecision.INVALID,
+            TransitionEvaluationReasonCode.REGISTRY_EDGE_TYPE_MISMATCH,
+        )
+        self._assert_outcome(
+            self._unconditional_request(node_type=WorkflowNodeType.DETERMINISTIC),
+            TransitionEvaluationDecision.INVALID,
+            TransitionEvaluationReasonCode.REGISTRY_NODE_METADATA_MISMATCH,
+        )
+        self._assert_outcome(
+            self._unconditional_request(expected_evidence=self._expected()),
+            TransitionEvaluationDecision.INVALID,
+            TransitionEvaluationReasonCode.REQUEST_SURPLUS_PREREQUISITE,
+        )
+        self._assert_outcome(
+            self._unconditional_request(
+                edge_type=WorkflowEdgeType.RETRY,
+                milestone_contract="malformed",
+            ),
+            TransitionEvaluationDecision.INVALID,
+            TransitionEvaluationReasonCode.CONTRACT_MALFORMED,
+        )
+        missing = replace(self._unconditional_request(), milestone_contract=None)
+        missing_result = self._assert_outcome(
+            missing,
+            TransitionEvaluationDecision.GATED,
+            TransitionEvaluationReasonCode.CONTRACT_REQUIRED,
+        )
+        self.assertEqual((TransitionRequirement.CONTRACT,), missing_result.missing_requirements)
+        mismatch = self._unconditional_request(milestone_contract=self._contract("other"))
+        self._assert_outcome(
+            mismatch,
+            TransitionEvaluationDecision.INVALID,
+            TransitionEvaluationReasonCode.CONTRACT_BINDING_MISMATCH,
+        )
+
+    def test_closed_contradiction_lone_facts_and_deferred_edges(self) -> None:
+        trigger = EscalationTrigger.NO_PROGRESS_STOP
+        contradiction = self._unconditional_request(
+            retry_budget_snapshot={"opaque": True},
+            escalation_trigger=trigger,
+        )
+        result = self._assert_outcome(
+            contradiction,
+            TransitionEvaluationDecision.INVALID,
+            TransitionEvaluationReasonCode.REQUEST_CONTRADICTORY_FACTS,
+        )
+        self.assertIsNone(result.rule_id)
+        self.assertIsNone(result.edge_type)
+        self.assertEqual((), result.missing_requirements)
+
+        self._assert_outcome(
+            self._unconditional_request(escalation_trigger=trigger),
+            TransitionEvaluationDecision.INVALID,
+            TransitionEvaluationReasonCode.REQUEST_SURPLUS_PREREQUISITE,
+        )
+        self._assert_outcome(
+            self._unconditional_request(
+                edge_type=WorkflowEdgeType.RETRY,
+                escalation_trigger=trigger,
+            ),
+            TransitionEvaluationDecision.INVALID,
+            TransitionEvaluationReasonCode.REGISTRY_EDGE_TYPE_MISMATCH,
+        )
+        self._assert_outcome(
+            self._unconditional_request(retry_budget_snapshot=object()),
+            TransitionEvaluationDecision.INVALID,
+            TransitionEvaluationReasonCode.REQUEST_SURPLUS_PREREQUISITE,
+        )
+        self._assert_outcome(
+            self._unconditional_request(
+                edge_type=WorkflowEdgeType.RETRY,
+                retry_budget_snapshot=object(),
+            ),
+            TransitionEvaluationDecision.INVALID,
+            TransitionEvaluationReasonCode.REGISTRY_EDGE_TYPE_MISMATCH,
+        )
+
+        contract = self._contract()
+        run = self._run(contract, DevelopmentRunState.SOURCE_COMPLETED)
+        base = {
+            "evaluation_version": "1",
+            "run": run,
+            "rule_id": TransitionRuleId.P1_6_DRAFT_TO_FEASIBILITY_CHECKING_V1.value,
+            "requested_state": DevelopmentRunState.DRAFT,
+        }
+        self._assert_outcome(
+            TransitionEvaluationRequest(
+                **base,
+                edge_type=WorkflowEdgeType.UNCONDITIONAL,
+                escalation_trigger=trigger,
+            ),
+            TransitionEvaluationDecision.INVALID,
+            TransitionEvaluationReasonCode.REQUEST_SURPLUS_PREREQUISITE,
+        )
+        self._assert_outcome(
+            TransitionEvaluationRequest(
+                **base,
+                edge_type=WorkflowEdgeType.ESCALATION,
+                escalation_trigger=trigger,
+            ),
+            TransitionEvaluationDecision.UNSUPPORTED,
+            TransitionEvaluationReasonCode.ESCALATION_RULE_DEFERRED,
+        )
+        self._assert_outcome(
+            TransitionEvaluationRequest(**base, edge_type=WorkflowEdgeType.ESCALATION),
+            TransitionEvaluationDecision.INVALID,
+            TransitionEvaluationReasonCode.ESCALATION_SNAPSHOT_MALFORMED,
+        )
+        self._assert_outcome(
+            TransitionEvaluationRequest(**base, edge_type=WorkflowEdgeType.RETRY),
+            TransitionEvaluationDecision.UNSUPPORTED,
+            TransitionEvaluationReasonCode.RETRY_RULE_DEFERRED,
+        )
+        self._assert_outcome(
+            TransitionEvaluationRequest(
+                **base,
+                edge_type=WorkflowEdgeType.RETRY,
+                retry_budget_snapshot=object(),
+            ),
+            TransitionEvaluationDecision.INVALID,
+            TransitionEvaluationReasonCode.REQUEST_SURPLUS_PREREQUISITE,
+        )
+        for edge, reason in (
+            (
+                WorkflowEdgeType.STATE_CONDITIONAL,
+                TransitionEvaluationReasonCode.STATE_CONDITIONAL_RULE_DEFERRED,
+            ),
+            (
+                WorkflowEdgeType.APPROVAL_GATED,
+                TransitionEvaluationReasonCode.APPROVAL_GATED_RULE_DEFERRED,
+            ),
+            (
+                WorkflowEdgeType.TERMINAL,
+                TransitionEvaluationReasonCode.TERMINAL_RULE_DEFERRED,
+            ),
+        ):
+            self._assert_outcome(
+                TransitionEvaluationRequest(**base, edge_type=edge),
+                TransitionEvaluationDecision.UNSUPPORTED,
+                reason,
+            )
+
+        malformed_trigger_cases = (
+            self._unconditional_request(
+                edge_type=WorkflowEdgeType.RETRY,
+                escalation_trigger="NO_PROGRESS_STOP",
+            ),
+            TransitionEvaluationRequest(
+                **base,
+                edge_type=WorkflowEdgeType.UNCONDITIONAL,
+                escalation_trigger="NO_PROGRESS_STOP",
+            ),
+            TransitionEvaluationRequest(
+                **base,
+                edge_type=WorkflowEdgeType.RETRY,
+                escalation_trigger="NO_PROGRESS_STOP",
+            ),
+            self._unconditional_request(
+                expected_evidence=self._expected(),
+                escalation_trigger="NO_PROGRESS_STOP",
+            ),
+        )
+        for malformed_request in malformed_trigger_cases:
+            with self.subTest(malformed_trigger=malformed_request.edge_type):
+                self._assert_outcome(
+                    malformed_request,
+                    TransitionEvaluationDecision.INVALID,
+                    TransitionEvaluationReasonCode.ESCALATION_SNAPSHOT_MALFORMED,
+                )
+
+    def test_evidence_gate_success_missing_and_full_precedence(self) -> None:
+        allowed = self._evidence_request()
+        self._assert_outcome(
+            allowed,
+            TransitionEvaluationDecision.ALLOWED,
+            TransitionEvaluationReasonCode.RULE_ALLOWED,
+        )
+        missing_expected = replace(allowed, expected_evidence=None)
+        self._assert_outcome(
+            missing_expected,
+            TransitionEvaluationDecision.INVALID,
+            TransitionEvaluationReasonCode.EXPECTED_EVIDENCE_ANCHOR_MISSING,
+        )
+        malformed_expected = replace(
+            allowed,
+            expected_evidence=replace(allowed.expected_evidence, artifact_path="relative"),
+        )
+        self._assert_outcome(
+            malformed_expected,
+            TransitionEvaluationDecision.INVALID,
+            TransitionEvaluationReasonCode.EXPECTED_EVIDENCE_ANCHOR_MALFORMED,
+        )
+        missing_repository = replace(allowed, repository_binding=None)
+        repository_result = self._assert_outcome(
+            missing_repository,
+            TransitionEvaluationDecision.GATED,
+            TransitionEvaluationReasonCode.REPOSITORY_BINDING_REQUIRED,
+        )
+        self.assertEqual(
+            (TransitionRequirement.REPOSITORY,),
+            repository_result.missing_requirements,
+        )
+        missing_evidence = replace(allowed, evidence_snapshots=())
+        evidence_result = self._assert_outcome(
+            missing_evidence,
+            TransitionEvaluationDecision.GATED,
+            TransitionEvaluationReasonCode.EVIDENCE_REQUIRED,
+        )
+        self.assertEqual((TransitionRequirement.EVIDENCE,), evidence_result.missing_requirements)
+
+        evidence = allowed.evidence_snapshots[0]
+        malformed = replace(evidence, artifact_path="relative")
+        self._assert_outcome(
+            replace(allowed, evidence_snapshots=(malformed,)),
+            TransitionEvaluationDecision.INVALID,
+            TransitionEvaluationReasonCode.EVIDENCE_SNAPSHOT_MALFORMED,
+        )
+        raising_version = RaisingEquality()
+        wrong_type_version = replace(evidence, snapshot_version=raising_version)
+        self._assert_outcome(
+            replace(allowed, evidence_snapshots=(wrong_type_version,)),
+            TransitionEvaluationDecision.INVALID,
+            TransitionEvaluationReasonCode.EVIDENCE_SNAPSHOT_MALFORMED,
+        )
+        self.assertFalse(raising_version.invoked)
+        self._assert_outcome(
+            replace(allowed, evidence_snapshots=(evidence, replace(evidence))),
+            TransitionEvaluationDecision.INVALID,
+            TransitionEvaluationReasonCode.EVIDENCE_SNAPSHOT_MALFORMED,
+        )
+
+        cases = (
+            (
+                replace(evidence, ready_for_approval_1=False),
+                TransitionEvaluationDecision.INVALID,
+                TransitionEvaluationReasonCode.EVIDENCE_VERDICT_READINESS_INCONSISTENT,
+            ),
+            (
+                replace(evidence, artifact_byte_count=evidence.artifact_byte_count + 1),
+                TransitionEvaluationDecision.INVALID,
+                TransitionEvaluationReasonCode.EVIDENCE_ARTIFACT_IDENTITY_MISMATCH,
+            ),
+            (
+                replace(evidence, artifact_sha256="d" * 64),
+                TransitionEvaluationDecision.INVALID,
+                TransitionEvaluationReasonCode.EVIDENCE_ARTIFACT_DIGEST_MISMATCH,
+            ),
+            (
+                replace(evidence, assessment_authority_id="other-authority"),
+                TransitionEvaluationDecision.INVALID,
+                TransitionEvaluationReasonCode.EVIDENCE_AUTHORITY_MISMATCH,
+            ),
+            (
+                replace(evidence, run_id="other-run"),
+                TransitionEvaluationDecision.INVALID,
+                TransitionEvaluationReasonCode.EVIDENCE_RUN_MISMATCH,
+            ),
+            (
+                replace(evidence, milestone_id="DL-P1.other"),
+                TransitionEvaluationDecision.INVALID,
+                TransitionEvaluationReasonCode.EVIDENCE_CONTRACT_BINDING_MISMATCH,
+            ),
+            (
+                replace(
+                    evidence,
+                    rule_id=TransitionRuleId.P1_6_DRAFT_TO_FEASIBILITY_CHECKING_V1,
+                ),
+                TransitionEvaluationDecision.INVALID,
+                TransitionEvaluationReasonCode.EVIDENCE_RULE_MISMATCH,
+            ),
+            (
+                replace(evidence, source_state=DevelopmentRunState.DRAFT),
+                TransitionEvaluationDecision.GATED,
+                TransitionEvaluationReasonCode.EVIDENCE_STALE,
+            ),
+            (
+                replace(evidence, state_version=evidence.state_version + 1),
+                TransitionEvaluationDecision.GATED,
+                TransitionEvaluationReasonCode.EVIDENCE_STALE,
+            ),
+            (
+                replace(
+                    evidence,
+                    repository_binding=replace(
+                        evidence.repository_binding,
+                        repository_id="other-repository",
+                    ),
+                ),
+                TransitionEvaluationDecision.INVALID,
+                TransitionEvaluationReasonCode.EVIDENCE_REPOSITORY_IDENTITY_MISMATCH,
+            ),
+            (
+                replace(
+                    evidence,
+                    repository_binding=replace(
+                        evidence.repository_binding,
+                        branch="other-branch",
+                    ),
+                ),
+                TransitionEvaluationDecision.GATED,
+                TransitionEvaluationReasonCode.EVIDENCE_STALE,
+            ),
+            (
+                replace(
+                    evidence,
+                    repository_binding=replace(
+                        evidence.repository_binding,
+                        head_commit="d" * 40,
+                    ),
+                ),
+                TransitionEvaluationDecision.GATED,
+                TransitionEvaluationReasonCode.EVIDENCE_STALE,
+            ),
+            (
+                replace(
+                    evidence,
+                    repository_binding=replace(
+                        evidence.repository_binding,
+                        worktree_digest="d" * 64,
+                    ),
+                ),
+                TransitionEvaluationDecision.GATED,
+                TransitionEvaluationReasonCode.EVIDENCE_STALE,
+            ),
+            (
+                replace(
+                    evidence,
+                    repository_binding=replace(
+                        evidence.repository_binding,
+                        repository_id="other-repository",
+                        branch="other-branch",
+                        head_commit="d" * 40,
+                        worktree_digest="d" * 64,
+                    ),
+                ),
+                TransitionEvaluationDecision.INVALID,
+                TransitionEvaluationReasonCode.EVIDENCE_REPOSITORY_IDENTITY_MISMATCH,
+            ),
+            (
+                replace(evidence, producer_kind=SnapshotProducerKind.APPROVAL_REPOSITORY),
+                TransitionEvaluationDecision.INVALID,
+                TransitionEvaluationReasonCode.EVIDENCE_PRODUCER_MISMATCH,
+            ),
+            (
+                replace(
+                    evidence,
+                    verdict=EvidenceVerdict.INFEASIBLE,
+                    ready_for_approval_1=False,
+                ),
+                TransitionEvaluationDecision.GATED,
+                TransitionEvaluationReasonCode.EVIDENCE_NOT_SATISFIED,
+            ),
+        )
+        for changed_evidence, decision, reason in cases:
+            with self.subTest(reason=reason):
+                self._assert_outcome(
+                    replace(allowed, evidence_snapshots=(changed_evidence,)),
+                    decision,
+                    reason,
+                )
+
+        stale_non_favorable = replace(
+            evidence,
+            source_state=DevelopmentRunState.DRAFT,
+            verdict=EvidenceVerdict.INFEASIBLE,
+            ready_for_approval_1=False,
+        )
+        self._assert_outcome(
+            replace(allowed, evidence_snapshots=(stale_non_favorable,)),
+            TransitionEvaluationDecision.GATED,
+            TransitionEvaluationReasonCode.EVIDENCE_STALE,
+        )
+
+    def test_all_verdict_readiness_pairs_have_one_oracle(self) -> None:
+        request = self._evidence_request()
+        evidence = request.evidence_snapshots[0]
+        favorable = {
+            EvidenceVerdict.FEASIBLE,
+            EvidenceVerdict.FEASIBLE_WITH_NON_BLOCKING_FINDINGS,
+        }
+        for verdict in EvidenceVerdict:
+            for readiness in (False, True):
+                changed = replace(
+                    evidence,
+                    verdict=verdict,
+                    ready_for_approval_1=readiness,
+                )
+                with self.subTest(verdict=verdict, readiness=readiness):
+                    if (verdict in favorable) != readiness:
+                        self._assert_outcome(
+                            replace(request, evidence_snapshots=(changed,)),
+                            TransitionEvaluationDecision.INVALID,
+                            TransitionEvaluationReasonCode.EVIDENCE_VERDICT_READINESS_INCONSISTENT,
+                        )
+                    elif verdict in favorable:
+                        self._assert_outcome(
+                            replace(request, evidence_snapshots=(changed,)),
+                            TransitionEvaluationDecision.ALLOWED,
+                            TransitionEvaluationReasonCode.RULE_ALLOWED,
+                        )
+                    else:
+                        self._assert_outcome(
+                            replace(request, evidence_snapshots=(changed,)),
+                            TransitionEvaluationDecision.GATED,
+                            TransitionEvaluationReasonCode.EVIDENCE_NOT_SATISFIED,
+                        )
+
+    def test_evaluator_uses_only_supplied_snapshots_and_no_live_lookups(self) -> None:
+        request = self._evidence_request()
+        forbidden = AssertionError("forbidden live lookup invoked")
+        with (
+            patch("builtins.open", side_effect=forbidden) as open_call,
+            patch("os.stat", side_effect=forbidden) as stat_call,
+            patch("pathlib.Path.exists", side_effect=forbidden) as exists_call,
+            patch("pathlib.Path.read_bytes", side_effect=forbidden) as read_call,
+            patch("subprocess.run", side_effect=forbidden) as subprocess_call,
+            patch("time.time", side_effect=forbidden) as time_call,
+            patch("panam_development_loop.transition_policy.datetime", ParsingOnlyDatetime),
+        ):
+            self._assert_outcome(
+                request,
+                TransitionEvaluationDecision.ALLOWED,
+                TransitionEvaluationReasonCode.RULE_ALLOWED,
+            )
+        for live_lookup in (
+            open_call,
+            stat_call,
+            exists_call,
+            read_call,
+            subprocess_call,
+            time_call,
+        ):
+            live_lookup.assert_not_called()
+
+    def test_complete_results_are_equal_hashable_and_side_effect_free(self) -> None:
+        request = self._evidence_request()
+        before = replace(request)
+        first = self.policy.evaluate(request)
+        second = self.policy.evaluate(replace(request))
+        self.assertEqual(first, second)
+        self.assertEqual(hash(first), hash(second))
+        self.assertEqual(request, before)
+        self.assertFalse(first.side_effects_performed)
+        with self.assertRaises(FrozenInstanceError):
+            first.side_effects_performed = True  # type: ignore[misc]
+        with self.assertRaises(ValueError):
+            TransitionEvaluationResult(
+                TransitionEvaluationDecision.ALLOWED,
+                TransitionEvaluationReasonCode.CONTRACT_REQUIRED,
+            )
+
+    def test_approval_snapshot_surface_is_preserved_but_not_expanded(self) -> None:
+        request = self._unconditional_request()
+        snapshot = ApprovalSnapshot(
+            snapshot_version="1",
+            producer_kind=SnapshotProducerKind.APPROVAL_REPOSITORY,
+            run_id=request.run.run_id,  # type: ignore[union-attr]
+            milestone_id=request.milestone_contract.milestone_id,  # type: ignore[union-attr]
+            milestone_contract_digest=request.run.milestone_contract_digest,  # type: ignore[union-attr]
+            source_state=request.run.current_state,  # type: ignore[union-attr]
+            state_version=request.run.state_version,  # type: ignore[union-attr]
+            rule_id=TransitionRuleId.P1_6_DRAFT_TO_FEASIBILITY_CHECKING_V1,
+            status=ApprovalSnapshotStatus.ABSENT,
+            approval_binding=None,
+            approval_binding_digest=None,
+        )
+        self._assert_outcome(
+            replace(request, approval_snapshot=snapshot),
+            TransitionEvaluationDecision.INVALID,
+            TransitionEvaluationReasonCode.REQUEST_SURPLUS_PREREQUISITE,
+        )
 
 
 if __name__ == "__main__":
