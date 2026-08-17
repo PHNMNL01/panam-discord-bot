@@ -1037,3 +1037,79 @@ class TransitionEvaluationResult:
             raise ValueError("missing_requirements")
         if self.reason_code not in _REASONS_BY_DECISION[self.decision]:
             raise ValueError("reason_code")
+
+
+class TransactionalTransitionReasonCode(str, Enum):
+    """Stable outcomes of the DL-P1.7 persistence boundary."""
+
+    COMMITTED = "COMMITTED"
+    EVALUATION_NOT_ALLOWED = "EVALUATION_NOT_ALLOWED"
+    RUN_NOT_FOUND = "RUN_NOT_FOUND"
+    STALE_PERSISTED_RUN = "STALE_PERSISTED_RUN"
+
+
+@dataclass(frozen=True)
+class TransactionalTransitionResult:
+    """Separates pure policy evaluation from authoritative persistence."""
+
+    committed: bool
+    reason_code: TransactionalTransitionReasonCode
+    evaluation_result: TransitionEvaluationResult
+    persisted_run: DevelopmentRun | None
+    accepted_event: AcceptedStateEvent | None
+
+    def __post_init__(self) -> None:
+        if type(self.committed) is not bool:
+            raise TypeError("committed")
+        if type(self.reason_code) is not TransactionalTransitionReasonCode:
+            raise TypeError("reason_code")
+        if type(self.evaluation_result) is not TransitionEvaluationResult:
+            raise TypeError("evaluation_result")
+        if self.persisted_run is not None and type(self.persisted_run) is not DevelopmentRun:
+            raise TypeError("persisted_run")
+        if self.accepted_event is not None and type(
+            self.accepted_event
+        ) is not AcceptedStateEvent:
+            raise TypeError("accepted_event")
+
+        evaluation_allowed = (
+            self.evaluation_result.decision is TransitionEvaluationDecision.ALLOWED
+        )
+        if self.reason_code is TransactionalTransitionReasonCode.COMMITTED:
+            if (
+                not self.committed
+                or not evaluation_allowed
+                or self.persisted_run is None
+                or self.accepted_event is None
+            ):
+                raise ValueError("committed result")
+            event = self.accepted_event
+            run = self.persisted_run
+            if (
+                self.evaluation_result.run_id != event.run_id
+                or self.evaluation_result.current_state is not event.from_state
+                or self.evaluation_result.requested_state is not event.to_state
+                or self.evaluation_result.current_state_version is None
+                or event.state_version
+                != self.evaluation_result.current_state_version + 1
+                or run.run_id != event.run_id
+                or run.current_state is not event.to_state
+                or run.state_version != event.state_version
+                or run.updated_at != event.occurred_at
+                or event.transition_reason
+                != TransitionEvaluationReasonCode.RULE_ALLOWED.value
+            ):
+                raise ValueError("committed result binding")
+            return
+
+        if self.committed or self.accepted_event is not None:
+            raise ValueError("non-committed result")
+        if self.reason_code is TransactionalTransitionReasonCode.EVALUATION_NOT_ALLOWED:
+            if evaluation_allowed or self.persisted_run is not None:
+                raise ValueError("evaluation result")
+        elif self.reason_code is TransactionalTransitionReasonCode.RUN_NOT_FOUND:
+            if not evaluation_allowed or self.persisted_run is not None:
+                raise ValueError("run-not-found result")
+        elif self.reason_code is TransactionalTransitionReasonCode.STALE_PERSISTED_RUN:
+            if not evaluation_allowed or self.persisted_run is None:
+                raise ValueError("stale result")

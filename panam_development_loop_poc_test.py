@@ -1,8 +1,12 @@
 """Focused deterministic tests for the DL-P1.1 through DL-P1.5 slices."""
 
+import os
 import re
 import sqlite3
+import subprocess
 import tempfile
+import threading
+import urllib.request
 import unittest
 from dataclasses import FrozenInstanceError, fields, replace
 from datetime import datetime, timedelta, timezone
@@ -38,6 +42,8 @@ from panam_development_loop import (
     SqlitePhaseContractRepository,
     SqliteRunStore,
     SnapshotProducerKind,
+    TransactionalTransitionReasonCode,
+    TransactionalTransitionResult,
     TransitionEvaluationDecision,
     TransitionEvaluationReasonCode,
     TransitionEvaluationRequest,
@@ -104,11 +110,166 @@ class ParsingOnlyDatetime:
         raise AssertionError("wall-clock lookup invoked")
 
 
+def _service_contract() -> MilestoneContract:
+    return MilestoneContract(
+        project_id="panam",
+        phase_id="DL-P1",
+        milestone_id="DL-P1.7",
+        contract_version="1",
+        objective="Persist transitions and state events transactionally",
+        scope=("transactional transition service",),
+        exclusions=("external effects",),
+        acceptance_criteria=("atomic state and event",),
+        allowed_paths=("panam_development_loop/transition_service.py",),
+        forbidden_paths=("panam_development_loop/transition_policy.py",),
+        verification_plan=("focused tests", "full regression"),
+        stop_conditions=("scope change",),
+    )
+
+
+def _unconditional_transition_request(
+    run: DevelopmentRun,
+    contract: MilestoneContract,
+    **changes: object,
+) -> TransitionEvaluationRequest:
+    values: dict[str, object] = {
+        "evaluation_version": "1",
+        "run": run,
+        "rule_id": TransitionRuleId.P1_6_DRAFT_TO_FEASIBILITY_CHECKING_V1.value,
+        "requested_state": DevelopmentRunState.FEASIBILITY_CHECKING,
+        "edge_type": WorkflowEdgeType.UNCONDITIONAL,
+        "milestone_contract": contract,
+    }
+    values.update(changes)
+    return TransitionEvaluationRequest(**values)  # type: ignore[arg-type]
+
+
+def _evidence_transition_request(
+    run: DevelopmentRun,
+    contract: MilestoneContract,
+) -> TransitionEvaluationRequest:
+    repository = RepositoryEvidenceBinding(
+        repository_id="Panam_APP",
+        branch="phase/panam-dl-p1",
+        head_commit="a" * 40,
+        worktree_digest="b" * 64,
+    )
+    expected = ExpectedEvidenceBinding(
+        assessment_authority_id="HAD-DL-P1.7-FEASIBILITY-001",
+        artifact_path=r"C:\Panam_Runtime\development-runs\dl-p1-7\feasibility\FEASIBILITY-ASSESSMENT.md",
+        artifact_byte_count=20933,
+        artifact_sha256="c" * 64,
+    )
+    evidence = EvidenceSnapshot(
+        snapshot_version="1",
+        producer_kind=SnapshotProducerKind.FEASIBILITY_ASSESSOR,
+        run_id=run.run_id,
+        milestone_id=contract.milestone_id,
+        milestone_contract_digest=contract.sha256_digest(),
+        source_state=run.current_state,
+        state_version=run.state_version,
+        rule_id=(
+            TransitionRuleId.P1_6_FEASIBILITY_CHECKING_TO_AWAITING_EXECUTION_APPROVAL_V1
+        ),
+        evidence_kind=EvidenceKind.FEASIBILITY_ASSESSMENT,
+        assessment_authority_id=expected.assessment_authority_id,
+        artifact_path=expected.artifact_path,
+        artifact_byte_count=expected.artifact_byte_count,
+        artifact_sha256=expected.artifact_sha256,
+        verdict=EvidenceVerdict.FEASIBLE,
+        ready_for_approval_1=True,
+        assessed_at="2026-08-17T12:00:00Z",
+        repository_binding=repository,
+    )
+    return TransitionEvaluationRequest(
+        evaluation_version="1",
+        run=run,
+        rule_id=(
+            TransitionRuleId.P1_6_FEASIBILITY_CHECKING_TO_AWAITING_EXECUTION_APPROVAL_V1.value
+        ),
+        requested_state=DevelopmentRunState.AWAITING_EXECUTION_APPROVAL,
+        edge_type=WorkflowEdgeType.EVIDENCE_GATED,
+        milestone_contract=contract,
+        expected_evidence=expected,
+        repository_binding=repository,
+        evidence_snapshots=(evidence,),
+    )
+
+
+class _ZeroRowCount:
+    rowcount = 0
+
+
+class _ConnectionProxy:
+    def __init__(
+        self,
+        connection: sqlite3.Connection,
+        *,
+        fail_statement: str | None = None,
+        zero_update: bool = False,
+        fail_commit: bool = False,
+        fail_rollback: bool = False,
+    ) -> None:
+        self.connection = connection
+        self.fail_statement = fail_statement
+        self.zero_update = zero_update
+        self.fail_commit = fail_commit
+        self.fail_rollback = fail_rollback
+        self.rollback_calls = 0
+        self.commit_calls = 0
+        self.close_calls = 0
+
+    @property
+    def in_transaction(self) -> bool:
+        return self.connection.in_transaction
+
+    def execute(
+        self,
+        statement: str,
+        parameters: tuple[object, ...] = (),
+    ) -> object:
+        normalized = " ".join(statement.upper().split())
+        if self.fail_statement is not None and self.fail_statement in normalized:
+            raise sqlite3.OperationalError(f"injected {self.fail_statement}")
+        if self.zero_update and normalized.startswith("UPDATE DEVELOPMENT_RUNS"):
+            return _ZeroRowCount()
+        return self.connection.execute(statement, parameters)
+
+    def commit(self) -> None:
+        self.commit_calls += 1
+        if self.fail_commit:
+            raise sqlite3.OperationalError("injected commit failure")
+        self.connection.commit()
+
+    def rollback(self) -> None:
+        self.rollback_calls += 1
+        if self.fail_rollback:
+            raise sqlite3.OperationalError("injected rollback failure")
+        self.connection.rollback()
+
+    def close(self) -> None:
+        self.close_calls += 1
+        self.connection.close()
+
+
+class _BarrierPolicy(TransitionPolicy):
+    def __init__(self, barrier: threading.Barrier) -> None:
+        super().__init__()
+        self._barrier = barrier
+
+    def evaluate(self, candidate: object) -> TransitionEvaluationResult:
+        result = super().evaluate(candidate)
+        if result.decision is TransitionEvaluationDecision.ALLOWED:
+            self._barrier.wait(timeout=5)
+        return result
+
+
 class TransitionServiceTest(unittest.TestCase):
     def setUp(self) -> None:
         self._temporary_directory = tempfile.TemporaryDirectory()
         self.database_path = Path(self._temporary_directory.name) / "run.sqlite3"
         self.values = FixedValues()
+        self.contract = _service_contract()
         self.store = SqliteRunStore(self.database_path)
         self.service = TransitionService(
             self.store,
@@ -116,7 +277,7 @@ class TransitionServiceTest(unittest.TestCase):
             id_factory=self.values.identifier,
         )
         self.service.initialize()
-        self.run = self.service.create_run("contract-digest")
+        self.run = self.service.create_run(self.contract.sha256_digest())
 
     def tearDown(self) -> None:
         self._temporary_directory.cleanup()
@@ -131,26 +292,22 @@ class TransitionServiceTest(unittest.TestCase):
 
     def test_accepted_transitions_have_ordered_history(self) -> None:
         first = self.service.transition(
-            TransitionRequest(
-                self.run.run_id,
-                DevelopmentRunState.DRAFT,
-                0,
-                DevelopmentRunState.FEASIBILITY_CHECKING,
-            )
+            _unconditional_transition_request(self.run, self.contract)
         )
+        self.assertTrue(first.committed)
+        self.assertEqual(TransactionalTransitionReasonCode.COMMITTED, first.reason_code)
+        self.assertIsNotNone(first.persisted_run)
         second = self.service.transition(
-            TransitionRequest(
-                self.run.run_id,
-                DevelopmentRunState.FEASIBILITY_CHECKING,
-                1,
-                DevelopmentRunState.AWAITING_EXECUTION_APPROVAL,
-            )
+            _evidence_transition_request(first.persisted_run, self.contract)  # type: ignore[arg-type]
         )
-        self.assertTrue(first.accepted)
-        self.assertTrue(second.accepted)
+        self.assertTrue(second.committed)
         self.assertEqual(2, SqliteRunStore(self.database_path).get_run(self.run.run_id).state_version)
         history = SqliteRunStore(self.database_path).get_history(self.run.run_id)
         self.assertEqual([1, 2], [event.state_version for event in history])
+        self.assertEqual(
+            [TransitionEvaluationReasonCode.RULE_ALLOWED.value] * 2,
+            [event.transition_reason for event in history],
+        )
         self.assertEqual(
             [
                 DevelopmentRunState.FEASIBILITY_CHECKING,
@@ -159,53 +316,59 @@ class TransitionServiceTest(unittest.TestCase):
             [event.to_state for event in history],
         )
 
-    def test_rejected_paths_do_not_mutate_state_or_history(self) -> None:
+    def test_non_allowed_decisions_do_not_open_database_or_mutate(self) -> None:
         before = self.store.get_run(self.run.run_id)
-        invalid = self.service.transition(
-            TransitionRequest(
-                self.run.run_id,
-                DevelopmentRunState.DRAFT,
-                0,
-                DevelopmentRunState.SOURCE_COMPLETED,
-            )
+        allowed = _unconditional_transition_request(self.run, self.contract)
+        candidates = (
+            (
+                TransitionRequest(
+                    self.run.run_id,
+                    DevelopmentRunState.DRAFT,
+                    0,
+                    DevelopmentRunState.FEASIBILITY_CHECKING,
+                ),
+                TransitionEvaluationDecision.INVALID,
+            ),
+            (replace(allowed, evaluation_version="2"), TransitionEvaluationDecision.UNSUPPORTED),
+            (replace(allowed, milestone_contract=None), TransitionEvaluationDecision.GATED),
+            (
+                TransitionEvaluationRequest(
+                    evaluation_version="1",
+                    run=self.run,
+                    rule_id=TransitionRuleId.P1_6_DRAFT_TO_FEASIBILITY_CHECKING_V1.value,
+                    requested_state=DevelopmentRunState.SOURCE_COMPLETED,
+                    edge_type=WorkflowEdgeType.UNCONDITIONAL,
+                ),
+                TransitionEvaluationDecision.DENIED,
+            ),
         )
-        stale_state = self.service.transition(
-            TransitionRequest(
-                self.run.run_id,
-                DevelopmentRunState.FEASIBILITY_CHECKING,
-                0,
-                DevelopmentRunState.AWAITING_EXECUTION_APPROVAL,
-            )
-        )
-        stale_version = self.service.transition(
-            TransitionRequest(
-                self.run.run_id,
-                DevelopmentRunState.DRAFT,
-                1,
-                DevelopmentRunState.FEASIBILITY_CHECKING,
-            )
-        )
-        self.assertEqual(TransitionReasonCode.TRANSITION_NOT_ALLOWED, invalid.reason_code)
-        self.assertEqual(DevelopmentRunState.DRAFT, invalid.current_state)
-        self.assertEqual(TransitionReasonCode.STALE_EXPECTED_STATE, stale_state.reason_code)
-        self.assertEqual(TransitionReasonCode.STALE_EXPECTED_STATE, stale_version.reason_code)
+        with patch.object(
+            self.store,
+            "_connect",
+            side_effect=AssertionError("database opened for non-ALLOWED result"),
+        ):
+            for candidate, decision in candidates:
+                with self.subTest(decision=decision):
+                    result = self.service.transition(candidate)
+                    self.assertFalse(result.committed)
+                    self.assertEqual(
+                        TransactionalTransitionReasonCode.EVALUATION_NOT_ALLOWED,
+                        result.reason_code,
+                    )
+                    self.assertEqual(decision, result.evaluation_result.decision)
         self.assertEqual(before, self.store.get_run(self.run.run_id))
         self.assertEqual([], self.store.get_history(self.run.run_id))
 
     def test_unknown_run_does_not_create_records(self) -> None:
+        unknown = replace(self.run, run_id="unknown-run")
         result = self.service.transition(
-            TransitionRequest(
-                "unknown-run",
-                DevelopmentRunState.DRAFT,
-                0,
-                DevelopmentRunState.FEASIBILITY_CHECKING,
-            )
+            _unconditional_transition_request(unknown, self.contract)
         )
-        self.assertFalse(result.accepted)
-        self.assertEqual(TransitionReasonCode.RUN_NOT_FOUND, result.reason_code)
-        self.assertEqual("unknown-run", result.run_id)
-        self.assertIsNone(result.current_state)
-        self.assertIsNone(result.current_state_version)
+        self.assertFalse(result.committed)
+        self.assertEqual(TransactionalTransitionReasonCode.RUN_NOT_FOUND, result.reason_code)
+        self.assertEqual(TransitionEvaluationDecision.ALLOWED, result.evaluation_result.decision)
+        self.assertIsNone(result.persisted_run)
+        self.assertIsNone(result.accepted_event)
         self.assertIsNone(self.store.get_run("unknown-run"))
         self.assertEqual([], self.store.get_history("unknown-run"))
 
@@ -248,6 +411,449 @@ class TransitionServiceTest(unittest.TestCase):
                 ),
             )
         connection.close()
+
+
+class TransactionalTransitionServiceTest(unittest.TestCase):
+    def setUp(self) -> None:
+        self._temporary_directory = tempfile.TemporaryDirectory()
+        self.database_path = Path(self._temporary_directory.name) / "transaction.sqlite3"
+        self.values = FixedValues()
+        self.contract = _service_contract()
+        self.store = SqliteRunStore(self.database_path)
+        self.service = TransitionService(
+            self.store,
+            clock=self.values.clock,
+            id_factory=self.values.identifier,
+        )
+        self.service.initialize()
+        self.run = self.service.create_run(self.contract.sha256_digest())
+
+    def tearDown(self) -> None:
+        self._temporary_directory.cleanup()
+
+    def _request(self) -> TransitionEvaluationRequest:
+        return _unconditional_transition_request(self.run, self.contract)
+
+    def _proxy(
+        self,
+        *,
+        fail_statement: str | None = None,
+        zero_update: bool = False,
+        fail_commit: bool = False,
+        fail_rollback: bool = False,
+    ) -> _ConnectionProxy:
+        return _ConnectionProxy(
+            self.store._connect(),
+            fail_statement=fail_statement,
+            zero_update=zero_update,
+            fail_commit=fail_commit,
+            fail_rollback=fail_rollback,
+        )
+
+    def _assert_unchanged(self) -> None:
+        self.assertEqual(self.run, self.store.get_run(self.run.run_id))
+        self.assertEqual([], self.store.get_history(self.run.run_id))
+
+    def test_result_contract_is_minimal_immutable_and_bound(self) -> None:
+        result = self.service.transition(self._request())
+        self.assertEqual(
+            [
+                "committed",
+                "reason_code",
+                "evaluation_result",
+                "persisted_run",
+                "accepted_event",
+            ],
+            [item.name for item in fields(TransactionalTransitionResult)],
+        )
+        self.assertTrue(result.committed)
+        self.assertFalse(result.evaluation_result.side_effects_performed)
+        with self.assertRaises(FrozenInstanceError):
+            result.committed = False  # type: ignore[misc]
+        with self.assertRaises(ValueError):
+            TransactionalTransitionResult(
+                committed=False,
+                reason_code=TransactionalTransitionReasonCode.EVALUATION_NOT_ALLOWED,
+                evaluation_result=result.evaluation_result,
+                persisted_run=None,
+                accepted_event=None,
+            )
+
+    def test_exact_persisted_run_mismatch_is_stale_and_non_mutating(self) -> None:
+        request = self._request()
+        connection = sqlite3.connect(self.database_path)
+        connection.execute(
+            "UPDATE development_runs SET updated_at = ? WHERE run_id = ?",
+            ("2026-08-17T13:00:00Z", self.run.run_id),
+        )
+        connection.commit()
+        connection.close()
+        current = self.store.get_run(self.run.run_id)
+
+        result = self.service.transition(request)
+
+        self.assertFalse(result.committed)
+        self.assertEqual(
+            TransactionalTransitionReasonCode.STALE_PERSISTED_RUN,
+            result.reason_code,
+        )
+        self.assertEqual(current, result.persisted_run)
+        self.assertEqual(current, self.store.get_run(self.run.run_id))
+        self.assertEqual([], self.store.get_history(self.run.run_id))
+
+    def _assert_persisted_mismatch_is_stale(
+        self,
+        statement: str,
+        parameters: tuple[object, ...],
+    ) -> None:
+        request = self._request()
+        connection = sqlite3.connect(self.database_path)
+        connection.execute(statement, parameters)
+        connection.commit()
+        connection.close()
+        current = self.store.get_run(self.run.run_id)
+
+        result = self.service.transition(request)
+
+        self.assertFalse(result.committed)
+        self.assertEqual(
+            TransactionalTransitionReasonCode.STALE_PERSISTED_RUN,
+            result.reason_code,
+        )
+        self.assertEqual(current, result.persisted_run)
+        self.assertEqual(current, self.store.get_run(self.run.run_id))
+        self.assertEqual([], self.store.get_history(self.run.run_id))
+
+    def test_persisted_state_mismatch_is_stale_and_non_mutating(self) -> None:
+        self._assert_persisted_mismatch_is_stale(
+            "UPDATE development_runs SET current_state = ? WHERE run_id = ?",
+            (DevelopmentRunState.FEASIBILITY_CHECKING.value, self.run.run_id),
+        )
+
+    def test_persisted_state_version_mismatch_is_stale_and_non_mutating(self) -> None:
+        self._assert_persisted_mismatch_is_stale(
+            "UPDATE development_runs SET state_version = ? WHERE run_id = ?",
+            (7, self.run.run_id),
+        )
+
+    def test_persisted_contract_digest_mismatch_is_stale_and_non_mutating(self) -> None:
+        self._assert_persisted_mismatch_is_stale(
+            "UPDATE development_runs SET milestone_contract_digest = ? WHERE run_id = ?",
+            ("f" * 64, self.run.run_id),
+        )
+
+    def test_compare_and_swap_zero_rows_rolls_back_without_event(self) -> None:
+        proxy = self._proxy(zero_update=True)
+        with patch.object(self.store, "_connect", return_value=proxy):
+            result = self.service.transition(self._request())
+        self.assertEqual(
+            TransactionalTransitionReasonCode.STALE_PERSISTED_RUN,
+            result.reason_code,
+        )
+        self.assertEqual(1, proxy.rollback_calls)
+        self.assertEqual(1, proxy.close_calls)
+        self._assert_unchanged()
+
+    def test_state_update_failure_rolls_back_and_inserts_no_event(self) -> None:
+        proxy = self._proxy(fail_statement="UPDATE DEVELOPMENT_RUNS")
+        with patch.object(self.store, "_connect", return_value=proxy):
+            with self.assertRaisesRegex(sqlite3.OperationalError, "injected UPDATE"):
+                self.service.transition(self._request())
+        self.assertEqual(1, proxy.rollback_calls)
+        self.assertEqual(1, proxy.close_calls)
+        self._assert_unchanged()
+
+    def test_event_insert_failure_rolls_back_state_mutation(self) -> None:
+        proxy = self._proxy(fail_statement="INSERT INTO STATE_EVENTS")
+        with patch.object(self.store, "_connect", return_value=proxy):
+            with self.assertRaisesRegex(sqlite3.OperationalError, "injected INSERT"):
+                self.service.transition(self._request())
+        self.assertEqual(1, proxy.rollback_calls)
+        self.assertEqual(1, proxy.close_calls)
+        self._assert_unchanged()
+
+    def test_exception_after_begin_rolls_back_and_closes(self) -> None:
+        proxy = self._proxy(fail_statement="SELECT RUN_ID")
+        with patch.object(self.store, "_connect", return_value=proxy):
+            with self.assertRaisesRegex(sqlite3.OperationalError, "injected SELECT"):
+                self.service.transition(self._request())
+        self.assertEqual(1, proxy.rollback_calls)
+        self.assertEqual(1, proxy.close_calls)
+        self._assert_unchanged()
+
+    def test_commit_failure_never_reports_success_and_rolls_back(self) -> None:
+        proxy = self._proxy(fail_commit=True)
+        with patch.object(self.store, "_connect", return_value=proxy):
+            with self.assertRaisesRegex(sqlite3.OperationalError, "commit failure"):
+                self.service.transition(self._request())
+        self.assertEqual(1, proxy.commit_calls)
+        self.assertEqual(1, proxy.rollback_calls)
+        self.assertEqual(1, proxy.close_calls)
+        self._assert_unchanged()
+
+    def test_event_id_collision_rolls_back_state_mutation(self) -> None:
+        connection = sqlite3.connect(self.database_path)
+        connection.execute("PRAGMA foreign_keys = ON")
+        connection.execute(
+            """
+            INSERT INTO state_events(
+                event_id, run_id, from_state, to_state, transition_reason,
+                occurred_at, state_version
+            ) VALUES(?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                "event-1",
+                self.run.run_id,
+                DevelopmentRunState.DRAFT.value,
+                DevelopmentRunState.FEASIBILITY_CHECKING.value,
+                TransitionEvaluationReasonCode.RULE_ALLOWED.value,
+                "2026-08-17T11:00:00Z",
+                99,
+            ),
+        )
+        connection.commit()
+        connection.close()
+
+        with self.assertRaises(sqlite3.IntegrityError):
+            self.service.transition(self._request())
+
+        self.assertEqual(self.run, self.store.get_run(self.run.run_id))
+        history = self.store.get_history(self.run.run_id)
+        self.assertEqual([99], [event.state_version for event in history])
+
+    def test_event_version_collision_rolls_back_state_mutation(self) -> None:
+        connection = sqlite3.connect(self.database_path)
+        connection.execute("PRAGMA foreign_keys = ON")
+        connection.execute(
+            """
+            INSERT INTO state_events(
+                event_id, run_id, from_state, to_state, transition_reason,
+                occurred_at, state_version
+            ) VALUES(?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                "occupied-version",
+                self.run.run_id,
+                DevelopmentRunState.DRAFT.value,
+                DevelopmentRunState.FEASIBILITY_CHECKING.value,
+                TransitionEvaluationReasonCode.RULE_ALLOWED.value,
+                "2026-08-17T11:00:00Z",
+                1,
+            ),
+        )
+        connection.commit()
+        connection.close()
+
+        with self.assertRaises(sqlite3.IntegrityError):
+            self.service.transition(self._request())
+
+        self.assertEqual(self.run, self.store.get_run(self.run.run_id))
+        history = self.store.get_history(self.run.run_id)
+        self.assertEqual([1], [event.state_version for event in history])
+
+    def test_clock_and_identifier_providers_run_before_begin(self) -> None:
+        directory = tempfile.TemporaryDirectory()
+        try:
+            store = SqliteRunStore(Path(directory.name) / "guarded.sqlite3")
+            holder: dict[str, _ConnectionProxy] = {}
+            identifiers = iter(("guarded-run", "guarded-event"))
+            current_time = datetime(2026, 8, 17, tzinfo=timezone.utc)
+
+            def assert_outside_transaction() -> None:
+                proxy = holder.get("proxy")
+                if proxy is not None:
+                    self.assertFalse(proxy.in_transaction)
+
+            def identifier() -> str:
+                assert_outside_transaction()
+                return next(identifiers)
+
+            def clock() -> datetime:
+                assert_outside_transaction()
+                return current_time
+
+            service = TransitionService(store, clock=clock, id_factory=identifier)
+            service.initialize()
+            run = service.create_run(self.contract.sha256_digest())
+            original_connect = store._connect
+
+            def guarded_connect() -> _ConnectionProxy:
+                proxy = _ConnectionProxy(original_connect())
+                holder["proxy"] = proxy
+                return proxy
+
+            with patch.object(store, "_connect", side_effect=guarded_connect):
+                result = service.transition(
+                    _unconditional_transition_request(run, self.contract)
+                )
+            self.assertTrue(result.committed)
+        finally:
+            directory.cleanup()
+
+    def test_clock_failure_precedes_connection_and_preserves_state(self) -> None:
+        def failing_clock() -> datetime:
+            raise RuntimeError("injected clock failure")
+
+        service = TransitionService(
+            self.store,
+            clock=failing_clock,
+            id_factory=lambda: "event-before-clock-failure",
+        )
+        with patch.object(
+            self.store,
+            "_connect",
+            side_effect=AssertionError("connection opened after clock failure"),
+        ) as connect:
+            with self.assertRaisesRegex(RuntimeError, "injected clock failure"):
+                service.transition(self._request())
+        connect.assert_not_called()
+        self._assert_unchanged()
+
+    def test_event_id_failure_precedes_clock_connection_and_state_mutation(self) -> None:
+        def failing_identifier() -> str:
+            raise RuntimeError("injected identifier failure")
+
+        def unexpected_clock() -> datetime:
+            raise AssertionError("clock called after identifier failure")
+
+        service = TransitionService(
+            self.store,
+            clock=unexpected_clock,
+            id_factory=failing_identifier,
+        )
+        with patch.object(
+            self.store,
+            "_connect",
+            side_effect=AssertionError("connection opened after identifier failure"),
+        ) as connect:
+            with self.assertRaisesRegex(RuntimeError, "injected identifier failure"):
+                service.transition(self._request())
+        connect.assert_not_called()
+        self._assert_unchanged()
+
+    def test_transition_avoids_forbidden_effect_repository_and_run_creation_paths(self) -> None:
+        proxy = self._proxy()
+        forbidden = AssertionError("forbidden transition path invoked")
+        with (
+            patch("builtins.open", side_effect=forbidden),
+            patch.object(subprocess, "run", side_effect=forbidden),
+            patch.object(os, "system", side_effect=forbidden),
+            patch.object(urllib.request, "urlopen", side_effect=forbidden),
+            patch.object(Path, "write_text", side_effect=forbidden),
+            patch.object(threading.Thread, "start", side_effect=forbidden),
+            patch.object(SqlitePhaseContractRepository, "create", side_effect=forbidden),
+            patch.object(
+                SqliteMilestoneContractRepository,
+                "create",
+                side_effect=forbidden,
+            ),
+            patch.object(
+                SqliteApprovalBindingRepository,
+                "create",
+                side_effect=forbidden,
+            ),
+            patch.object(SqliteRunStore, "create_run", side_effect=forbidden),
+            patch.object(self.store, "_connect", return_value=proxy) as connect,
+        ):
+            result = self.service.transition(self._request())
+
+        self.assertTrue(result.committed)
+        connect.assert_called_once_with()
+        self.assertEqual(1, proxy.commit_calls)
+        self.assertEqual(0, proxy.rollback_calls)
+        self.assertEqual(1, proxy.close_calls)
+        persisted = self.store.get_run(self.run.run_id)
+        self.assertEqual(1, persisted.state_version)  # type: ignore[union-attr]
+        self.assertEqual(1, len(self.store.get_history(self.run.run_id)))
+
+    def test_rollback_failure_preserves_original_cause_closes_and_never_commits(self) -> None:
+        proxy = self._proxy(
+            fail_statement="SELECT RUN_ID",
+            fail_rollback=True,
+        )
+        with patch.object(self.store, "_connect", return_value=proxy) as connect:
+            with self.assertRaisesRegex(
+                sqlite3.OperationalError,
+                "injected rollback failure",
+            ) as raised:
+                self.service.transition(self._request())
+
+        connect.assert_called_once_with()
+        self.assertIsInstance(raised.exception.__cause__, sqlite3.OperationalError)
+        self.assertIn("injected SELECT RUN_ID", str(raised.exception.__cause__))
+        self.assertEqual(1, proxy.rollback_calls)
+        self.assertEqual(0, proxy.commit_calls)
+        self.assertEqual(1, proxy.close_calls)
+        self._assert_unchanged()
+
+    def test_event_constraint_failure_rolls_back_closes_and_never_retries(self) -> None:
+        connection = sqlite3.connect(self.database_path)
+        connection.execute("PRAGMA foreign_keys = ON")
+        connection.execute(
+            """
+            INSERT INTO state_events(
+                event_id, run_id, from_state, to_state, transition_reason,
+                occurred_at, state_version
+            ) VALUES(?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                "event-1",
+                self.run.run_id,
+                DevelopmentRunState.DRAFT.value,
+                DevelopmentRunState.FEASIBILITY_CHECKING.value,
+                TransitionEvaluationReasonCode.RULE_ALLOWED.value,
+                "2026-08-17T11:00:00Z",
+                99,
+            ),
+        )
+        connection.commit()
+        connection.close()
+        proxy = self._proxy()
+
+        with patch.object(self.store, "_connect", return_value=proxy) as connect:
+            with self.assertRaises(sqlite3.IntegrityError):
+                self.service.transition(self._request())
+
+        connect.assert_called_once_with()
+        self.assertEqual(1, proxy.rollback_calls)
+        self.assertEqual(0, proxy.commit_calls)
+        self.assertEqual(1, proxy.close_calls)
+        self.assertEqual(self.run, self.store.get_run(self.run.run_id))
+        history = self.store.get_history(self.run.run_id)
+        self.assertEqual([99], [event.state_version for event in history])
+
+    def test_competing_writers_commit_at_most_one_transition(self) -> None:
+        barrier = threading.Barrier(2)
+        service = TransitionService(self.store, policy=_BarrierPolicy(barrier))
+        request = self._request()
+        results: list[TransactionalTransitionResult] = []
+        errors: list[BaseException] = []
+
+        def execute() -> None:
+            try:
+                results.append(service.transition(request))
+            except BaseException as error:
+                errors.append(error)
+
+        workers = [threading.Thread(target=execute) for _ in range(2)]
+        for worker in workers:
+            worker.start()
+        for worker in workers:
+            worker.join(timeout=10)
+
+        self.assertFalse(any(worker.is_alive() for worker in workers))
+        self.assertEqual([], errors)
+        self.assertEqual(2, len(results))
+        self.assertEqual(
+            {
+                TransactionalTransitionReasonCode.COMMITTED,
+                TransactionalTransitionReasonCode.STALE_PERSISTED_RUN,
+            },
+            {result.reason_code for result in results},
+        )
+        persisted = self.store.get_run(self.run.run_id)
+        self.assertEqual(1, persisted.state_version)  # type: ignore[union-attr]
+        self.assertEqual(1, len(self.store.get_history(self.run.run_id)))
 
 
 class ContractModelTest(unittest.TestCase):

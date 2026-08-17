@@ -1,15 +1,17 @@
-"""State-Machine-owned transition evaluation for the DL-P1.1 POC."""
+"""State-Machine-owned transactional transition persistence."""
 
 from datetime import datetime, timezone
 from typing import Callable
 from uuid import uuid4
 
 from .models import (
+    AcceptedStateEvent,
     DevelopmentRun,
-    DevelopmentRunState,
-    TransitionReasonCode,
-    TransitionRequest,
-    TransitionResult,
+    TransactionalTransitionReasonCode,
+    TransactionalTransitionResult,
+    TransitionEvaluationDecision,
+    TransitionEvaluationReasonCode,
+    TransitionEvaluationRequest,
 )
 from .sqlite_store import SqliteRunStore
 from .transition_policy import TransitionPolicy
@@ -24,7 +26,7 @@ def _format_timestamp(value: datetime) -> str:
 
 
 class TransitionService:
-    """The sole public POC authority for creating runs and accepting edges."""
+    """The sole public authority for evaluating and persisting transitions."""
 
     def __init__(
         self,
@@ -48,42 +50,58 @@ class TransitionService:
             created_at=_format_timestamp(self._clock()),
         )
 
-    def transition(self, request: TransitionRequest) -> TransitionResult:
+    def transition(self, request: object) -> TransactionalTransitionResult:
+        evaluation = self._policy.evaluate(request)
+        if evaluation.decision is not TransitionEvaluationDecision.ALLOWED:
+            return TransactionalTransitionResult(
+                committed=False,
+                reason_code=(
+                    TransactionalTransitionReasonCode.EVALUATION_NOT_ALLOWED
+                ),
+                evaluation_result=evaluation,
+                persisted_run=None,
+                accepted_event=None,
+            )
+
+        assert type(request) is TransitionEvaluationRequest
+        assert request.run is not None
+        assert request.requested_state is not None
+        event_id = self._id_factory()
+        occurred_at = _format_timestamp(self._clock())
+
         connection = self._store._connect()
         try:
             connection.execute("BEGIN IMMEDIATE")
             row = connection.execute(
-                "SELECT current_state, state_version FROM development_runs WHERE run_id = ?",
-                (request.run_id,),
+                """
+                SELECT run_id, milestone_contract_digest, current_state, state_version,
+                       created_at, updated_at
+                FROM development_runs WHERE run_id = ?
+                """,
+                (request.run.run_id,),
             ).fetchone()
             if row is None:
                 connection.rollback()
-                return self._rejected(request, TransitionReasonCode.RUN_NOT_FOUND, None, None)
-
-            current_state = DevelopmentRunState(row["current_state"])
-            current_version = row["state_version"]
-            if (
-                current_state != request.expected_state
-                or current_version != request.expected_state_version
-            ):
-                connection.rollback()
-                return self._rejected(
-                    request,
-                    TransitionReasonCode.STALE_EXPECTED_STATE,
-                    current_state,
-                    current_version,
-                )
-            if not self._policy.allows(current_state, request.requested_state):
-                connection.rollback()
-                return self._rejected(
-                    request,
-                    TransitionReasonCode.TRANSITION_NOT_ALLOWED,
-                    current_state,
-                    current_version,
+                return TransactionalTransitionResult(
+                    committed=False,
+                    reason_code=TransactionalTransitionReasonCode.RUN_NOT_FOUND,
+                    evaluation_result=evaluation,
+                    persisted_run=None,
+                    accepted_event=None,
                 )
 
-            next_version = current_version + 1
-            occurred_at = _format_timestamp(self._clock())
+            persisted_run = self._store._to_run(row)
+            if persisted_run != request.run:
+                connection.rollback()
+                return TransactionalTransitionResult(
+                    committed=False,
+                    reason_code=TransactionalTransitionReasonCode.STALE_PERSISTED_RUN,
+                    evaluation_result=evaluation,
+                    persisted_run=persisted_run,
+                    accepted_event=None,
+                )
+
+            next_version = persisted_run.state_version + 1
             updated = connection.execute(
                 """
                 UPDATE development_runs
@@ -94,19 +112,29 @@ class TransitionService:
                     request.requested_state.value,
                     next_version,
                     occurred_at,
-                    request.run_id,
-                    current_state.value,
-                    current_version,
+                    persisted_run.run_id,
+                    persisted_run.current_state.value,
+                    persisted_run.state_version,
                 ),
             ).rowcount
             if updated != 1:
                 connection.rollback()
-                return self._rejected(
-                    request,
-                    TransitionReasonCode.STALE_EXPECTED_STATE,
-                    current_state,
-                    current_version,
+                return TransactionalTransitionResult(
+                    committed=False,
+                    reason_code=TransactionalTransitionReasonCode.STALE_PERSISTED_RUN,
+                    evaluation_result=evaluation,
+                    persisted_run=persisted_run,
+                    accepted_event=None,
                 )
+            accepted_event = AcceptedStateEvent(
+                event_id=event_id,
+                run_id=persisted_run.run_id,
+                from_state=persisted_run.current_state,
+                to_state=request.requested_state,
+                transition_reason=TransitionEvaluationReasonCode.RULE_ALLOWED.value,
+                occurred_at=occurred_at,
+                state_version=next_version,
+            )
             connection.execute(
                 """
                 INSERT INTO state_events(
@@ -115,42 +143,37 @@ class TransitionService:
                 ) VALUES(?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
-                    self._id_factory(),
-                    request.run_id,
-                    current_state.value,
-                    request.requested_state.value,
-                    TransitionReasonCode.ACCEPTED.value,
-                    occurred_at,
-                    next_version,
+                    accepted_event.event_id,
+                    accepted_event.run_id,
+                    accepted_event.from_state.value,
+                    accepted_event.to_state.value,
+                    accepted_event.transition_reason,
+                    accepted_event.occurred_at,
+                    accepted_event.state_version,
                 ),
             )
             connection.commit()
-            return TransitionResult(
-                accepted=True,
-                reason_code=TransitionReasonCode.ACCEPTED,
-                run_id=request.run_id,
+            committed_run = DevelopmentRun(
+                run_id=persisted_run.run_id,
+                milestone_contract_digest=persisted_run.milestone_contract_digest,
                 current_state=request.requested_state,
-                current_state_version=next_version,
-                requested_state=request.requested_state,
+                state_version=next_version,
+                created_at=persisted_run.created_at,
+                updated_at=occurred_at,
             )
-        except Exception:
-            connection.rollback()
+            return TransactionalTransitionResult(
+                committed=True,
+                reason_code=TransactionalTransitionReasonCode.COMMITTED,
+                evaluation_result=evaluation,
+                persisted_run=committed_run,
+                accepted_event=accepted_event,
+            )
+        except Exception as error:
+            if connection.in_transaction:
+                try:
+                    connection.rollback()
+                except Exception as rollback_error:
+                    raise rollback_error from error
             raise
         finally:
             connection.close()
-
-    @staticmethod
-    def _rejected(
-        request: TransitionRequest,
-        reason_code: TransitionReasonCode,
-        current_state: DevelopmentRunState | None,
-        current_state_version: int | None,
-    ) -> TransitionResult:
-        return TransitionResult(
-            accepted=False,
-            reason_code=reason_code,
-            run_id=request.run_id,
-            current_state=current_state,
-            current_state_version=current_state_version,
-            requested_state=request.requested_state,
-        )
