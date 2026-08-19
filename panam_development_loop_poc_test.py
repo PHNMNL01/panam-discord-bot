@@ -1,4 +1,4 @@
-"""Focused deterministic tests for the DL-P1.1 through DL-P1.5 slices."""
+"""Focused deterministic tests for the DL-P1.1 through DL-P1.8 slices."""
 
 import os
 import re
@@ -34,12 +34,18 @@ from panam_development_loop import (
     ExpectedEvidenceBinding,
     MilestoneContract,
     PhaseContract,
+    ProjectPolicy,
+    ProjectPolicyReadOutcome,
+    ProjectPolicyReadResult,
+    ProjectPolicyReader,
+    ProjectPolicyVersion,
     RepositoryError,
     RepositoryEvidenceBinding,
     RepositoryFailureCode,
     SqliteApprovalBindingRepository,
     SqliteMilestoneContractRepository,
     SqlitePhaseContractRepository,
+    SqliteProjectPolicyRepository,
     SqliteRunStore,
     SnapshotProducerKind,
     TransactionalTransitionReasonCode,
@@ -1221,13 +1227,14 @@ class SqliteMigrationTest(unittest.TestCase):
         SqliteRunStore(path).initialize("first-at")
         connection = self._connection(path)
         try:
-            self.assertEqual([(1, "first-at"), (2, "first-at")], self._ledger_snapshot(connection))
+            self.assertEqual([(1, "first-at"), (2, "first-at"), (3, "first-at")], self._ledger_snapshot(connection))
             self.assertEqual(
                 [
                     "approvals",
                     "development_runs",
                     "milestone_contracts",
                     "phases",
+                    "project_policies",
                     "schema_migrations",
                     "state_events",
                 ],
@@ -1281,7 +1288,7 @@ class SqliteMigrationTest(unittest.TestCase):
             for table_name, table_sql in before_schema.items():
                 self.assertEqual(table_sql, after_schema[table_name])
             self.assertEqual(
-                [(1, "legacy-applied-at"), (2, "new-at")],
+                [(1, "legacy-applied-at"), (2, "new-at"), (3, "new-at")],
                 self._ledger_snapshot(connection),
             )
             self.assertEqual(before_runs, [tuple(row) for row in connection.execute("SELECT * FROM development_runs")])
@@ -1403,7 +1410,7 @@ class SqliteMigrationTest(unittest.TestCase):
             malformed.commit()
             self.assertEqual(MigrationFailureCode.INVALID_APPLIED_HISTORY, self._assert_history_rejected_without_mutation(malformed).code)
             future.execute("CREATE TABLE schema_migrations (version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL)")
-            future.execute("INSERT INTO schema_migrations VALUES(3, 'future-at')")
+            future.execute("INSERT INTO schema_migrations VALUES(4, 'future-at')")
             future.commit()
             self.assertEqual(MigrationFailureCode.UNKNOWN_FUTURE_VERSION, self._assert_history_rejected_without_mutation(future).code)
         finally:
@@ -1714,7 +1721,7 @@ class SqliteRepositoryTest(unittest.TestCase):
         SqliteRunStore(future).initialize("at")
         connection = sqlite3.connect(future)
         try:
-            connection.execute("INSERT INTO schema_migrations VALUES(3, 'future')")
+            connection.execute("INSERT INTO schema_migrations VALUES(4, 'future')")
             connection.commit()
         finally:
             connection.close()
@@ -1813,7 +1820,7 @@ class SqliteMigrationTwoTest(unittest.TestCase):
             PRODUCTION_MIGRATIONS,
             require_production_version=True,
         )
-        self.assertEqual([1, 2], [migration.version for migration in validated])
+        self.assertEqual([1, 2, 3], [migration.version for migration in validated])
         self.assertIn("base_commit", PRODUCTION_MIGRATIONS[1].statements[2])
         for identifier in ("base_commit", "commit_hash", "rollback_reason"):
             with self.subTest(identifier=identifier):
@@ -1853,7 +1860,7 @@ class SqliteMigrationTwoTest(unittest.TestCase):
                 )
             ]
             self.assertEqual(
-                ["approvals", "development_runs", "milestone_contracts", "phases", "schema_migrations", "state_events"],
+                ["approvals", "development_runs", "milestone_contracts", "phases", "project_policies", "schema_migrations", "state_events"],
                 tables,
             )
             foreign_keys = connection.execute("PRAGMA foreign_key_list(milestone_contracts)").fetchall()
@@ -1904,6 +1911,480 @@ class SqliteMigrationTwoTest(unittest.TestCase):
             self.assertEqual(("run", "digest", "DRAFT", 1, "created", "updated"), tuple(connection.execute("SELECT * FROM development_runs").fetchone()))
         finally:
             connection.close()
+
+
+class ProjectPolicyReadOnlyFoundationTest(unittest.TestCase):
+    """Focused DL-P1.8 model, migration, adapter, and reader coverage."""
+
+    def setUp(self) -> None:
+        self._temporary_directory = tempfile.TemporaryDirectory()
+        self.directory = Path(self._temporary_directory.name)
+        self.database_path = self.directory / "project-registry.sqlite3"
+        SqliteRunStore(self.database_path).initialize("initialized-at")
+
+    def tearDown(self) -> None:
+        self._temporary_directory.cleanup()
+
+    @staticmethod
+    def _policy(project_id: str = "panam", root: str = "C:\\workspace\\panam") -> ProjectPolicy:
+        return ProjectPolicy(project_id, "1", root)
+
+    @staticmethod
+    def _snapshot(path: Path) -> tuple[str, ...]:
+        connection = sqlite3.connect(path)
+        try:
+            return tuple(connection.iterdump())
+        finally:
+            connection.close()
+
+    @staticmethod
+    def _insert(path: Path, project_id: str, version: str, root: str) -> None:
+        connection = sqlite3.connect(path)
+        try:
+            connection.execute(
+                "INSERT INTO project_policies(project_id, policy_version, project_root) VALUES(?, ?, ?)",
+                (project_id, version, root),
+            )
+            connection.commit()
+        finally:
+            connection.close()
+
+    def test_policy_v1_is_closed_immutable_and_lexically_normalized(self) -> None:
+        policy = ProjectPolicy("panam", ProjectPolicyVersion.V1, "C:/workspace/panam")
+        self.assertEqual(
+            ["project_id", "policy_version", "project_root"],
+            [field_.name for field_ in fields(ProjectPolicy)],
+        )
+        self.assertEqual("panam", policy.project_id)
+        self.assertIs(ProjectPolicyVersion.V1, policy.policy_version)
+        self.assertEqual("C:\\workspace\\panam", policy.project_root)
+        self.assertEqual("C:\\", ProjectPolicy("panam", "1", "C:\\").project_root)
+        self.assertEqual("C:\\Projects", ProjectPolicy("panam", "1", "C:\\Projects\\").project_root)
+        self.assertEqual("C:\\Projects", ProjectPolicy("panam", "1", "C:/Projects/").project_root)
+        self.assertEqual(
+            "D:\\Projects\\nested",
+            ProjectPolicy("panam", "1", "D:\\Projects\\nested\\").project_root,
+        )
+        with self.assertRaises(FrozenInstanceError):
+            policy.project_root = "D:\\other"  # type: ignore[misc]
+
+    def test_policy_validation_rejects_invalid_identity_version_and_root(self) -> None:
+        for identity in ("", " panam", "panam ", "panam\n", 7, None):
+            with self.subTest(identity=identity), self.assertRaises(ContractValidationError):
+                ProjectPolicy(identity, "1", "C:\\repo")  # type: ignore[arg-type]
+        for version in ("", "2", 1, None):
+            with self.subTest(version=version), self.assertRaises(ContractValidationError):
+                ProjectPolicy("panam", version, "C:\\repo")  # type: ignore[arg-type]
+        invalid_roots = (
+            "",
+            " repo",
+            "relative\\repo",
+            "C:repo",
+            "É:\\repo",
+            "\\\\server\\share",
+            "//server/share",
+            "\\\\?\\C:\\repo",
+            "\\\\.\\C:\\repo",
+            "C:\\repo\\\\child",
+            "C:\\repo\\.\\child",
+            "C:\\repo\\..\\child",
+            "C:\\repo?",
+            "C:\\repo.\\child",
+            "C:\\repo \\child",
+            "C:\\CON",
+            "C:\\con",
+            "C:\\NUL.txt",
+            "C:\\Projects\\AUX\\data",
+            "C:\\Projects\\COM1.log",
+            "C:\\LPT9\\output",
+            "C:\\PrN.doc",
+            "C:\\CONIN$",
+            "C:\\conin$",
+            "C:\\CONIN$.txt",
+            "C:\\CONOUT$",
+            "C:\\ConOut$.txt",
+            "C:\\CONOUT$.log",
+            "C:\\Projects\\CONOUT$\\data",
+            "C:\\COM\u00b9",
+            "C:\\COM\u00b2.txt",
+            "C:\\Projects\\COM\u00b3.log",
+            "C:\\LPT\u00b9",
+            "C:\\Projects\\LPT\u00b2.txt",
+            "C:\\LPT\u00b3\\output",
+            "C:\\Projects\\lpt\u00b2.log\\data",
+        )
+        for root in invalid_roots:
+            with self.subTest(root=root), self.assertRaises(ContractValidationError):
+                ProjectPolicy("panam", "1", root)
+
+    def test_policy_validation_has_no_filesystem_or_external_effects(self) -> None:
+        with (
+            patch.object(Path, "exists", side_effect=AssertionError("exists invoked")) as exists,
+            patch.object(Path, "stat", side_effect=AssertionError("stat invoked")) as stat,
+            patch.object(Path, "resolve", side_effect=AssertionError("resolve invoked")) as resolve,
+            patch("os.path.realpath", side_effect=AssertionError("realpath invoked")) as realpath,
+            patch("subprocess.run", side_effect=AssertionError("subprocess invoked")) as subprocess_run,
+            patch("urllib.request.urlopen", side_effect=AssertionError("network invoked")) as urlopen,
+        ):
+            self.assertEqual("C:\\repo", self._policy(root="C:/repo/").project_root)
+            for root in ("C:\\CONIN$", "C:\\COM\u00b9"):
+                with self.subTest(root=root), self.assertRaises(ContractValidationError):
+                    self._policy(root=root)
+        for sentinel in (exists, stat, resolve, realpath, subprocess_run, urlopen):
+            sentinel.assert_not_called()
+
+    def test_result_contract_has_exactly_four_outcomes_and_payload_invariant(self) -> None:
+        self.assertEqual(
+            {"VALID_POLICY", "PROJECT_NOT_REGISTERED", "INVALID_POLICY", "STORAGE_FAILURE"},
+            {outcome.value for outcome in ProjectPolicyReadOutcome},
+        )
+        policy = self._policy()
+        self.assertEqual(
+            policy,
+            ProjectPolicyReadResult(ProjectPolicyReadOutcome.VALID_POLICY, policy).policy,
+        )
+        for outcome in (
+            ProjectPolicyReadOutcome.PROJECT_NOT_REGISTERED,
+            ProjectPolicyReadOutcome.INVALID_POLICY,
+            ProjectPolicyReadOutcome.STORAGE_FAILURE,
+        ):
+            self.assertIsNone(ProjectPolicyReadResult(outcome).policy)
+            with self.assertRaises(ValueError):
+                ProjectPolicyReadResult(outcome, policy)
+        with self.assertRaises(ValueError):
+            ProjectPolicyReadResult(ProjectPolicyReadOutcome.VALID_POLICY)
+
+    def test_migration_three_schema_is_exact_empty_unique_and_nonnullable(self) -> None:
+        connection = sqlite3.connect(self.database_path)
+        try:
+            self.assertEqual(
+                [(1, "initialized-at"), (2, "initialized-at"), (3, "initialized-at")],
+                connection.execute(
+                    "SELECT version, applied_at FROM schema_migrations ORDER BY version"
+                ).fetchall(),
+            )
+            self.assertEqual(
+                [
+                    ("project_id", "TEXT", 1, 1),
+                    ("policy_version", "TEXT", 1, 0),
+                    ("project_root", "TEXT", 1, 0),
+                ],
+                [(row[1], row[2], row[3], row[5]) for row in connection.execute("PRAGMA table_info(project_policies)")],
+            )
+            self.assertEqual(0, connection.execute("SELECT COUNT(*) FROM project_policies").fetchone()[0])
+            connection.execute("INSERT INTO project_policies VALUES('panam', '1', 'C:\\repo')")
+            with self.assertRaises(sqlite3.IntegrityError):
+                connection.execute("INSERT INTO project_policies VALUES('panam', '1', 'D:\\repo')")
+            for values in ((None, "1", "C:\\repo"), ("x", None, "C:\\repo"), ("y", "1", None)):
+                with self.subTest(values=values), self.assertRaises(sqlite3.IntegrityError):
+                    connection.execute("INSERT INTO project_policies VALUES(?, ?, ?)", values)
+        finally:
+            connection.close()
+
+    def test_migration_three_statement_and_ledger_failures_roll_back(self) -> None:
+        create_statement = PRODUCTION_MIGRATIONS[2].statements[0]
+        statement_path = self.directory / "migration-three-statement.sqlite3"
+        statement_connection = sqlite3.connect(statement_path)
+        statement_connection.row_factory = sqlite3.Row
+        try:
+            apply_migrations(statement_connection, "v2-at", PRODUCTION_MIGRATIONS[:2])
+            failing_registry = PRODUCTION_MIGRATIONS[:2] + (
+                Migration(3, (create_statement, "INSERT INTO absent_table VALUES(1)")),
+            )
+            with self.assertRaises(MigrationError):
+                apply_migrations(statement_connection, "v3-at", failing_registry)
+            self.assertEqual(
+                [(1,), (2,)],
+                [tuple(row) for row in statement_connection.execute("SELECT version FROM schema_migrations ORDER BY version")],
+            )
+            self.assertIsNone(
+                statement_connection.execute(
+                    "SELECT name FROM sqlite_master WHERE type='table' AND name='project_policies'"
+                ).fetchone()
+            )
+        finally:
+            statement_connection.close()
+
+        ledger_path = self.directory / "migration-three-ledger.sqlite3"
+        ledger_connection = sqlite3.connect(ledger_path)
+        ledger_connection.row_factory = sqlite3.Row
+        try:
+            apply_migrations(ledger_connection, "v2-at", PRODUCTION_MIGRATIONS[:2])
+            ledger_connection.execute(
+                "CREATE TRIGGER reject_v3 BEFORE INSERT ON schema_migrations "
+                "WHEN NEW.version = 3 BEGIN SELECT RAISE(ABORT, 'reject'); END"
+            )
+            ledger_connection.commit()
+            with self.assertRaises(MigrationError):
+                apply_migrations(ledger_connection, "v3-at", PRODUCTION_MIGRATIONS)
+            self.assertEqual(
+                [(1,), (2,)],
+                [tuple(row) for row in ledger_connection.execute("SELECT version FROM schema_migrations ORDER BY version")],
+            )
+            self.assertIsNone(
+                ledger_connection.execute(
+                    "SELECT name FROM sqlite_master WHERE type='table' AND name='project_policies'"
+                ).fetchone()
+            )
+        finally:
+            ledger_connection.close()
+
+    def test_existing_version_two_record_survives_migration_three(self) -> None:
+        path = self.directory / "version-two-upgrade.sqlite3"
+        connection = sqlite3.connect(path)
+        connection.row_factory = sqlite3.Row
+        connection.execute("PRAGMA foreign_keys = ON")
+        try:
+            apply_migrations(connection, "v2-at", PRODUCTION_MIGRATIONS[:2])
+            connection.execute(
+                "INSERT INTO phases(project_id, phase_id, contract_version, contract_digest) "
+                "VALUES('panam', 'DL-P1', '1', ?)",
+                ("a" * 64,),
+            )
+            connection.commit()
+            apply_migrations(connection, "v3-at", PRODUCTION_MIGRATIONS)
+            self.assertEqual(
+                ("panam", "DL-P1", "1", "a" * 64),
+                tuple(connection.execute("SELECT * FROM phases").fetchone()),
+            )
+            self.assertEqual(0, connection.execute("SELECT COUNT(*) FROM project_policies").fetchone()[0])
+            self.assertEqual(
+                [(1,), (2,), (3,)],
+                [tuple(row) for row in connection.execute("SELECT version FROM schema_migrations ORDER BY version")],
+            )
+        finally:
+            connection.close()
+
+    def test_reader_valid_and_missing_outcomes_are_read_only(self) -> None:
+        self._insert(self.database_path, "panam", "1", "C:/workspace/panam")
+        adapter = SqliteProjectPolicyRepository(self.database_path)
+        reader = ProjectPolicyReader(adapter)
+        before = self._snapshot(self.database_path)
+        with (
+            patch.object(SqliteRunStore, "initialize", side_effect=AssertionError("migration invoked")) as initialize,
+            patch("panam_development_loop.sqlite_migrations.initialize_database", side_effect=AssertionError("migration invoked")) as initialize_database,
+        ):
+            first = reader.read("panam")
+            second = reader.read("panam")
+            case_different = reader.read("PANAM")
+            missing = reader.read("absent")
+        self.assertIs(ProjectPolicyReadOutcome.VALID_POLICY, first.outcome)
+        self.assertEqual(self._policy(root="C:/workspace/panam"), first.policy)
+        self.assertEqual(first, second)
+        self.assertIs(ProjectPolicyReadOutcome.PROJECT_NOT_REGISTERED, case_different.outcome)
+        self.assertIsNone(case_different.policy)
+        self.assertIs(ProjectPolicyReadOutcome.PROJECT_NOT_REGISTERED, missing.outcome)
+        self.assertIsNone(missing.policy)
+        self.assertEqual(before, self._snapshot(self.database_path))
+        initialize.assert_not_called()
+        initialize_database.assert_not_called()
+        for forbidden_name in ("create", "update", "delete", "seed", "provision", "admin"):
+            self.assertFalse(hasattr(adapter, forbidden_name), forbidden_name)
+
+    def test_invalid_caller_identity_is_rejected_before_storage(self) -> None:
+        class NeverCalledRepository:
+            calls = 0
+
+            def get(self, project_id: str) -> ProjectPolicy | None:
+                self.calls += 1
+                raise AssertionError("storage accessed")
+
+        repository = NeverCalledRepository()
+        reader = ProjectPolicyReader(repository)
+        for identity in ("", " panam", "panam ", "panam\n", 7, None):
+            with self.subTest(identity=identity), self.assertRaises(RepositoryError) as raised:
+                reader.read(identity)  # type: ignore[arg-type]
+            self.assertIs(RepositoryFailureCode.INVALID_IDENTITY, raised.exception.code)
+        self.assertEqual(0, repository.calls)
+
+        missing_path = self.directory / "never-created.sqlite3"
+        with self.assertRaises(RepositoryError) as raised:
+            SqliteProjectPolicyRepository(missing_path).get("")
+        self.assertIs(RepositoryFailureCode.INVALID_IDENTITY, raised.exception.code)
+        self.assertFalse(missing_path.exists())
+
+    def test_persisted_invalid_version_and_root_map_to_invalid_policy(self) -> None:
+        reader = ProjectPolicyReader(SqliteProjectPolicyRepository(self.database_path))
+        cases = (
+            ("unsupported", "2", "C:\\repo"),
+            ("relative", "1", "relative\\repo"),
+            ("network", "1", "\\\\server\\share"),
+            ("malformed", "1", "C:\\repo\\..\\other"),
+        )
+        for project_id, version, root in cases:
+            self._insert(self.database_path, project_id, version, root)
+            with self.subTest(project_id=project_id):
+                result = reader.read(project_id)
+                self.assertIs(ProjectPolicyReadOutcome.INVALID_POLICY, result.outcome)
+                self.assertIsNone(result.policy)
+
+    def test_broken_schema_and_storage_errors_map_to_storage_failure(self) -> None:
+        malformed_path = self.directory / "malformed-schema.sqlite3"
+        SqliteRunStore(malformed_path).initialize("at")
+        connection = sqlite3.connect(malformed_path)
+        try:
+            connection.execute("DROP TABLE project_policies")
+            connection.execute(
+                "CREATE TABLE project_policies(project_id TEXT, policy_version TEXT, project_root TEXT)"
+            )
+            connection.execute("INSERT INTO project_policies VALUES('panam', '1', 'C:\\repo')")
+            connection.commit()
+        finally:
+            connection.close()
+        malformed = ProjectPolicyReader(SqliteProjectPolicyRepository(malformed_path)).read("panam")
+        self.assertIs(ProjectPolicyReadOutcome.STORAGE_FAILURE, malformed.outcome)
+        self.assertIsNone(malformed.policy)
+
+        extra_column_path = self.directory / "extra-column.sqlite3"
+        SqliteRunStore(extra_column_path).initialize("at")
+        connection = sqlite3.connect(extra_column_path)
+        try:
+            connection.execute("ALTER TABLE project_policies ADD COLUMN remote TEXT")
+            connection.commit()
+        finally:
+            connection.close()
+
+        generated_column_path = self.directory / "generated-column.sqlite3"
+        SqliteRunStore(generated_column_path).initialize("at")
+        connection = sqlite3.connect(generated_column_path)
+        try:
+            connection.execute("DROP TABLE project_policies")
+            connection.execute(
+                "CREATE TABLE project_policies("
+                "project_id TEXT NOT NULL PRIMARY KEY, "
+                "policy_version TEXT NOT NULL, "
+                "project_root TEXT NOT NULL, "
+                "remote TEXT GENERATED ALWAYS AS ('forbidden') VIRTUAL)"
+            )
+            connection.execute(
+                "INSERT INTO project_policies(project_id, policy_version, project_root) "
+                "VALUES('panam', '1', 'C:\\repo')"
+            )
+            connection.commit()
+            self.assertEqual(
+                ["project_id", "policy_version", "project_root"],
+                [row[1] for row in connection.execute("PRAGMA table_info(project_policies)")],
+            )
+            self.assertEqual(
+                ["project_id", "policy_version", "project_root", "remote"],
+                [row[1] for row in connection.execute("PRAGMA table_xinfo(project_policies)")],
+            )
+        finally:
+            connection.close()
+        generated_before = self._snapshot(generated_column_path)
+
+        missing_column_path = self.directory / "missing-column.sqlite3"
+        SqliteRunStore(missing_column_path).initialize("at")
+        connection = sqlite3.connect(missing_column_path)
+        try:
+            connection.execute("DROP TABLE project_policies")
+            connection.execute(
+                "CREATE TABLE project_policies("
+                "project_id TEXT NOT NULL PRIMARY KEY, policy_version TEXT NOT NULL)"
+            )
+            connection.commit()
+        finally:
+            connection.close()
+
+        future_path = self.directory / "future-schema.sqlite3"
+        SqliteRunStore(future_path).initialize("at")
+        connection = sqlite3.connect(future_path)
+        try:
+            connection.execute("INSERT INTO schema_migrations VALUES(4, 'future-at')")
+            connection.commit()
+        finally:
+            connection.close()
+
+        corrupt_path = self.directory / "corrupt.sqlite3"
+        corrupt_path.write_bytes(b"not a sqlite database")
+        missing_path = self.directory / "missing.sqlite3"
+        for path in (
+            extra_column_path,
+            generated_column_path,
+            missing_column_path,
+            future_path,
+            corrupt_path,
+            missing_path,
+        ):
+            with self.subTest(path=path.name):
+                failed_storage = ProjectPolicyReader(SqliteProjectPolicyRepository(path)).read("panam")
+                self.assertIs(ProjectPolicyReadOutcome.STORAGE_FAILURE, failed_storage.outcome)
+                self.assertIsNone(failed_storage.policy)
+        self.assertEqual(generated_before, self._snapshot(generated_column_path))
+        self.assertFalse(missing_path.exists())
+
+        class FailingRepository:
+            def get(self, project_id: str) -> ProjectPolicy | None:
+                raise RepositoryError(
+                    RepositoryFailureCode.SQLITE_OPERATIONAL_FAILURE,
+                    "ProjectPolicy",
+                    f"project_id={project_id}",
+                )
+
+        failed = ProjectPolicyReader(FailingRepository()).read("panam")
+        self.assertIs(ProjectPolicyReadOutcome.STORAGE_FAILURE, failed.outcome)
+        self.assertIsNone(failed.policy)
+        self.assertNotIn("sqlite", str(failed).lower())
+
+    def test_incompatible_project_id_collations_fail_closed_without_mutation(self) -> None:
+        for collation, lookup_identity in (("NOCASE", "PANAM"), ("RTRIM", "panam")):
+            path = self.directory / f"{collation.lower()}-collation.sqlite3"
+            SqliteRunStore(path).initialize("at")
+            connection = sqlite3.connect(path)
+            try:
+                connection.execute("DROP TABLE project_policies")
+                connection.execute(
+                    "CREATE TABLE project_policies("
+                    f"project_id TEXT NOT NULL COLLATE {collation} PRIMARY KEY, "
+                    "policy_version TEXT NOT NULL, "
+                    "project_root TEXT NOT NULL)"
+                )
+                connection.execute(
+                    "INSERT INTO project_policies VALUES('panam', '1', 'C:\\repo')"
+                )
+                if collation == "NOCASE":
+                    self.assertEqual(
+                        "panam",
+                        connection.execute(
+                            "SELECT project_id FROM project_policies WHERE project_id = 'PANAM'"
+                        ).fetchone()[0],
+                    )
+                connection.commit()
+            finally:
+                connection.close()
+
+            before = self._snapshot(path)
+            with self.subTest(collation=collation):
+                result = ProjectPolicyReader(SqliteProjectPolicyRepository(path)).read(
+                    lookup_identity
+                )
+                self.assertIs(ProjectPolicyReadOutcome.STORAGE_FAILURE, result.outcome)
+                self.assertIsNone(result.policy)
+                self.assertEqual(before, self._snapshot(path))
+
+    def test_busy_database_maps_to_storage_failure_and_reader_has_no_forbidden_effects(self) -> None:
+        self._insert(self.database_path, "panam", "1", "C:\\repo")
+        reader = ProjectPolicyReader(SqliteProjectPolicyRepository(self.database_path))
+        blocker = sqlite3.connect(self.database_path)
+        try:
+            blocker.execute("BEGIN EXCLUSIVE")
+            blocked = reader.read("panam")
+        finally:
+            blocker.rollback()
+            blocker.close()
+        self.assertIs(ProjectPolicyReadOutcome.STORAGE_FAILURE, blocked.outcome)
+        self.assertIsNone(blocked.policy)
+
+        with (
+            patch("subprocess.run", side_effect=AssertionError("subprocess invoked")) as subprocess_run,
+            patch("urllib.request.urlopen", side_effect=AssertionError("network invoked")) as urlopen,
+            patch.object(TransitionService, "transition", side_effect=AssertionError("transition invoked")) as transition,
+            patch("threading.Thread", side_effect=AssertionError("worker invoked")) as worker,
+        ):
+            result = reader.read("panam")
+        self.assertIs(ProjectPolicyReadOutcome.VALID_POLICY, result.outcome)
+        for sentinel in (subprocess_run, urlopen, transition, worker):
+            sentinel.assert_not_called()
 
 
 class TransitionEvaluationPolicyTest(unittest.TestCase):

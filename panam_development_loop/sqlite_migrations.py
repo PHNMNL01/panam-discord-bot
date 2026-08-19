@@ -1,4 +1,4 @@
-"""Internal controlled SQLite migration support through the DL-P1.5 schema."""
+"""Internal controlled SQLite migration support through the DL-P1.8 schema."""
 
 import re
 import sqlite3
@@ -128,6 +128,18 @@ PRODUCTION_MIGRATIONS = (
             """,
         ),
     ),
+    Migration(
+        version=3,
+        statements=(
+            """
+            CREATE TABLE project_policies (
+                project_id TEXT NOT NULL PRIMARY KEY,
+                policy_version TEXT NOT NULL,
+                project_root TEXT NOT NULL
+            )
+            """,
+        ),
+    ),
 )
 
 _FORBIDDEN_OPERATION_TOKENS = frozenset(
@@ -168,13 +180,13 @@ def validate_migration_registry(
         raise MigrationError(MigrationFailureCode.INVALID_REGISTRY, "declared order")
     if versions != list(range(1, len(versions) + 1)):
         raise MigrationError(MigrationFailureCode.INVALID_REGISTRY, "contiguous versions")
-    if require_production_version and versions != [1, 2]:
+    if require_production_version and versions != [1, 2, 3]:
         raise MigrationError(MigrationFailureCode.INVALID_REGISTRY, "production version")
     return registry
 
 
 def initialize_database(database_path: Path, applied_at: str) -> None:
-    """Initialize an explicit production database path through migration version 2."""
+    """Initialize an explicit production database path through migration version 3."""
 
     registry = validate_migration_registry(PRODUCTION_MIGRATIONS, require_production_version=True)
     connection = sqlite3.connect(database_path)

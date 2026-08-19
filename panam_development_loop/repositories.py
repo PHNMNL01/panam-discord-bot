@@ -3,7 +3,7 @@
 from enum import Enum
 from typing import Protocol
 
-from .models import ApprovalBinding, MilestoneContract, PhaseContract
+from .models import ApprovalBinding, MilestoneContract, PhaseContract, ProjectPolicy
 
 
 class RepositoryFailureCode(str, Enum):
@@ -63,3 +63,9 @@ class ApprovalBindingRepository(Protocol):
     def create(self, binding: ApprovalBinding) -> ApprovalBinding: ...
 
     def get(self, approval_id: str) -> ApprovalBinding | None: ...
+
+
+class ProjectPolicyRepository(Protocol):
+    """Get-only authoritative Project Registry port for DL-P1.8."""
+
+    def get(self, project_id: str) -> ProjectPolicy | None: ...

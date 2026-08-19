@@ -13,6 +13,7 @@ from .models import (
     ContractValidationError,
     MilestoneContract,
     PhaseContract,
+    ProjectPolicy,
 )
 from .repositories import (
     RepositoryError,
@@ -29,6 +30,7 @@ _REQUIRED_TABLES = frozenset(
         "phases",
         "milestone_contracts",
         "approvals",
+        "project_policies",
     }
 )
 
@@ -66,6 +68,12 @@ def _validate_current_schema(
                 "SELECT version FROM schema_migrations ORDER BY version ASC"
             )
         ]
+        project_policy_columns = connection.execute(
+            "PRAGMA table_xinfo(project_policies)"
+        ).fetchall()
+        project_policy_indexes = connection.execute(
+            "PRAGMA index_list(project_policies)"
+        ).fetchall()
     except RepositoryError:
         raise
     except sqlite3.Error as error:
@@ -75,7 +83,56 @@ def _validate_current_schema(
             identity,
             error,
         )
-    if versions != [1, 2]:
+    if versions != [1, 2, 3]:
+        raise RepositoryError(RepositoryFailureCode.SCHEMA_MISMATCH, entity_name, identity)
+    project_policy_shape = [
+        (
+            row["name"],
+            row["type"].upper(),
+            row["notnull"],
+            row["pk"],
+            row["hidden"],
+        )
+        for row in project_policy_columns
+    ]
+    if project_policy_shape != [
+        ("project_id", "TEXT", 1, 1, 0),
+        ("policy_version", "TEXT", 1, 0, 0),
+        ("project_root", "TEXT", 1, 0, 0),
+    ]:
+        raise RepositoryError(RepositoryFailureCode.SCHEMA_MISMATCH, entity_name, identity)
+
+    primary_key_indexes = [
+        row
+        for row in project_policy_indexes
+        if row["origin"] == "pk"
+    ]
+    if (
+        len(primary_key_indexes) != 1
+        or primary_key_indexes[0]["unique"] != 1
+        or primary_key_indexes[0]["partial"] != 0
+    ):
+        raise RepositoryError(RepositoryFailureCode.SCHEMA_MISMATCH, entity_name, identity)
+
+    try:
+        primary_key_columns = connection.execute(
+            "SELECT seqno, cid, name, desc, coll, key "
+            "FROM pragma_index_xinfo(?) ORDER BY seqno",
+            (primary_key_indexes[0]["name"],),
+        ).fetchall()
+    except sqlite3.Error as error:
+        _raise_repository_error(
+            RepositoryFailureCode.SCHEMA_MISMATCH,
+            entity_name,
+            identity,
+            error,
+        )
+    primary_key_shape = [
+        (row["cid"], row["name"], row["coll"].upper())
+        for row in primary_key_columns
+        if row["key"] == 1 and isinstance(row["coll"], str)
+    ]
+    if primary_key_shape != [(0, "project_id", "BINARY")]:
         raise RepositoryError(RepositoryFailureCode.SCHEMA_MISMATCH, entity_name, identity)
 
 
@@ -523,3 +580,34 @@ class SqliteApprovalBindingRepository:
             KeyError,
         ) as error:
             _raise_payload_error(error, "ApprovalBinding", identity)
+
+
+class SqliteProjectPolicyRepository:
+    """Read-only authoritative access to registered Project Policy v1 rows."""
+
+    def __init__(self, database_path: Path) -> None:
+        self._database_path = Path(database_path)
+
+    def get(self, project_id: str) -> ProjectPolicy | None:
+        project_id = _validate_query_identity(project_id, "ProjectPolicy", "project_id")
+        identity = _identity_text(("project_id", project_id),)
+        row = _fetch_one(
+            self._database_path,
+            "ProjectPolicy",
+            identity,
+            """
+            SELECT project_id, policy_version, project_root
+            FROM project_policies WHERE project_id = ?
+            """,
+            (project_id,),
+        )
+        if row is None:
+            return None
+        try:
+            return ProjectPolicy(
+                project_id=row["project_id"],
+                policy_version=row["policy_version"],
+                project_root=row["project_root"],
+            )
+        except (ContractValidationError, ValueError, TypeError, IndexError, KeyError) as error:
+            _raise_payload_error(error, "ProjectPolicy", identity)

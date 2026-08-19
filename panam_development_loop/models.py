@@ -30,6 +30,12 @@ class ContractVersion(str, Enum):
     V1 = "1"
 
 
+class ProjectPolicyVersion(str, Enum):
+    """The only Project Policy schema version supported by DL-P1.8."""
+
+    V1 = "1"
+
+
 class ContractValidationCode(str, Enum):
     """Stable reasons for rejecting an invalid domain contract."""
 
@@ -75,6 +81,61 @@ def _coerce_contract_version(value: object) -> ContractVersion:
         except ValueError:
             pass
     raise ContractValidationError(ContractValidationCode.UNSUPPORTED_VERSION, "contract_version")
+
+
+def _coerce_project_policy_version(value: object) -> ProjectPolicyVersion:
+    if isinstance(value, ProjectPolicyVersion):
+        return value
+    if isinstance(value, str):
+        try:
+            return ProjectPolicyVersion(value)
+        except ValueError:
+            pass
+    raise ContractValidationError(ContractValidationCode.UNSUPPORTED_VERSION, "policy_version")
+
+
+_WINDOWS_RESERVED_DEVICE_NAMES = frozenset(
+    {"CON", "PRN", "AUX", "NUL", "CONIN$", "CONOUT$"}
+)
+
+
+def _is_reserved_windows_path_segment(segment: str) -> bool:
+    base_name = segment.split(".", 1)[0].rstrip(" ").upper()
+    return base_name in _WINDOWS_RESERVED_DEVICE_NAMES or bool(
+        re.fullmatch(
+            r"(?:COM|LPT)(?:[1-9]|\u00b9|\u00b2|\u00b3)",
+            base_name,
+        )
+    )
+
+
+def _validate_project_root(value: object) -> str:
+    root = _validate_required_text(value, "project_root")
+    if len(root) < 3:
+        raise ContractValidationError(ContractValidationCode.INVALID_PATH, "project_root")
+    ascii_drive_letter = ("A" <= root[0] <= "Z") or ("a" <= root[0] <= "z")
+    if not ascii_drive_letter or root[1] != ":" or root[2] not in "\\/":
+        raise ContractValidationError(ContractValidationCode.INVALID_PATH, "project_root")
+
+    normalized = root.replace("/", "\\")
+    remainder = normalized[3:]
+    if not remainder:
+        return normalized
+    if remainder.endswith("\\"):
+        normalized = normalized[:-1]
+        remainder = remainder[:-1]
+
+    segments = remainder.split("\\")
+    if any(
+        not segment
+        or segment in {".", ".."}
+        or segment[-1] in {" ", "."}
+        or any(character in '<>:"|?*' for character in segment)
+        or _is_reserved_windows_path_segment(segment)
+        for segment in segments
+    ):
+        raise ContractValidationError(ContractValidationCode.INVALID_PATH, "project_root")
+    return normalized
 
 
 def _validate_values(
@@ -227,6 +288,50 @@ class MilestoneContract:
 
     def sha256_digest(self) -> str:
         return hashlib.sha256(self.canonical_json().encode("utf-8")).hexdigest()
+
+
+@dataclass(frozen=True)
+class ProjectPolicy:
+    """The closed, immutable Project Policy v1 value read by DL-P1.8."""
+
+    project_id: str
+    policy_version: ProjectPolicyVersion | str
+    project_root: str
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "project_id", _validate_identity(self.project_id, "project_id"))
+        object.__setattr__(
+            self,
+            "policy_version",
+            _coerce_project_policy_version(self.policy_version),
+        )
+        object.__setattr__(self, "project_root", _validate_project_root(self.project_root))
+
+
+class ProjectPolicyReadOutcome(str, Enum):
+    """Closed public outcomes for a valid-identity Project Registry read."""
+
+    VALID_POLICY = "VALID_POLICY"
+    PROJECT_NOT_REGISTERED = "PROJECT_NOT_REGISTERED"
+    INVALID_POLICY = "INVALID_POLICY"
+    STORAGE_FAILURE = "STORAGE_FAILURE"
+
+
+@dataclass(frozen=True)
+class ProjectPolicyReadResult:
+    """A read outcome carrying a validated policy only when it is valid."""
+
+    outcome: ProjectPolicyReadOutcome
+    policy: ProjectPolicy | None = None
+
+    def __post_init__(self) -> None:
+        if type(self.outcome) is not ProjectPolicyReadOutcome:
+            raise TypeError("outcome")
+        if self.outcome is ProjectPolicyReadOutcome.VALID_POLICY:
+            if type(self.policy) is not ProjectPolicy:
+                raise ValueError("policy")
+        elif self.policy is not None:
+            raise ValueError("policy")
 
 
 class ApprovalVersion(str, Enum):
