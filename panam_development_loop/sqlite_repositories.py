@@ -6,11 +6,14 @@ from pathlib import Path
 from typing import NoReturn
 
 from .models import (
+    AcceptedStateEvent,
     ApprovalBinding,
     ApprovalValidationCode,
     ApprovalValidationError,
     ContractValidationCode,
     ContractValidationError,
+    DevelopmentRun,
+    DevelopmentRunState,
     MilestoneContract,
     PhaseContract,
     ProjectPolicy,
@@ -182,6 +185,52 @@ def _open_connection(
     return connection
 
 
+def _open_read_only_connection(
+    database_path: Path,
+    entity_name: str,
+    identity: str,
+) -> sqlite3.Connection:
+    """Open an existing foundation database with SQLite-enforced read-only mode."""
+
+    try:
+        is_file = database_path.is_file()
+    except OSError as error:
+        _raise_repository_error(
+            RepositoryFailureCode.SQLITE_OPERATIONAL_FAILURE,
+            entity_name,
+            identity,
+            error,
+        )
+    if not is_file:
+        raise RepositoryError(RepositoryFailureCode.SCHEMA_MISMATCH, entity_name, identity)
+
+    try:
+        database_uri = f"{database_path.absolute().as_uri()}?mode=ro"
+        connection = sqlite3.connect(database_uri, uri=True, timeout=0.0)
+    except (OSError, ValueError, sqlite3.Error) as error:
+        _raise_repository_error(
+            RepositoryFailureCode.SQLITE_OPERATIONAL_FAILURE,
+            entity_name,
+            identity,
+            error,
+        )
+    connection.row_factory = sqlite3.Row
+    try:
+        _validate_current_schema(connection, entity_name, identity)
+    except RepositoryError:
+        connection.close()
+        raise
+    except sqlite3.Error as error:
+        connection.close()
+        _raise_repository_error(
+            RepositoryFailureCode.SQLITE_OPERATIONAL_FAILURE,
+            entity_name,
+            identity,
+            error,
+        )
+    return connection
+
+
 def _rollback_if_active(connection: sqlite3.Connection) -> None:
     if connection.in_transaction:
         try:
@@ -252,9 +301,30 @@ def _fetch_one(
     statement: str,
     parameters: tuple[object, ...],
 ) -> sqlite3.Row | None:
-    connection = _open_connection(database_path, entity_name, identity)
+    connection = _open_read_only_connection(database_path, entity_name, identity)
     try:
         return connection.execute(statement, parameters).fetchone()
+    except sqlite3.Error as error:
+        _raise_repository_error(
+            RepositoryFailureCode.SQLITE_OPERATIONAL_FAILURE,
+            entity_name,
+            identity,
+            error,
+        )
+    finally:
+        connection.close()
+
+
+def _fetch_all(
+    database_path: Path,
+    entity_name: str,
+    identity: str,
+    statement: str,
+    parameters: tuple[object, ...],
+) -> list[sqlite3.Row]:
+    connection = _open_read_only_connection(database_path, entity_name, identity)
+    try:
+        return connection.execute(statement, parameters).fetchall()
     except sqlite3.Error as error:
         _raise_repository_error(
             RepositoryFailureCode.SQLITE_OPERATIONAL_FAILURE,
@@ -611,3 +681,94 @@ class SqliteProjectPolicyRepository:
             )
         except (ContractValidationError, ValueError, TypeError, IndexError, KeyError) as error:
             _raise_payload_error(error, "ProjectPolicy", identity)
+
+
+class SqliteDevelopmentRunInspectionRepository:
+    """Read-only SQLite adapter for persisted run facts and accepted events."""
+
+    def __init__(self, database_path: Path) -> None:
+        self._database_path = Path(database_path)
+
+    def get_run(self, run_id: str) -> DevelopmentRun | None:
+        run_id = _validate_query_identity(run_id, "DevelopmentRun", "run_id")
+        identity = _identity_text(("run_id", run_id),)
+        row = _fetch_one(
+            self._database_path,
+            "DevelopmentRun",
+            identity,
+            """
+            SELECT run_id, milestone_contract_digest, current_state, state_version,
+                   created_at, updated_at
+            FROM development_runs WHERE run_id = ?
+            """,
+            (run_id,),
+        )
+        if row is None:
+            return None
+        try:
+            return _decode_development_run(row)
+        except (ValueError, TypeError, IndexError, KeyError) as error:
+            _raise_payload_error(error, "DevelopmentRun", identity)
+
+    def get_history(self, run_id: str) -> list[AcceptedStateEvent]:
+        run_id = _validate_query_identity(run_id, "DevelopmentRun", "run_id")
+        identity = _identity_text(("run_id", run_id),)
+        rows = _fetch_all(
+            self._database_path,
+            "AcceptedStateEvent",
+            identity,
+            """
+            SELECT event_id, run_id, from_state, to_state, transition_reason,
+                   occurred_at, state_version
+            FROM state_events WHERE run_id = ? ORDER BY state_version ASC
+            """,
+            (run_id,),
+        )
+        try:
+            return [_decode_accepted_state_event(row, run_id) for row in rows]
+        except (ValueError, TypeError, IndexError, KeyError) as error:
+            _raise_payload_error(error, "AcceptedStateEvent", identity)
+
+
+def _required_persisted_text(value: object, field_name: str) -> str:
+    if not isinstance(value, str) or not value:
+        raise ValueError(field_name)
+    return value
+
+
+def _required_state_version(value: object, field_name: str, *, minimum: int) -> int:
+    if type(value) is not int or value < minimum:
+        raise ValueError(field_name)
+    return value
+
+
+def _decode_development_run(row: sqlite3.Row) -> DevelopmentRun:
+    return DevelopmentRun(
+        run_id=_required_persisted_text(row["run_id"], "run_id"),
+        milestone_contract_digest=_required_persisted_text(
+            row["milestone_contract_digest"],
+            "milestone_contract_digest",
+        ),
+        current_state=DevelopmentRunState(row["current_state"]),
+        state_version=_required_state_version(row["state_version"], "state_version", minimum=0),
+        created_at=_required_persisted_text(row["created_at"], "created_at"),
+        updated_at=_required_persisted_text(row["updated_at"], "updated_at"),
+    )
+
+
+def _decode_accepted_state_event(row: sqlite3.Row, expected_run_id: str) -> AcceptedStateEvent:
+    run_id = _required_persisted_text(row["run_id"], "run_id")
+    if run_id != expected_run_id:
+        raise ValueError("run_id")
+    return AcceptedStateEvent(
+        event_id=_required_persisted_text(row["event_id"], "event_id"),
+        run_id=run_id,
+        from_state=DevelopmentRunState(row["from_state"]),
+        to_state=DevelopmentRunState(row["to_state"]),
+        transition_reason=_required_persisted_text(
+            row["transition_reason"],
+            "transition_reason",
+        ),
+        occurred_at=_required_persisted_text(row["occurred_at"], "occurred_at"),
+        state_version=_required_state_version(row["state_version"], "state_version", minimum=1),
+    )

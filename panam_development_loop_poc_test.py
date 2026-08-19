@@ -1,5 +1,7 @@
 """Focused deterministic tests for the DL-P1.1 through DL-P1.8 slices."""
 
+import io
+import json
 import os
 import re
 import sqlite3
@@ -8,6 +10,7 @@ import tempfile
 import threading
 import urllib.request
 import unittest
+from contextlib import redirect_stderr, redirect_stdout
 from dataclasses import FrozenInstanceError, fields, replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -74,6 +77,7 @@ from panam_development_loop.sqlite_migrations import (
     apply_migrations,
     validate_migration_registry,
 )
+from panam_development_loop.__main__ import main as foundation_query_main
 
 
 class FixedValues:
@@ -3521,6 +3525,242 @@ class TransitionEvaluationPolicyTest(unittest.TestCase):
             TransitionEvaluationDecision.INVALID,
             TransitionEvaluationReasonCode.REQUEST_SURPLUS_PREREQUISITE,
         )
+
+
+class FoundationQueryCliTest(unittest.TestCase):
+    """Focused DL-P1.9 CLI/query behavior using isolated fixture storage."""
+
+    def setUp(self) -> None:
+        self._temporary_directory = tempfile.TemporaryDirectory()
+        self.directory = Path(self._temporary_directory.name)
+        self.database_path = self.directory / "foundation.sqlite3"
+        SqliteRunStore(self.database_path).initialize("initialized-at")
+
+        self.phase = PhaseContract("panam", "phase-1", "1")
+        self.milestone = MilestoneContract(
+            project_id="panam",
+            phase_id="phase-1",
+            milestone_id="milestone-1",
+            contract_version="1",
+            objective="Inspect durable foundation",
+            scope=("read-only", "query"),
+            exclusions=("writes",),
+            acceptance_criteria=("deterministic",),
+            allowed_paths=("panam_development_loop/foundation_query.py",),
+            forbidden_paths=("runtime",),
+            verification_plan=("focused", "regression"),
+            stop_conditions=("scope change",),
+        )
+        self.approval = ApprovalBinding(
+            approval_id="approval-1",
+            approval_version="1",
+            approval_kind="APPROVAL_1",
+            subject_id="DL-P1.9",
+            subject_digest="a" * 64,
+            target_kind="SOURCE_REPOSITORY",
+            target_id="Panam_APP",
+            target_branch="phase/panam",
+            base_commit="base",
+            allowed_actions=("inspect",),
+            allowed_paths=("panam_development_loop/foundation_query.py",),
+            approver_id="human",
+            approved_at="2026-08-19T12:00:00Z",
+        )
+        SqlitePhaseContractRepository(self.database_path).create(self.phase)
+        SqliteMilestoneContractRepository(self.database_path).create(self.milestone)
+        SqliteApprovalBindingRepository(self.database_path).create(self.approval)
+        self.run = SqliteRunStore(self.database_path).create_run(
+            "run-1",
+            "b" * 64,
+            "created-at",
+        )
+        connection = sqlite3.connect(self.database_path)
+        try:
+            connection.execute(
+                "UPDATE development_runs SET current_state=?, state_version=?, updated_at=? WHERE run_id=?",
+                ("AWAITING_EXECUTION_APPROVAL", 2, "updated-at", "run-1"),
+            )
+            connection.execute(
+                "INSERT INTO state_events VALUES(?, ?, ?, ?, ?, ?, ?)",
+                (
+                    "event-2",
+                    "run-1",
+                    "FEASIBILITY_CHECKING",
+                    "AWAITING_EXECUTION_APPROVAL",
+                    "RULE_ALLOWED",
+                    "event-two-at",
+                    2,
+                ),
+            )
+            connection.execute(
+                "INSERT INTO state_events VALUES(?, ?, ?, ?, ?, ?, ?)",
+                (
+                    "event-1",
+                    "run-1",
+                    "DRAFT",
+                    "FEASIBILITY_CHECKING",
+                    "RULE_ALLOWED",
+                    "event-one-at",
+                    1,
+                ),
+            )
+            connection.execute(
+                "INSERT INTO project_policies VALUES(?, ?, ?)",
+                ("panam", "1", "C:\\workspace\\panam"),
+            )
+            connection.execute(
+                "INSERT INTO project_policies VALUES(?, ?, ?)",
+                ("invalid-policy", "2", "C:\\workspace\\invalid"),
+            )
+            connection.commit()
+        finally:
+            connection.close()
+
+    def tearDown(self) -> None:
+        self._temporary_directory.cleanup()
+
+    @staticmethod
+    def _snapshot(path: Path) -> tuple[str, ...]:
+        connection = sqlite3.connect(path)
+        try:
+            return tuple(connection.iterdump())
+        finally:
+            connection.close()
+
+    def _invoke(self, *arguments: str) -> tuple[int, str, str]:
+        stdout = io.StringIO()
+        stderr = io.StringIO()
+        with redirect_stdout(stdout), redirect_stderr(stderr):
+            code = foundation_query_main(list(arguments))
+        return code, stdout.getvalue(), stderr.getvalue()
+
+    def _base(self, *arguments: str) -> tuple[str, ...]:
+        return ("--db", str(self.database_path), *arguments)
+
+    def test_help_and_all_successful_query_operations(self) -> None:
+        stdout = io.StringIO()
+        with redirect_stdout(stdout), self.assertRaises(SystemExit) as raised:
+            foundation_query_main(["--help"])
+        self.assertEqual(0, raised.exception.code)
+        self.assertIn("project-policy", stdout.getvalue())
+
+        phase_code, phase_text, phase_error = self._invoke(*self._base("phase", "panam", "phase-1"))
+        self.assertEqual((0, ""), (phase_code, phase_error))
+        self.assertEqual(
+            ["project_id: panam", "phase_id: phase-1", "contract_version: 1"],
+            phase_text.splitlines()[:3],
+        )
+
+        milestone_code, milestone_text, milestone_error = self._invoke(
+            *self._base("milestone", "panam", "phase-1", "milestone-1")
+        )
+        self.assertEqual((0, ""), (milestone_code, milestone_error))
+        self.assertIn("scope:\n- query\n- read-only", milestone_text)
+
+        approval_code, approval_text, approval_error = self._invoke(
+            *self._base("approval", "approval-1")
+        )
+        self.assertEqual((0, ""), (approval_code, approval_error))
+        self.assertIn("approval_kind: APPROVAL_1", approval_text)
+
+        run_code, run_text, run_error = self._invoke(*self._base("run", "run-1"))
+        self.assertEqual((0, ""), (run_code, run_error))
+        self.assertLess(run_text.index("- event_id: event-1"), run_text.index("- event_id: event-2"))
+
+        policy_code, policy_text, policy_error = self._invoke(
+            *self._base("project-policy", "panam")
+        )
+        self.assertEqual((0, ""), (policy_code, policy_error))
+        self.assertEqual("result_category: VALID_POLICY", policy_text.splitlines()[0])
+
+    def test_json_is_deterministic_and_semantically_equivalent_to_text(self) -> None:
+        text_code, text_output, text_error = self._invoke(*self._base("phase", "panam", "phase-1"))
+        json_code, json_output, json_error = self._invoke(
+            *self._base("phase", "panam", "phase-1", "--json")
+        )
+        repeated_code, repeated_json, repeated_error = self._invoke(
+            *self._base("--json", "phase", "panam", "phase-1")
+        )
+        self.assertEqual((0, "", 0, "", 0, ""), (
+            text_code,
+            text_error,
+            json_code,
+            json_error,
+            repeated_code,
+            repeated_error,
+        ))
+        self.assertEqual(json_output, repeated_json)
+        self.assertTrue(json_output.endswith("\n"))
+        payload = json.loads(json_output)
+        self.assertEqual(
+            ["project_id", "phase_id", "contract_version", "contract_digest"],
+            list(payload),
+        )
+        self.assertIn(f"project_id: {payload['project_id']}", text_output)
+        self.assertIn(f"contract_digest: {payload['contract_digest']}", text_output)
+
+    def test_project_policy_result_mapping(self) -> None:
+        valid = self._invoke(*self._base("project-policy", "panam"))
+        missing = self._invoke(*self._base("project-policy", "absent"))
+        invalid = self._invoke(*self._base("project-policy", "invalid-policy"))
+        self.assertEqual((0, ""), (valid[0], valid[2]))
+        self.assertEqual((3, "error_code: NOT_FOUND\n"), (missing[0], missing[2]))
+        self.assertEqual(
+            (4, "error_code: INVALID_PERSISTED_FOUNDATION_DATA\n"),
+            (invalid[0], invalid[2]),
+        )
+
+        missing_database = self.directory / "missing.sqlite3"
+        code, stdout, stderr = self._invoke("--db", str(missing_database), "project-policy", "panam")
+        self.assertEqual((5, "", "error_code: STORAGE_FAILURE\n"), (code, stdout, stderr))
+        self.assertFalse(missing_database.exists())
+
+    def test_invalid_input_not_found_and_invalid_persisted_data_mapping(self) -> None:
+        code, stdout, stderr = self._invoke(*self._base("phase", "", "phase-1"))
+        self.assertEqual((2, "", "error_code: INVALID_CLI_INPUT\n"), (code, stdout, stderr))
+
+        code, stdout, stderr = self._invoke(*self._base("approval", "missing"))
+        self.assertEqual((3, "", "error_code: NOT_FOUND\n"), (code, stdout, stderr))
+
+        connection = sqlite3.connect(self.database_path)
+        try:
+            connection.execute("UPDATE phases SET contract_digest=? WHERE project_id=? AND phase_id=?", ("0" * 64, "panam", "phase-1"))
+            connection.commit()
+        finally:
+            connection.close()
+        code, stdout, stderr = self._invoke(*self._base("phase", "panam", "phase-1"))
+        self.assertEqual(
+            (4, "", "error_code: INVALID_PERSISTED_FOUNDATION_DATA\n"),
+            (code, stdout, stderr),
+        )
+
+    def test_query_path_is_read_only_and_never_initializes_or_transitions(self) -> None:
+        before = self._snapshot(self.database_path)
+        with (
+            patch.object(SqliteRunStore, "initialize", side_effect=AssertionError("initialize invoked")) as initialize,
+            patch("panam_development_loop.sqlite_migrations.initialize_database", side_effect=AssertionError("migration invoked")) as initialize_database,
+            patch.object(TransitionService, "transition", side_effect=AssertionError("transition invoked")) as transition,
+            patch.object(SqliteApprovalBindingRepository, "create", side_effect=AssertionError("approval mutation invoked")) as approval_create,
+            patch("subprocess.run", side_effect=AssertionError("subprocess invoked")) as subprocess_run,
+        ):
+            for command in (
+                self._base("phase", "panam", "phase-1"),
+                self._base("milestone", "panam", "phase-1", "milestone-1"),
+                self._base("approval", "approval-1"),
+                self._base("run", "run-1"),
+                self._base("project-policy", "panam"),
+            ):
+                code, _, stderr = self._invoke(*command)
+                self.assertEqual((0, ""), (code, stderr))
+        self.assertEqual(before, self._snapshot(self.database_path))
+        for sentinel in (initialize, initialize_database, transition, approval_create, subprocess_run):
+            sentinel.assert_not_called()
+
+    def test_json_error_output_is_one_value(self) -> None:
+        code, stdout, stderr = self._invoke(*self._base("project-policy", "absent", "--json"))
+        self.assertEqual((3, ""), (code, stdout))
+        self.assertEqual({"error_code": "NOT_FOUND"}, json.loads(stderr))
+        self.assertTrue(stderr.endswith("\n"))
 
 
 if __name__ == "__main__":

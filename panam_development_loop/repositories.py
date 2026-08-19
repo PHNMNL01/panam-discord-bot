@@ -3,7 +3,14 @@
 from enum import Enum
 from typing import Protocol
 
-from .models import ApprovalBinding, MilestoneContract, PhaseContract, ProjectPolicy
+from .models import (
+    AcceptedStateEvent,
+    ApprovalBinding,
+    DevelopmentRun,
+    MilestoneContract,
+    PhaseContract,
+    ProjectPolicy,
+)
 
 
 class RepositoryFailureCode(str, Enum):
@@ -69,3 +76,11 @@ class ProjectPolicyRepository(Protocol):
     """Get-only authoritative Project Registry port for DL-P1.8."""
 
     def get(self, project_id: str) -> ProjectPolicy | None: ...
+
+
+class DevelopmentRunInspectionRepository(Protocol):
+    """Read-only query port for persisted Development Run facts."""
+
+    def get_run(self, run_id: str) -> DevelopmentRun | None: ...
+
+    def get_history(self, run_id: str) -> list[AcceptedStateEvent]: ...
