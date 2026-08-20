@@ -46,6 +46,7 @@ from panam_development_loop import (
     RepositoryEvidenceBinding,
     RepositoryFailureCode,
     SqliteApprovalBindingRepository,
+    SqliteDevelopmentRunInspectionRepository,
     SqliteMilestoneContractRepository,
     SqlitePhaseContractRepository,
     SqliteProjectPolicyRepository,
@@ -3525,6 +3526,403 @@ class TransitionEvaluationPolicyTest(unittest.TestCase):
             TransitionEvaluationDecision.INVALID,
             TransitionEvaluationReasonCode.REQUEST_SURPLUS_PREREQUISITE,
         )
+
+
+class FoundationIntegrationTest(unittest.TestCase):
+    """DL-P1.10 bounded integration coverage over isolated SQLite fixtures."""
+
+    def setUp(self) -> None:
+        self._temporary_directory = tempfile.TemporaryDirectory()
+        self.directory = Path(self._temporary_directory.name)
+        self.database_path = self.directory / "foundation-integration.sqlite3"
+        self.values = FixedValues()
+        self.store = SqliteRunStore(self.database_path)
+        self.service = TransitionService(
+            self.store,
+            clock=self.values.clock,
+            id_factory=self.values.identifier,
+        )
+        self.contract = MilestoneContract(
+            project_id="panam",
+            phase_id="DL-P1",
+            milestone_id="DL-P1.10",
+            contract_version="1",
+            objective="Exercise durable foundation integration",
+            scope=("isolated SQLite", "integration tests"),
+            exclusions=("production changes", "external effects"),
+            acceptance_criteria=("durable transitions", "read-only queries"),
+            allowed_paths=("panam_development_loop_poc_test.py",),
+            forbidden_paths=("panam_development_loop",),
+            verification_plan=("focused tests", "full regression"),
+            stop_conditions=("scope change",),
+        )
+        self.phase = PhaseContract("panam", "DL-P1", "1")
+        self.approval = ApprovalBinding(
+            approval_id="HA1-DL-P1.10-FOUNDATION-INTEGRATION-TESTS-001",
+            approval_version="1",
+            approval_kind="APPROVAL_1",
+            subject_id="DL-P1.10",
+            subject_digest=self.contract.sha256_digest(),
+            target_kind="SOURCE_REPOSITORY",
+            target_id="Panam_APP",
+            target_branch="phase/panam-dl-p1-1-durable-state-transition-kernel-poc",
+            base_commit="4f58aecc7e49ed096a68a553b69241251c894526",
+            allowed_actions=("modify",),
+            allowed_paths=("panam_development_loop_poc_test.py",),
+            approver_id="Human Project Owner",
+            approved_at="2026-08-20T12:00:00Z",
+        )
+
+    def tearDown(self) -> None:
+        self._temporary_directory.cleanup()
+
+    @staticmethod
+    def _snapshot(path: Path) -> tuple[str, ...]:
+        connection = sqlite3.connect(path)
+        try:
+            return tuple(connection.iterdump())
+        finally:
+            connection.close()
+
+    def _initialize_and_create_run(self) -> DevelopmentRun:
+        self.service.initialize()
+        return self.service.create_run(self.contract.sha256_digest())
+
+    def _seed_read_only_foundation(self) -> DevelopmentRun:
+        self.service.initialize()
+        SqlitePhaseContractRepository(self.database_path).create(self.phase)
+        SqliteMilestoneContractRepository(self.database_path).create(self.contract)
+        SqliteApprovalBindingRepository(self.database_path).create(self.approval)
+        run = self.service.create_run(self.contract.sha256_digest())
+        first = self.service.transition(
+            _unconditional_transition_request(run, self.contract)
+        )
+        assert first.persisted_run is not None
+        second = self.service.transition(
+            _evidence_transition_request(first.persisted_run, self.contract)
+        )
+        assert second.persisted_run is not None
+        connection = sqlite3.connect(self.database_path)
+        try:
+            connection.execute(
+                "INSERT INTO project_policies VALUES(?, ?, ?)",
+                ("panam", "1", "C:\\Panam_APP"),
+            )
+            connection.commit()
+        finally:
+            connection.close()
+        reopened = SqliteRunStore(self.database_path).get_run(second.persisted_run.run_id)
+        assert reopened is not None
+        return reopened
+
+    def _invoke_query(self, *arguments: str) -> tuple[int, str, str]:
+        stdout = io.StringIO()
+        stderr = io.StringIO()
+        with redirect_stdout(stdout), redirect_stderr(stderr):
+            code = foundation_query_main(list(arguments))
+        return code, stdout.getvalue(), stderr.getvalue()
+
+    def test_migrations_repositories_and_reopen_preserve_exact_records(self) -> None:
+        self.service.initialize()
+        connection = sqlite3.connect(self.database_path)
+        try:
+            versions = [
+                row[0]
+                for row in connection.execute(
+                    "SELECT version FROM schema_migrations ORDER BY version"
+                )
+            ]
+        finally:
+            connection.close()
+        self.assertEqual([migration.version for migration in PRODUCTION_MIGRATIONS], versions)
+
+        SqlitePhaseContractRepository(self.database_path).create(self.phase)
+        SqliteMilestoneContractRepository(self.database_path).create(self.contract)
+        SqliteApprovalBindingRepository(self.database_path).create(self.approval)
+        policy = ProjectPolicy("panam", "1", "C:\\Panam_APP")
+        connection = sqlite3.connect(self.database_path)
+        try:
+            connection.execute(
+                "INSERT INTO project_policies VALUES(?, ?, ?)",
+                (policy.project_id, policy.policy_version.value, policy.project_root),
+            )
+            connection.commit()
+        finally:
+            connection.close()
+        run = self.store.create_run(
+            "reopen-run", self.contract.sha256_digest(), "2026-08-20T12:00:00Z"
+        )
+
+        self.assertEqual(
+            self.phase,
+            SqlitePhaseContractRepository(self.database_path).get("panam", "DL-P1"),
+        )
+        self.assertEqual(
+            self.contract,
+            SqliteMilestoneContractRepository(self.database_path).get(
+                "panam", "DL-P1", "DL-P1.10"
+            ),
+        )
+        self.assertEqual(
+            self.approval,
+            SqliteApprovalBindingRepository(self.database_path).get(self.approval.approval_id),
+        )
+        self.assertEqual(policy, SqliteProjectPolicyRepository(self.database_path).get("panam"))
+        self.assertEqual(
+            ProjectPolicyReadOutcome.VALID_POLICY,
+            ProjectPolicyReader(SqliteProjectPolicyRepository(self.database_path)).read(
+                "panam"
+            ).outcome,
+        )
+        reopened = SqliteRunStore(self.database_path)
+        self.assertEqual(run, reopened.get_run(run.run_id))
+        self.assertEqual([], reopened.get_history(run.run_id))
+
+    def test_two_registered_rules_commit_durable_ordered_history(self) -> None:
+        self.service.initialize()
+        SqlitePhaseContractRepository(self.database_path).create(self.phase)
+        SqliteMilestoneContractRepository(self.database_path).create(self.contract)
+        created_run = self.service.create_run(self.contract.sha256_digest())
+        run = SqliteRunStore(self.database_path).get_run(created_run.run_id)
+        reloaded_contract = SqliteMilestoneContractRepository(self.database_path).get(
+            "panam", "DL-P1", "DL-P1.10"
+        )
+        assert run is not None
+        assert reloaded_contract is not None
+        first = self.service.transition(
+            _unconditional_transition_request(run, reloaded_contract)
+        )
+        self.assertTrue(first.committed)
+        self.assertEqual(TransactionalTransitionReasonCode.COMMITTED, first.reason_code)
+        self.assertEqual(TransitionEvaluationDecision.ALLOWED, first.evaluation_result.decision)
+        self.assertEqual(
+            TransitionRuleId.P1_6_DRAFT_TO_FEASIBILITY_CHECKING_V1,
+            first.evaluation_result.rule_id,
+        )
+        self.assertEqual(DevelopmentRunState.FEASIBILITY_CHECKING, first.persisted_run.current_state)
+
+        assert first.persisted_run is not None
+        second = self.service.transition(
+            _evidence_transition_request(first.persisted_run, reloaded_contract)
+        )
+        self.assertTrue(second.committed)
+        self.assertEqual(TransactionalTransitionReasonCode.COMMITTED, second.reason_code)
+        self.assertEqual(TransitionEvaluationDecision.ALLOWED, second.evaluation_result.decision)
+        self.assertEqual(
+            TransitionRuleId.P1_6_FEASIBILITY_CHECKING_TO_AWAITING_EXECUTION_APPROVAL_V1,
+            second.evaluation_result.rule_id,
+        )
+        self.assertEqual(
+            DevelopmentRunState.AWAITING_EXECUTION_APPROVAL,
+            second.persisted_run.current_state,
+        )
+
+        reopened = SqliteRunStore(self.database_path)
+        self.assertEqual(second.persisted_run, reopened.get_run(run.run_id))
+        history = reopened.get_history(run.run_id)
+        self.assertEqual([1, 2], [event.state_version for event in history])
+        self.assertEqual(
+            [DevelopmentRunState.DRAFT, DevelopmentRunState.FEASIBILITY_CHECKING],
+            [event.from_state for event in history],
+        )
+        self.assertEqual(
+            [
+                DevelopmentRunState.FEASIBILITY_CHECKING,
+                DevelopmentRunState.AWAITING_EXECUTION_APPROVAL,
+            ],
+            [event.to_state for event in history],
+        )
+        self.assertEqual(
+            [TransitionEvaluationReasonCode.RULE_ALLOWED.value] * 2,
+            [event.transition_reason for event in history],
+        )
+
+    def test_gated_denied_invalid_and_unsupported_requests_have_zero_writes(self) -> None:
+        run = self._initialize_and_create_run()
+        gated_run = self.service.transition(
+            _unconditional_transition_request(run, self.contract)
+        )
+        assert gated_run.persisted_run is not None
+        before = self._snapshot(self.database_path)
+        requests = (
+            (
+                replace(
+                    _evidence_transition_request(gated_run.persisted_run, self.contract),
+                    evidence_snapshots=(),
+                ),
+                TransitionEvaluationDecision.GATED,
+                TransitionEvaluationReasonCode.EVIDENCE_REQUIRED,
+            ),
+            (
+                TransitionEvaluationRequest(
+                    evaluation_version="1",
+                    run=run,
+                    rule_id=TransitionRuleId.P1_6_DRAFT_TO_FEASIBILITY_CHECKING_V1.value,
+                    requested_state=DevelopmentRunState.AWAITING_EXECUTION_APPROVAL,
+                    edge_type=WorkflowEdgeType.UNCONDITIONAL,
+                ),
+                TransitionEvaluationDecision.DENIED,
+                TransitionEvaluationReasonCode.REGISTRY_NO_REGISTERED_TRANSITION,
+            ),
+            (
+                object(),
+                TransitionEvaluationDecision.INVALID,
+                TransitionEvaluationReasonCode.REQUEST_NOT_EVALUATION_REQUEST,
+            ),
+            (
+                _unconditional_transition_request(
+                    run, self.contract, evaluation_version="2"
+                ),
+                TransitionEvaluationDecision.UNSUPPORTED,
+                TransitionEvaluationReasonCode.EVALUATION_VERSION_UNSUPPORTED,
+            ),
+        )
+        with patch.object(
+            self.store, "_connect", side_effect=AssertionError("persistence invoked")
+        ) as connect:
+            for request, decision, reason in requests:
+                with self.subTest(decision=decision):
+                    result = self.service.transition(request)
+                    self.assertFalse(result.committed)
+                    self.assertEqual(
+                        TransactionalTransitionReasonCode.EVALUATION_NOT_ALLOWED,
+                        result.reason_code,
+                    )
+                    self.assertEqual(decision, result.evaluation_result.decision)
+                    self.assertEqual(reason, result.evaluation_result.reason_code)
+                    self.assertFalse(result.evaluation_result.side_effects_performed)
+        connect.assert_not_called()
+        self.assertEqual(before, self._snapshot(self.database_path))
+
+    def test_stale_and_compare_and_swap_rejections_leave_no_partial_write(self) -> None:
+        run = self._initialize_and_create_run()
+        connection = sqlite3.connect(self.database_path)
+        try:
+            connection.execute(
+                "UPDATE development_runs SET updated_at=? WHERE run_id=?",
+                ("2026-08-20T12:03:00Z", run.run_id),
+            )
+            connection.commit()
+        finally:
+            connection.close()
+        before_stale = self._snapshot(self.database_path)
+        stale = self.service.transition(_unconditional_transition_request(run, self.contract))
+        self.assertFalse(stale.committed)
+        self.assertEqual(
+            TransactionalTransitionReasonCode.STALE_PERSISTED_RUN, stale.reason_code
+        )
+        self.assertEqual(TransitionEvaluationDecision.ALLOWED, stale.evaluation_result.decision)
+        self.assertEqual(before_stale, self._snapshot(self.database_path))
+        self.assertEqual([], self.store.get_history(run.run_id))
+
+        current = self.store.get_run(run.run_id)
+        assert current is not None
+        proxy = _ConnectionProxy(self.store._connect(), zero_update=True)
+        before_compare_and_swap = self._snapshot(self.database_path)
+        with patch.object(self.store, "_connect", return_value=proxy):
+            compare_and_swap = self.service.transition(
+                _unconditional_transition_request(current, self.contract)
+            )
+        self.assertFalse(compare_and_swap.committed)
+        self.assertEqual(
+            TransactionalTransitionReasonCode.STALE_PERSISTED_RUN,
+            compare_and_swap.reason_code,
+        )
+        self.assertEqual(
+            TransitionEvaluationDecision.ALLOWED,
+            compare_and_swap.evaluation_result.decision,
+        )
+        self.assertEqual(1, proxy.rollback_calls)
+        self.assertEqual(1, proxy.close_calls)
+        self.assertEqual(before_compare_and_swap, self._snapshot(self.database_path))
+        self.assertEqual([], self.store.get_history(run.run_id))
+
+    def test_sqlite_event_constraint_failure_rolls_back_state_update(self) -> None:
+        self.service.initialize()
+        run = self.store.create_run(
+            "constraint-run", self.contract.sha256_digest(), "2026-08-20T12:00:00Z"
+        )
+        connection = sqlite3.connect(self.database_path)
+        try:
+            connection.execute(
+                """
+                INSERT INTO state_events(
+                    event_id, run_id, from_state, to_state, transition_reason,
+                    occurred_at, state_version
+                ) VALUES(?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    "run-1",
+                    run.run_id,
+                    DevelopmentRunState.DRAFT.value,
+                    DevelopmentRunState.FEASIBILITY_CHECKING.value,
+                    TransitionEvaluationReasonCode.RULE_ALLOWED.value,
+                    "2026-08-20T12:01:00Z",
+                    99,
+                ),
+            )
+            connection.commit()
+        finally:
+            connection.close()
+        before = self._snapshot(self.database_path)
+
+        with self.assertRaises(sqlite3.IntegrityError):
+            self.service.transition(_unconditional_transition_request(run, self.contract))
+
+        self.assertEqual(before, self._snapshot(self.database_path))
+        self.assertEqual(run, self.store.get_run(run.run_id))
+        self.assertEqual([99], [event.state_version for event in self.store.get_history(run.run_id)])
+
+    def test_p1_8_and_p1_9_read_paths_are_integration_read_only(self) -> None:
+        run = self._seed_read_only_foundation()
+        before = self._snapshot(self.database_path)
+        phase_repository = SqlitePhaseContractRepository(self.database_path)
+        milestone_repository = SqliteMilestoneContractRepository(self.database_path)
+        approval_repository = SqliteApprovalBindingRepository(self.database_path)
+        policy_repository = SqliteProjectPolicyRepository(self.database_path)
+        inspection_repository = SqliteDevelopmentRunInspectionRepository(self.database_path)
+        with (
+            patch.object(SqliteRunStore, "initialize", side_effect=AssertionError("bootstrap invoked")) as initialize,
+            patch("panam_development_loop.sqlite_migrations.initialize_database", side_effect=AssertionError("migration invoked")) as initialize_database,
+            patch.object(SqlitePhaseContractRepository, "create", side_effect=AssertionError("phase create invoked")) as phase_create,
+            patch.object(SqliteMilestoneContractRepository, "create", side_effect=AssertionError("milestone create invoked")) as milestone_create,
+            patch.object(SqliteApprovalBindingRepository, "create", side_effect=AssertionError("approval create invoked")) as approval_create,
+            patch.object(TransitionService, "transition", side_effect=AssertionError("transition invoked")) as transition,
+            patch("subprocess.run", side_effect=AssertionError("subprocess invoked")) as subprocess_run,
+            patch("os.system", side_effect=AssertionError("os system invoked")) as os_system,
+            patch("urllib.request.urlopen", side_effect=AssertionError("external request invoked")) as urlopen,
+        ):
+            self.assertEqual(self.phase, phase_repository.get("panam", "DL-P1"))
+            self.assertEqual(
+                self.contract,
+                milestone_repository.get("panam", "DL-P1", "DL-P1.10"),
+            )
+            self.assertEqual(self.approval, approval_repository.get(self.approval.approval_id))
+            self.assertEqual(ProjectPolicy("panam", "1", "C:\\Panam_APP"), policy_repository.get("panam"))
+            self.assertEqual(run, inspection_repository.get_run(run.run_id))
+            self.assertEqual([1, 2], [event.state_version for event in inspection_repository.get_history(run.run_id)])
+            for arguments in (
+                ("phase", "panam", "DL-P1"),
+                ("milestone", "panam", "DL-P1", "DL-P1.10"),
+                ("approval", self.approval.approval_id),
+                ("run", run.run_id),
+                ("project-policy", "panam"),
+            ):
+                code, _, stderr = self._invoke_query("--db", str(self.database_path), *arguments)
+                self.assertEqual((0, ""), (code, stderr))
+        self.assertEqual(before, self._snapshot(self.database_path))
+        for sentinel in (
+            initialize,
+            initialize_database,
+            phase_create,
+            milestone_create,
+            approval_create,
+            transition,
+            subprocess_run,
+            os_system,
+            urlopen,
+        ):
+            sentinel.assert_not_called()
 
 
 class FoundationQueryCliTest(unittest.TestCase):
