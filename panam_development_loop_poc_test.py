@@ -1,6 +1,8 @@
 """Focused deterministic tests for the DL-P1.1 through DL-P1.8 slices."""
 
 import io
+import hashlib
+import inspect
 import json
 import os
 import re
@@ -11,10 +13,15 @@ import threading
 import urllib.request
 import unittest
 from contextlib import redirect_stderr, redirect_stdout
-from dataclasses import FrozenInstanceError, fields, replace
-from datetime import datetime, timedelta, timezone
+from dataclasses import MISSING, FrozenInstanceError, fields, replace
+from datetime import datetime, timedelta, timezone, tzinfo
+from decimal import Decimal
 from pathlib import Path
-from unittest.mock import patch
+from typing import Callable, get_type_hints
+from uuid import UUID
+from unittest.mock import Mock, patch
+
+import panam_development_loop.sqlite_repositories as sqlite_repository_module
 
 from panam_development_loop import (
     ApprovalBinding,
@@ -25,11 +32,14 @@ from panam_development_loop import (
     ApprovalValidationCode,
     ApprovalValidationError,
     ApprovalVersion,
+    CommandDefinition,
+    CommandDefinitionRegistry,
     DevelopmentRun,
     ContractValidationCode,
     ContractValidationError,
     ContractVersion,
     DevelopmentRunState,
+    DurableCommandQueueService,
     EscalationTrigger,
     EvidenceKind,
     EvidenceSnapshot,
@@ -45,12 +55,16 @@ from panam_development_loop import (
     RepositoryError,
     RepositoryEvidenceBinding,
     RepositoryFailureCode,
+    QueueMutationKind,
+    QueueResult,
+    QueueResultCode,
     SqliteApprovalBindingRepository,
     SqliteDevelopmentRunInspectionRepository,
     SqliteMilestoneContractRepository,
     SqlitePhaseContractRepository,
     SqliteProjectPolicyRepository,
     SqliteRunStore,
+    SqliteWorkflowCommandRepository,
     SnapshotProducerKind,
     TransactionalTransitionReasonCode,
     TransactionalTransitionResult,
@@ -68,7 +82,21 @@ from panam_development_loop import (
     TransitionRuleValidationCode,
     TransitionRuleValidationError,
     WorkflowEdgeType,
+    WorkflowCommand,
+    WorkflowCommandEvent,
+    WorkflowCommandEventKind,
+    WorkflowCommandRepository,
+    WorkflowCommandState,
     WorkflowNodeType,
+    ValidatedCommandEnvelope,
+)
+from panam_development_loop.command_queue import _format_queue_timestamp
+from panam_development_loop.models import (
+    _canonical_json,
+    _canonical_queue_payload,
+    _intent_digest,
+    _parse_queue_timestamp,
+    _validate_payload_object,
 )
 from panam_development_loop.sqlite_migrations import (
     Migration,
@@ -1232,7 +1260,7 @@ class SqliteMigrationTest(unittest.TestCase):
         SqliteRunStore(path).initialize("first-at")
         connection = self._connection(path)
         try:
-            self.assertEqual([(1, "first-at"), (2, "first-at"), (3, "first-at")], self._ledger_snapshot(connection))
+            self.assertEqual([(1, "first-at"), (2, "first-at"), (3, "first-at"), (4, "first-at")], self._ledger_snapshot(connection))
             self.assertEqual(
                 [
                     "approvals",
@@ -1242,6 +1270,8 @@ class SqliteMigrationTest(unittest.TestCase):
                     "project_policies",
                     "schema_migrations",
                     "state_events",
+                    "workflow_command_events",
+                    "workflow_commands",
                 ],
                 [row["name"] for row in connection.execute(
                     "SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%' ORDER BY name"
@@ -1293,7 +1323,7 @@ class SqliteMigrationTest(unittest.TestCase):
             for table_name, table_sql in before_schema.items():
                 self.assertEqual(table_sql, after_schema[table_name])
             self.assertEqual(
-                [(1, "legacy-applied-at"), (2, "new-at"), (3, "new-at")],
+                [(1, "legacy-applied-at"), (2, "new-at"), (3, "new-at"), (4, "new-at")],
                 self._ledger_snapshot(connection),
             )
             self.assertEqual(before_runs, [tuple(row) for row in connection.execute("SELECT * FROM development_runs")])
@@ -1415,7 +1445,7 @@ class SqliteMigrationTest(unittest.TestCase):
             malformed.commit()
             self.assertEqual(MigrationFailureCode.INVALID_APPLIED_HISTORY, self._assert_history_rejected_without_mutation(malformed).code)
             future.execute("CREATE TABLE schema_migrations (version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL)")
-            future.execute("INSERT INTO schema_migrations VALUES(4, 'future-at')")
+            future.execute("INSERT INTO schema_migrations VALUES(5, 'future-at')")
             future.commit()
             self.assertEqual(MigrationFailureCode.UNKNOWN_FUTURE_VERSION, self._assert_history_rejected_without_mutation(future).code)
         finally:
@@ -1726,7 +1756,7 @@ class SqliteRepositoryTest(unittest.TestCase):
         SqliteRunStore(future).initialize("at")
         connection = sqlite3.connect(future)
         try:
-            connection.execute("INSERT INTO schema_migrations VALUES(4, 'future')")
+            connection.execute("INSERT INTO schema_migrations VALUES(5, 'future')")
             connection.commit()
         finally:
             connection.close()
@@ -1825,7 +1855,7 @@ class SqliteMigrationTwoTest(unittest.TestCase):
             PRODUCTION_MIGRATIONS,
             require_production_version=True,
         )
-        self.assertEqual([1, 2, 3], [migration.version for migration in validated])
+        self.assertEqual([1, 2, 3, 4], [migration.version for migration in validated])
         self.assertIn("base_commit", PRODUCTION_MIGRATIONS[1].statements[2])
         for identifier in ("base_commit", "commit_hash", "rollback_reason"):
             with self.subTest(identifier=identifier):
@@ -1865,7 +1895,7 @@ class SqliteMigrationTwoTest(unittest.TestCase):
                 )
             ]
             self.assertEqual(
-                ["approvals", "development_runs", "milestone_contracts", "phases", "project_policies", "schema_migrations", "state_events"],
+                ["approvals", "development_runs", "milestone_contracts", "phases", "project_policies", "schema_migrations", "state_events", "workflow_command_events", "workflow_commands"],
                 tables,
             )
             foreign_keys = connection.execute("PRAGMA foreign_key_list(milestone_contracts)").fetchall()
@@ -2063,7 +2093,7 @@ class ProjectPolicyReadOnlyFoundationTest(unittest.TestCase):
         connection = sqlite3.connect(self.database_path)
         try:
             self.assertEqual(
-                [(1, "initialized-at"), (2, "initialized-at"), (3, "initialized-at")],
+                [(1, "initialized-at"), (2, "initialized-at"), (3, "initialized-at"), (4, "initialized-at")],
                 connection.execute(
                     "SELECT version, applied_at FROM schema_migrations ORDER BY version"
                 ).fetchall(),
@@ -2154,7 +2184,7 @@ class ProjectPolicyReadOnlyFoundationTest(unittest.TestCase):
             )
             self.assertEqual(0, connection.execute("SELECT COUNT(*) FROM project_policies").fetchone()[0])
             self.assertEqual(
-                [(1,), (2,), (3,)],
+                [(1,), (2,), (3,), (4,)],
                 [tuple(row) for row in connection.execute("SELECT version FROM schema_migrations ORDER BY version")],
             )
         finally:
@@ -2295,7 +2325,7 @@ class ProjectPolicyReadOnlyFoundationTest(unittest.TestCase):
         SqliteRunStore(future_path).initialize("at")
         connection = sqlite3.connect(future_path)
         try:
-            connection.execute("INSERT INTO schema_migrations VALUES(4, 'future-at')")
+            connection.execute("INSERT INTO schema_migrations VALUES(5, 'future-at')")
             connection.commit()
         finally:
             connection.close()
@@ -4159,6 +4189,2319 @@ class FoundationQueryCliTest(unittest.TestCase):
         self.assertEqual((3, ""), (code, stdout))
         self.assertEqual({"error_code": "NOT_FOUND"}, json.loads(stderr))
         self.assertTrue(stderr.endswith("\n"))
+
+
+def _queue_payload_validator(payload: dict[str, object]) -> str:
+    return _canonical_json(payload)
+
+
+def _queue_definition() -> CommandDefinition:
+    return CommandDefinition(
+        command_kind="TEST_COMMAND",
+        command_schema_version=1,
+        required_keys=("value",),
+        optional_keys=("note",),
+        nullable_keys=("note",),
+        payload_validator=_queue_payload_validator,
+    )
+
+
+def _queue_envelope(
+    payload: dict[str, object] | None = None,
+    *,
+    project_id: str = "panam",
+    idempotency_key: str = "key-1",
+    priority: int = 0,
+) -> ValidatedCommandEnvelope:
+    value = {"value": 1} if payload is None else payload
+    payload_json = _canonical_json(value)
+    digest_payload = {
+        "command_kind": "TEST_COMMAND",
+        "command_schema_version": 1,
+        "development_run_id": None,
+        "payload": value,
+        "phase_id": None,
+        "priority": priority,
+        "project_id": project_id,
+    }
+    digest = hashlib.sha256(
+        _canonical_json(digest_payload).encode("utf-8")
+    ).hexdigest()
+    return ValidatedCommandEnvelope(
+        project_id=project_id,
+        development_run_id=None,
+        phase_id=None,
+        command_kind="TEST_COMMAND",
+        command_schema_version=1,
+        payload_json=payload_json,
+        intent_digest=digest,
+        idempotency_key=idempotency_key,
+        priority=priority,
+    )
+
+
+def _pending_queue_command() -> WorkflowCommand:
+    envelope = _queue_envelope()
+    return WorkflowCommand(
+        1,
+        "00000000-0000-0000-0000-000000000001",
+        envelope.project_id,
+        None,
+        None,
+        envelope.command_kind,
+        envelope.command_schema_version,
+        envelope.payload_json,
+        envelope.intent_digest,
+        envelope.idempotency_key,
+        envelope.priority,
+        WorkflowCommandState.PENDING,
+        1,
+        0,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        "2026-08-24T12:00:00.000000Z",
+        "2026-08-24T12:00:00.000000Z",
+        None,
+        None,
+    )
+
+
+def _enqueue_event(command: WorkflowCommand) -> WorkflowCommandEvent:
+    return WorkflowCommandEvent(
+        1,
+        "00000000-0000-0000-0000-000000000002",
+        command.command_id,
+        WorkflowCommandEventKind.ENQUEUED,
+        None,
+        WorkflowCommandState.PENDING,
+        None,
+        1,
+        "tester",
+        command.created_at,
+        None,
+        None,
+        0,
+        None,
+    )
+
+
+class QueueProviders:
+    def __init__(self) -> None:
+        self.current = datetime(2026, 8, 24, 12, 0, tzinfo=timezone.utc)
+        self.clock_calls = 0
+        self.id_calls = 0
+
+    def clock(self) -> datetime:
+        self.clock_calls += 1
+        return self.current
+
+    def identifier(self) -> str:
+        self.id_calls += 1
+        return str(UUID(int=self.id_calls))
+
+
+class DeterministicFallbackTimezone(tzinfo):
+    def utcoffset(self, value: datetime | None) -> timedelta | None:
+        if value is None:
+            return timedelta(hours=2)
+        return timedelta(hours=2 if value.hour < 3 else 1)
+
+    def dst(self, value: datetime | None) -> timedelta | None:
+        return timedelta(0)
+
+
+class WorkflowCommandPublicContractTest(unittest.TestCase):
+    def test_exact_enum_vocabularies(self) -> None:
+        expected = {
+            WorkflowCommandState: ("PENDING", "CLAIMED", "RUNNING", "SUCCEEDED", "FAILED", "CANCELLED"),
+            WorkflowCommandEventKind: ("ENQUEUED", "CLAIMED", "LEASE_RENEWED", "STARTED", "CANCELLATION_REQUESTED", "CANCELLED", "EXPIRED_CLAIM_RELEASED", "SUCCEEDED", "FAILED"),
+            QueueMutationKind: ("ENQUEUE", "CLAIM_NEXT", "RENEW_LEASE", "MARK_RUNNING", "REQUEST_CANCELLATION", "ACKNOWLEDGE_CANCELLATION", "MARK_SUCCEEDED", "MARK_FAILED", "RECOVER_EXPIRED_CLAIM"),
+            QueueResultCode: ("APPLIED", "FOUND", "NOT_FOUND", "LISTED", "HISTORY_RETURNED", "NO_ELIGIBLE_COMMAND", "EXISTING_IDENTICAL", "IDEMPOTENCY_CONFLICT", "CAS_CONFLICT", "LEASE_OWNER_MISMATCH", "LEASE_EXPIRED", "LEASE_NOT_EXPIRED", "CANCELLATION_ALREADY_REQUESTED", "CANCELLATION_NOT_REQUESTED", "TERMINAL_OBSERVED", "TRANSIENT_CONTENTION", "RECONCILIATION_REQUIRED"),
+        }
+        for enum_type, names in expected.items():
+            with self.subTest(enum=enum_type.__name__):
+                self.assertEqual(names, tuple(item.name for item in enum_type))
+                self.assertEqual(names, tuple(item.value for item in enum_type))
+
+    def test_exact_public_dataclass_fields_defaults_and_frozen_behavior(self) -> None:
+        expected = {
+            WorkflowCommand: ("queue_sequence", "command_id", "project_id", "development_run_id", "phase_id", "command_kind", "command_schema_version", "payload_json", "intent_digest", "idempotency_key", "priority", "state", "state_version", "claim_count", "lease_owner", "lease_acquired_at", "lease_expires_at", "cancellation_requested_at", "cancellation_requested_by", "cancellation_reason_code", "failure_code", "created_at", "updated_at", "started_at", "completed_at"),
+            WorkflowCommandEvent: ("event_sequence", "event_id", "command_id", "event_kind", "prior_state", "next_state", "prior_state_version", "next_state_version", "actor_id", "occurred_at", "lease_owner", "lease_expires_at", "claim_count", "reason_code"),
+            ValidatedCommandEnvelope: ("project_id", "development_run_id", "phase_id", "command_kind", "command_schema_version", "payload_json", "intent_digest", "idempotency_key", "priority"),
+            QueueResult: ("code", "mutation_kind", "command", "event", "commands", "events"),
+            CommandDefinition: ("command_kind", "command_schema_version", "required_keys", "optional_keys", "nullable_keys", "payload_validator"),
+        }
+        for model, names in expected.items():
+            with self.subTest(model=model.__name__):
+                self.assertEqual(names, tuple(item.name for item in fields(model)))
+        command = _pending_queue_command()
+        self.assertEqual(command, _pending_queue_command())
+        self.assertIsInstance(hash(command), int)
+        with self.assertRaises(FrozenInstanceError):
+            command.state = WorkflowCommandState.CLAIMED  # type: ignore[misc]
+        self.assertEqual(
+            (QueueResultCode.NOT_FOUND, None, None, None, (), ()),
+            tuple(getattr(QueueResult(QueueResultCode.NOT_FOUND), item.name) for item in fields(QueueResult)),
+        )
+
+    def test_models_require_exact_enums_and_validate_cross_fields(self) -> None:
+        command = _pending_queue_command()
+        with self.assertRaises(TypeError):
+            replace(command, state="PENDING")
+        with self.assertRaises(ValueError):
+            replace(command, state=WorkflowCommandState.CLAIMED)
+        event = _enqueue_event(command)
+        with self.assertRaises(TypeError):
+            replace(event, event_kind="ENQUEUED")
+        with self.assertRaises(ValueError):
+            replace(event, claim_count=1)
+
+    def test_timestamp_and_payload_boundaries(self) -> None:
+        self.assertEqual(
+            "2026-08-24T10:00:00.000000Z",
+            _format_queue_timestamp(
+                datetime(2026, 8, 24, 12, 0, tzinfo=timezone(timedelta(hours=2)))
+            ),
+        )
+        with self.assertRaises(ValueError):
+            _format_queue_timestamp(datetime(2026, 8, 24, 12, 0))
+        with self.assertRaises(ValueError):
+            _queue_envelope({"ShElL": "echo"})
+        with self.assertRaises(TypeError):
+            _queue_envelope({"value": 1.5})
+        with self.assertRaises(ValueError):
+            _queue_envelope({"value": "x" * 4097})
+        _queue_envelope({"value": "x" * 4096})
+
+    def test_envelope_is_canonical_digest_bound_and_deeply_immutable(self) -> None:
+        payload = {"value": 1, "note": "é"}
+        envelope = _queue_envelope(payload)
+        original_json = envelope.payload_json
+        payload["value"] = 2
+        self.assertEqual(original_json, envelope.payload_json)
+        self.assertEqual('{"note":"é","value":1}', envelope.payload_json)
+        with self.assertRaises(ValueError):
+            replace(envelope, payload_json='{"value":1, "note":"é"}')
+        with self.assertRaises(ValueError):
+            replace(envelope, intent_digest="0" * 64)
+
+    def test_queue_result_shapes_and_event_binding(self) -> None:
+        command = _pending_queue_command()
+        event = _enqueue_event(command)
+        QueueResult(QueueResultCode.APPLIED, QueueMutationKind.ENQUEUE, command, event)
+        QueueResult(QueueResultCode.FOUND, command=command)
+        QueueResult(QueueResultCode.LISTED, commands=(command,))
+        QueueResult(QueueResultCode.HISTORY_RETURNED, events=(event,))
+        QueueResult(QueueResultCode.EXISTING_IDENTICAL, QueueMutationKind.ENQUEUE, command=command)
+        QueueResult(QueueResultCode.NO_ELIGIBLE_COMMAND, QueueMutationKind.CLAIM_NEXT)
+        for invalid in (
+            lambda: QueueResult(QueueResultCode.APPLIED, QueueMutationKind.ENQUEUE),
+            lambda: QueueResult(QueueResultCode.FOUND),
+            lambda: QueueResult(QueueResultCode.HISTORY_RETURNED),
+            lambda: QueueResult(QueueResultCode.NO_ELIGIBLE_COMMAND, QueueMutationKind.ENQUEUE),
+            lambda: QueueResult(QueueResultCode.EXISTING_IDENTICAL, QueueMutationKind.ENQUEUE, command=command, event=event),
+        ):
+            with self.subTest(invalid=invalid):
+                with self.assertRaises(ValueError):
+                    invalid()
+
+    def test_exact_public_field_types_defaults_and_value_semantics(self) -> None:
+        expected_types = {
+            WorkflowCommand: (
+                int, str, str, str | None, str | None, str, int, str, str, str,
+                int, WorkflowCommandState, int, int, str | None, str | None,
+                str | None, str | None, str | None, str | None, str | None, str,
+                str, str | None, str | None,
+            ),
+            WorkflowCommandEvent: (
+                int, str, str, WorkflowCommandEventKind, WorkflowCommandState | None,
+                WorkflowCommandState, int | None, int, str, str, str | None,
+                str | None, int, str | None,
+            ),
+            ValidatedCommandEnvelope: (
+                str, str | None, str | None, str, int, str, str, str, int,
+            ),
+            QueueResult: (
+                QueueResultCode, QueueMutationKind | None, WorkflowCommand | None,
+                WorkflowCommandEvent | None, tuple[WorkflowCommand, ...],
+                tuple[WorkflowCommandEvent, ...],
+            ),
+            CommandDefinition: (
+                str, int, tuple[str, ...], tuple[str, ...], tuple[str, ...],
+                Callable[[dict[str, object]], str],
+            ),
+        }
+        for model, annotations in expected_types.items():
+            with self.subTest(model=model.__name__):
+                hints = get_type_hints(model)
+                self.assertEqual(annotations, tuple(hints[item.name] for item in fields(model)))
+                defaults = tuple(item.default for item in fields(model))
+                if model is QueueResult:
+                    self.assertEqual((MISSING, None, None, None, (), ()), defaults)
+                else:
+                    self.assertTrue(all(value is MISSING for value in defaults))
+        values = (
+            _pending_queue_command(),
+            _enqueue_event(_pending_queue_command()),
+            _queue_envelope(),
+            QueueResult(QueueResultCode.NOT_FOUND),
+            _queue_definition(),
+        )
+        for value in values:
+            with self.subTest(value=type(value).__name__):
+                self.assertEqual(value, replace(value))
+                with self.assertRaises(FrozenInstanceError):
+                    setattr(value, fields(value)[0].name, None)
+        for value in values[:3]:
+            self.assertIsInstance(hash(value), int)
+
+    def test_timestamp_parser_width_calendar_round_trip_and_order(self) -> None:
+        valid = (
+            "0001-01-01T00:00:00.000000Z",
+            "2026-08-24T12:00:00.000001Z",
+            "2026-08-24T12:01:00.000000Z",
+            "9999-12-31T23:59:59.999999Z",
+        )
+        parsed = tuple(_parse_queue_timestamp(value, "time") for value in valid)
+        self.assertEqual(tuple(sorted(valid)), valid)
+        self.assertEqual(tuple(sorted(parsed)), parsed)
+        for value, instant in zip(valid, parsed):
+            self.assertEqual(27, len(value.encode("ascii")))
+            self.assertEqual(value, _format_queue_timestamp(instant))
+        for invalid in (
+            "2026-08-24T12:00:00Z",
+            "2026-08-24T12:00:00.00000Z",
+            "2026-08-24T12:00:00.000000+00:00",
+            "2026/08/24T12:00:00.000000Z",
+            "2026-02-30T12:00:00.000000Z",
+            "",
+        ):
+            with self.subTest(invalid=invalid), self.assertRaises(ValueError):
+                _parse_queue_timestamp(invalid, "time")
+        with self.assertRaises(TypeError):
+            _parse_queue_timestamp(datetime.now(timezone.utc), "time")
+
+        class OverflowingTimezone(tzinfo):
+            def utcoffset(self, value: datetime | None) -> timedelta | None:
+                raise OverflowError("invalid offset")
+
+            def dst(self, value: datetime | None) -> timedelta | None:
+                return None
+
+        with self.assertRaises(ValueError):
+            _format_queue_timestamp(datetime(2026, 8, 24, tzinfo=OverflowingTimezone()))
+
+    def test_generic_payload_complete_boundary_matrix(self) -> None:
+        for valid in (
+            {},
+            {f"k{index}": index for index in range(64)},
+            {"value": [0] * 256},
+            {"value": -(2**63)},
+            {"value": 2**63 - 1},
+            {"value": True, "nothing": None, "unicode": "é"},
+        ):
+            with self.subTest(valid=type(valid).__name__):
+                self.assertIs(valid, _validate_payload_object(valid))
+        nested: object = 1
+        for _ in range(7):
+            nested = {"nested": nested}
+        _validate_payload_object(nested)
+
+        node_limit = {f"k{index}": [0] * (14 if index == 63 else 15) for index in range(64)}
+        _validate_payload_object(node_limit)
+        too_many_nodes = {f"k{index}": [0] * 15 for index in range(64)}
+        invalid_values = (
+            {f"k{index}": index for index in range(65)},
+            {"value": [0] * 257},
+            {"value": -(2**63) - 1},
+            {"value": 2**63},
+            {"value": 1.0},
+            {"value": float("nan")},
+            {"value": float("inf")},
+            {"value": Decimal("1")},
+            {"value": b"x"},
+            {"value": (1,)},
+            {"value": {1}},
+            {"value": "\ud800"},
+            {"": 1},
+            {"a" * 65: 1},
+            too_many_nodes,
+        )
+        for invalid in invalid_values:
+            with self.subTest(invalid=repr(invalid)[:60]), self.assertRaises((TypeError, ValueError, UnicodeError)):
+                _validate_payload_object(invalid)
+        too_deep: object = 1
+        for _ in range(8):
+            too_deep = {"nested": too_deep}
+        with self.assertRaises(ValueError):
+            _validate_payload_object(too_deep)
+        for reserved in (
+            "shell", "command_line", "argv", "executable", "executable_path",
+            "script", "python_code", "import_target", "callback", "sql", "url",
+            "http_request", "approved", "authorized",
+        ):
+            for key in (reserved, reserved.upper(), reserved.title()):
+                with self.subTest(key=key), self.assertRaises(ValueError):
+                    _validate_payload_object({"safe": {key: "x"}})
+
+    def test_canonical_payload_size_unicode_and_digest_oracles(self) -> None:
+        payload = {"z": None, "a": True, "n": -1, "unicode": "é"}
+        expected_json = '{"a":true,"n":-1,"unicode":"é","z":null}'
+        self.assertEqual(expected_json.encode("utf-8"), _canonical_queue_payload(payload).encode("utf-8"))
+        digest_args = dict(
+            project_id="panam", development_run_id=None, phase_id=None,
+            command_kind="TEST_COMMAND", command_schema_version=1,
+            payload=payload, priority=0,
+        )
+        expected_digest = hashlib.sha256(
+            _canonical_json(
+                {
+                    "command_kind": "TEST_COMMAND", "command_schema_version": 1,
+                    "development_run_id": None, "payload": payload, "phase_id": None,
+                    "priority": 0, "project_id": "panam",
+                }
+            ).encode("utf-8")
+        ).hexdigest()
+        self.assertEqual(expected_digest, _intent_digest(**digest_args))
+        variants = (
+            {**digest_args, "project_id": "other"},
+            {**digest_args, "development_run_id": "run"},
+            {**digest_args, "phase_id": "phase"},
+            {**digest_args, "command_kind": "OTHER"},
+            {**digest_args, "command_schema_version": 2},
+            {**digest_args, "payload": {"z": None}},
+            {**digest_args, "priority": 1},
+        )
+        self.assertEqual(7, len({ _intent_digest(**value) for value in variants }))
+        self.assertNotEqual(
+            _canonical_queue_payload({"value": None}),
+            _canonical_queue_payload({}),
+        )
+        self.assertNotEqual(
+            _canonical_queue_payload({"value": "é"}),
+            _canonical_queue_payload({"value": "e\u0301"}),
+        )
+
+        empty = {f"k{index:02d}": "" for index in range(16)}
+        overhead = len(_canonical_queue_payload(empty).encode("utf-8"))
+        remaining = 65_536 - overhead
+        exact: dict[str, object] = {}
+        for index in range(16):
+            length = min(4096, remaining)
+            exact[f"k{index:02d}"] = "x" * length
+            remaining -= length
+        self.assertEqual(0, remaining)
+        self.assertEqual(65_536, len(_canonical_queue_payload(exact).encode("utf-8")))
+        oversized = dict(exact)
+        final_key = next(key for key, value in oversized.items() if len(value) < 4096)
+        oversized[final_key] += "x"
+        with self.assertRaises(ValueError):
+            _canonical_queue_payload(oversized)
+
+    def test_applied_result_binds_claim_count_and_operation_facts(self) -> None:
+        pending = _pending_queue_command()
+        claimed = replace(
+            pending,
+            state=WorkflowCommandState.CLAIMED,
+            state_version=2,
+            claim_count=1,
+            lease_owner="worker",
+            lease_acquired_at="2026-08-24T12:00:01.000000Z",
+            lease_expires_at="2026-08-24T12:00:11.000000Z",
+            updated_at="2026-08-24T12:00:01.000000Z",
+        )
+        event = WorkflowCommandEvent(
+            2, "00000000-0000-0000-0000-000000000003", claimed.command_id,
+            WorkflowCommandEventKind.CLAIMED, WorkflowCommandState.PENDING,
+            WorkflowCommandState.CLAIMED, 1, 2, "worker", claimed.updated_at,
+            "worker", claimed.lease_expires_at, 1, None,
+        )
+        QueueResult(QueueResultCode.APPLIED, QueueMutationKind.CLAIM_NEXT, claimed, event)
+        with self.assertRaises(ValueError):
+            QueueResult(
+                QueueResultCode.APPLIED,
+                QueueMutationKind.CLAIM_NEXT,
+                replace(claimed, claim_count=2),
+                event,
+            )
+        with self.assertRaises(ValueError):
+            QueueResult(
+                QueueResultCode.APPLIED,
+                QueueMutationKind.CLAIM_NEXT,
+                replace(
+                    claimed,
+                    lease_acquired_at="2026-08-24T12:00:00.000000Z",
+                ),
+                event,
+            )
+
+    def test_identifier_code_and_integer_boundaries(self) -> None:
+        _queue_envelope(project_id="é" * 128, idempotency_key="A" * 128, priority=100)
+        invalid_envelopes = (
+            lambda: _queue_envelope(project_id="é" * 129),
+            lambda: _queue_envelope(idempotency_key="A" * 129),
+            lambda: _queue_envelope(idempotency_key="-bad"),
+            lambda: _queue_envelope(priority=True),
+            lambda: _queue_envelope(priority=-1),
+            lambda: _queue_envelope(priority=101),
+        )
+        for invalid in invalid_envelopes:
+            with self.subTest(invalid=invalid), self.assertRaises((TypeError, ValueError)):
+                invalid()
+        CommandDefinition("A" * 64, 2_147_483_647, ("value",), (), (), _queue_payload_validator)
+        for invalid in (
+            lambda: CommandDefinition("A" * 65, 1, ("value",), (), (), _queue_payload_validator),
+            lambda: CommandDefinition("lower", 1, ("value",), (), (), _queue_payload_validator),
+            lambda: CommandDefinition("A", True, ("value",), (), (), _queue_payload_validator),
+            lambda: CommandDefinition("A", 2_147_483_648, ("value",), (), (), _queue_payload_validator),
+        ):
+            with self.assertRaises((TypeError, ValueError)):
+                invalid()
+        command = _pending_queue_command()
+        with self.assertRaises(ValueError):
+            replace(command, command_id="AAAAAAAA-AAAA-AAAA-AAAA-AAAAAAAAAAAA")
+        with self.assertRaises(ValueError):
+            replace(command, command_id="-0000000-0000-0000-0000-000000000001")
+        event = _enqueue_event(command)
+        replace(event, actor_id="A" * 128)
+        with self.assertRaises(ValueError):
+            replace(event, actor_id="A" * 129)
+        failed = WorkflowCommandEvent(
+            2, str(UUID(int=10)), command.command_id, WorkflowCommandEventKind.FAILED,
+            WorkflowCommandState.RUNNING, WorkflowCommandState.FAILED, 1, 2,
+            "worker", "2026-08-24T12:00:01.000000Z", "worker",
+            "2026-08-24T12:00:02.000000Z", 1, "A" * 64,
+        )
+        with self.assertRaises(ValueError):
+            replace(failed, reason_code="A" * 65)
+
+    def test_full_event_compatibility_and_lease_time_matrix(self) -> None:
+        t10 = "2026-08-24T12:00:10.000000Z"
+        t20 = "2026-08-24T12:00:20.000000Z"
+        rows = (
+            (WorkflowCommandEventKind.ENQUEUED, None, WorkflowCommandState.PENDING, None, 1, "actor", t10, None, None, 0, None),
+            (WorkflowCommandEventKind.CLAIMED, WorkflowCommandState.PENDING, WorkflowCommandState.CLAIMED, 1, 2, "worker", t10, "worker", t20, 1, None),
+            (WorkflowCommandEventKind.LEASE_RENEWED, WorkflowCommandState.CLAIMED, WorkflowCommandState.CLAIMED, 2, 3, "worker", t10, "worker", t20, 1, None),
+            (WorkflowCommandEventKind.LEASE_RENEWED, WorkflowCommandState.RUNNING, WorkflowCommandState.RUNNING, 3, 4, "worker", t10, "worker", t20, 1, None),
+            (WorkflowCommandEventKind.STARTED, WorkflowCommandState.CLAIMED, WorkflowCommandState.RUNNING, 2, 3, "worker", t10, "worker", t20, 1, None),
+            (WorkflowCommandEventKind.CANCELLATION_REQUESTED, WorkflowCommandState.CLAIMED, WorkflowCommandState.CLAIMED, 2, 3, "requester", t10, "worker", t20, 1, "STOPPED"),
+            (WorkflowCommandEventKind.CANCELLATION_REQUESTED, WorkflowCommandState.RUNNING, WorkflowCommandState.RUNNING, 3, 4, "requester", t10, "worker", t20, 1, "STOPPED"),
+            (WorkflowCommandEventKind.CANCELLED, WorkflowCommandState.PENDING, WorkflowCommandState.CANCELLED, 1, 2, "requester", t10, None, None, 0, "STOPPED"),
+            (WorkflowCommandEventKind.CANCELLED, WorkflowCommandState.CLAIMED, WorkflowCommandState.CANCELLED, 3, 4, "worker", t10, "worker", t20, 1, "STOPPED"),
+            (WorkflowCommandEventKind.CANCELLED, WorkflowCommandState.RUNNING, WorkflowCommandState.CANCELLED, 4, 5, "worker", t10, "worker", t20, 1, "STOPPED"),
+            (WorkflowCommandEventKind.CANCELLED, WorkflowCommandState.CLAIMED, WorkflowCommandState.CANCELLED, 3, 4, "recovery", t20, "worker", t20, 1, "STOPPED"),
+            (WorkflowCommandEventKind.EXPIRED_CLAIM_RELEASED, WorkflowCommandState.CLAIMED, WorkflowCommandState.PENDING, 2, 3, "recovery", t20, "worker", t20, 1, "LEASE_EXPIRED"),
+            (WorkflowCommandEventKind.SUCCEEDED, WorkflowCommandState.RUNNING, WorkflowCommandState.SUCCEEDED, 3, 4, "worker", t10, "worker", t20, 1, None),
+            (WorkflowCommandEventKind.FAILED, WorkflowCommandState.RUNNING, WorkflowCommandState.FAILED, 3, 4, "worker", t10, "worker", t20, 1, "FAILED_TEST"),
+        )
+        events = []
+        for ordinal, row in enumerate(rows, start=1):
+            with self.subTest(event=row[0].value, ordinal=ordinal):
+                event = WorkflowCommandEvent(
+                    ordinal, str(UUID(int=1000 + ordinal)), str(UUID(int=1)), *row
+                )
+                events.append(event)
+        invalid = (
+            lambda: replace(events[1], occurred_at=t20),
+            lambda: replace(events[8], actor_id="other"),
+            lambda: replace(events[9], actor_id="other"),
+            lambda: replace(events[10], occurred_at=t10, actor_id="recovery"),
+            lambda: replace(events[11], occurred_at=t10),
+            lambda: replace(events[12], occurred_at=t20),
+            lambda: replace(events[13], claim_count=0),
+        )
+        for candidate in invalid:
+            with self.subTest(invalid=candidate), self.assertRaises(ValueError):
+                candidate()
+
+    def test_complete_nonapplied_result_code_kind_applicability(self) -> None:
+        command = _pending_queue_command()
+        all_kinds = set(QueueMutationKind)
+        owner_kinds = {
+            QueueMutationKind.RENEW_LEASE, QueueMutationKind.MARK_RUNNING,
+            QueueMutationKind.ACKNOWLEDGE_CANCELLATION,
+            QueueMutationKind.MARK_SUCCEEDED, QueueMutationKind.MARK_FAILED,
+        }
+        cas_kinds = owner_kinds | {
+            QueueMutationKind.REQUEST_CANCELLATION,
+            QueueMutationKind.RECOVER_EXPIRED_CLAIM,
+        }
+        applicability = {
+            QueueResultCode.NOT_FOUND: {None} | cas_kinds,
+            QueueResultCode.NO_ELIGIBLE_COMMAND: {QueueMutationKind.CLAIM_NEXT},
+            QueueResultCode.EXISTING_IDENTICAL: {QueueMutationKind.ENQUEUE},
+            QueueResultCode.IDEMPOTENCY_CONFLICT: {QueueMutationKind.ENQUEUE},
+            QueueResultCode.CAS_CONFLICT: cas_kinds,
+            QueueResultCode.LEASE_OWNER_MISMATCH: owner_kinds,
+            QueueResultCode.LEASE_EXPIRED: owner_kinds,
+            QueueResultCode.LEASE_NOT_EXPIRED: {QueueMutationKind.RECOVER_EXPIRED_CLAIM},
+            QueueResultCode.CANCELLATION_ALREADY_REQUESTED: {QueueMutationKind.REQUEST_CANCELLATION},
+            QueueResultCode.CANCELLATION_NOT_REQUESTED: {QueueMutationKind.ACKNOWLEDGE_CANCELLATION},
+            QueueResultCode.TERMINAL_OBSERVED: cas_kinds,
+            QueueResultCode.TRANSIENT_CONTENTION: all_kinds,
+            QueueResultCode.RECONCILIATION_REQUIRED: {QueueMutationKind.RECOVER_EXPIRED_CLAIM},
+        }
+        command_codes = {
+            QueueResultCode.EXISTING_IDENTICAL, QueueResultCode.IDEMPOTENCY_CONFLICT,
+            QueueResultCode.CAS_CONFLICT, QueueResultCode.LEASE_OWNER_MISMATCH,
+            QueueResultCode.LEASE_EXPIRED, QueueResultCode.LEASE_NOT_EXPIRED,
+            QueueResultCode.CANCELLATION_ALREADY_REQUESTED,
+            QueueResultCode.CANCELLATION_NOT_REQUESTED,
+            QueueResultCode.TERMINAL_OBSERVED, QueueResultCode.RECONCILIATION_REQUIRED,
+        }
+        for code, allowed in applicability.items():
+            for kind in (None, *QueueMutationKind):
+                arguments = {"mutation_kind": kind}
+                if code in command_codes:
+                    arguments["command"] = command
+                candidate = lambda: QueueResult(code, **arguments)
+                if kind in allowed:
+                    with self.subTest(code=code.value, kind=kind):
+                        candidate()
+                else:
+                    with self.subTest(code=code.value, kind=kind), self.assertRaises(ValueError):
+                        candidate()
+        QueueResult(QueueResultCode.FOUND, command=command)
+        QueueResult(QueueResultCode.LISTED, commands=())
+        QueueResult(QueueResultCode.HISTORY_RETURNED, events=(_enqueue_event(command),))
+        for invalid in (
+            lambda: QueueResult(QueueResultCode.FOUND, QueueMutationKind.ENQUEUE, command=command),
+            lambda: QueueResult(QueueResultCode.LISTED, commands=(command,), events=(_enqueue_event(command),)),
+            lambda: QueueResult(QueueResultCode.HISTORY_RETURNED, events=()),
+        ):
+            with self.assertRaises(ValueError):
+                invalid()
+
+    def test_applied_cancelled_routes_are_operation_specific(self) -> None:
+        pending = _pending_queue_command()
+        cancelled = replace(
+            pending,
+            state=WorkflowCommandState.CANCELLED,
+            state_version=4,
+            claim_count=1,
+            cancellation_requested_at="2026-08-24T12:00:04.000000Z",
+            cancellation_requested_by="requester",
+            cancellation_reason_code="STOPPED",
+            updated_at="2026-08-24T12:00:05.000000Z",
+            completed_at="2026-08-24T12:00:05.000000Z",
+        )
+        acknowledged = WorkflowCommandEvent(
+            4, str(UUID(int=40)), pending.command_id, WorkflowCommandEventKind.CANCELLED,
+            WorkflowCommandState.CLAIMED, WorkflowCommandState.CANCELLED, 3, 4,
+            "worker", cancelled.updated_at, "worker",
+            "2026-08-24T12:00:10.000000Z", 1, "STOPPED",
+        )
+        QueueResult(
+            QueueResultCode.APPLIED,
+            QueueMutationKind.ACKNOWLEDGE_CANCELLATION,
+            cancelled,
+            acknowledged,
+        )
+        with self.assertRaises(ValueError):
+            QueueResult(
+                QueueResultCode.APPLIED,
+                QueueMutationKind.RECOVER_EXPIRED_CLAIM,
+                cancelled,
+                acknowledged,
+            )
+        with self.assertRaises(ValueError):
+            QueueResult(
+                QueueResultCode.APPLIED,
+                QueueMutationKind.REQUEST_CANCELLATION,
+                cancelled,
+                acknowledged,
+            )
+        recovered_command = replace(
+            cancelled,
+            updated_at="2026-08-24T12:00:10.000000Z",
+            completed_at="2026-08-24T12:00:10.000000Z",
+        )
+        recovered = replace(
+            acknowledged,
+            event_id=str(UUID(int=41)),
+            actor_id="recovery",
+            occurred_at="2026-08-24T12:00:10.000000Z",
+        )
+        QueueResult(
+            QueueResultCode.APPLIED,
+            QueueMutationKind.RECOVER_EXPIRED_CLAIM,
+            recovered_command,
+            recovered,
+        )
+        with self.assertRaises(ValueError):
+            QueueResult(
+                QueueResultCode.APPLIED,
+                QueueMutationKind.ACKNOWLEDGE_CANCELLATION,
+                recovered_command,
+                recovered,
+            )
+        pending_cancelled = replace(
+            pending,
+            state=WorkflowCommandState.CANCELLED,
+            state_version=2,
+            cancellation_requested_at="2026-08-24T12:00:05.000000Z",
+            cancellation_requested_by="requester",
+            cancellation_reason_code="STOPPED",
+            updated_at="2026-08-24T12:00:05.000000Z",
+            completed_at="2026-08-24T12:00:05.000000Z",
+        )
+        pending_event = WorkflowCommandEvent(
+            2, str(UUID(int=42)), pending.command_id, WorkflowCommandEventKind.CANCELLED,
+            WorkflowCommandState.PENDING, WorkflowCommandState.CANCELLED, 1, 2,
+            "requester", pending_cancelled.updated_at, None, None, 0, "STOPPED",
+        )
+        QueueResult(
+            QueueResultCode.APPLIED,
+            QueueMutationKind.REQUEST_CANCELLATION,
+            pending_cancelled,
+            pending_event,
+        )
+        with self.assertRaises(ValueError):
+            QueueResult(
+                QueueResultCode.APPLIED,
+                QueueMutationKind.REQUEST_CANCELLATION,
+                replace(pending_cancelled, cancellation_requested_by="other"),
+                pending_event,
+            )
+
+
+class CommandDefinitionRegistryTest(unittest.TestCase):
+    def test_definition_and_registry_lifecycle(self) -> None:
+        definition = _queue_definition()
+        registry = CommandDefinitionRegistry()
+        registry.register(definition)
+        self.assertIs(definition, registry.lookup("TEST_COMMAND", 1))
+        with self.assertRaises(RuntimeError):
+            registry.validate("TEST_COMMAND", 1, {"value": 1})
+        registry.freeze()
+        registry.freeze()
+        self.assertEqual('{"value":1}', registry.validate("TEST_COMMAND", 1, {"value": 1}))
+        with self.assertRaises(RuntimeError):
+            registry.register(definition)
+        with self.assertRaises(LookupError):
+            registry.lookup("UNKNOWN", 1)
+        with self.assertRaises(ValueError):
+            CommandDefinitionRegistry((definition, definition))
+
+    def test_definition_key_relations_and_validator_return(self) -> None:
+        with self.assertRaises(ValueError):
+            replace(_queue_definition(), required_keys=("value", "value"))
+        with self.assertRaises(ValueError):
+            replace(_queue_definition(), nullable_keys=("absent",))
+        registry = CommandDefinitionRegistry(
+            (replace(_queue_definition(), payload_validator=lambda value: value),)  # type: ignore[arg-type]
+        )
+        registry.freeze()
+        with self.assertRaises(TypeError):
+            registry.validate("TEST_COMMAND", 1, {"value": 1})
+
+    def test_unknown_definition_precedes_clock_id_and_repository(self) -> None:
+        repository = Mock(spec=WorkflowCommandRepository)
+        providers = QueueProviders()
+        service = DurableCommandQueueService(
+            repository,
+            CommandDefinitionRegistry(),
+            10,
+            clock=providers.clock,
+            id_factory=providers.identifier,
+        )
+        with self.assertRaises(LookupError):
+            service.enqueue(
+                project_id="panam",
+                command_kind="UNKNOWN",
+                command_schema_version=1,
+                payload={"value": 1},
+                idempotency_key="key",
+                actor_id="tester",
+            )
+        self.assertEqual((0, 0), (providers.clock_calls, providers.id_calls))
+        repository.enqueue.assert_not_called()
+
+    def test_definition_and_registry_complete_negative_surface(self) -> None:
+        definition = _queue_definition()
+        invalid_definitions = (
+            lambda: CommandDefinition("bad", 1, ("value",), (), (), _queue_payload_validator),
+            lambda: CommandDefinition("TEST", True, ("value",), (), (), _queue_payload_validator),
+            lambda: replace(definition, required_keys=("z", "a")),
+            lambda: replace(definition, required_keys=("value",), optional_keys=("value",)),
+            lambda: replace(definition, required_keys=("bad-key",)),
+            lambda: replace(definition, required_keys=["value"]),
+            lambda: replace(definition, payload_validator=None),
+        )
+        for invalid in invalid_definitions:
+            with self.subTest(invalid=invalid), self.assertRaises((TypeError, ValueError)):
+                invalid()
+        with self.assertRaises(TypeError):
+            CommandDefinitionRegistry([definition])
+        with self.assertRaises(TypeError):
+            CommandDefinitionRegistry().register(object())
+        registry = CommandDefinitionRegistry((definition,))
+        for name in ("unregister", "replace", "thaw", "discover", "fallback"):
+            self.assertFalse(hasattr(registry, name))
+
+    def test_validator_defensive_copy_and_return_revalidation(self) -> None:
+        observed: list[dict[str, object]] = []
+
+        def mutating_validator(payload: dict[str, object]) -> str:
+            observed.append(payload)
+            payload["value"] = 9
+            return _canonical_json(payload)
+
+        source = {"value": 1}
+        registry = CommandDefinitionRegistry(
+            (replace(_queue_definition(), payload_validator=mutating_validator),)
+        )
+        registry.freeze()
+        self.assertEqual('{"value":9}', registry.validate("TEST_COMMAND", 1, source))
+        self.assertEqual({"value": 1}, source)
+        self.assertIsNot(source, observed[0])
+
+        invalid_returns = (
+            lambda payload: '{"value":1, "note":null}',
+            lambda payload: '{"value":1,"extra":2}',
+            lambda payload: '{"value":1,"shell":"x"}',
+        )
+        for validator in invalid_returns:
+            candidate = CommandDefinitionRegistry(
+                (replace(_queue_definition(), payload_validator=validator),)
+            )
+            candidate.freeze()
+            with self.subTest(validator=validator), self.assertRaises(ValueError):
+                candidate.validate("TEST_COMMAND", 1, {"value": 1})
+
+
+class Dl21OperationMatrixCompatibilityTest(unittest.TestCase):
+    def test_repository_and_service_exact_method_sets_and_signatures(self) -> None:
+        expected = (
+            "enqueue", "get", "list_project", "history", "claim_next", "renew_lease",
+            "mark_running", "request_cancellation", "acknowledge_cancellation",
+            "mark_succeeded", "mark_failed", "recover_expired_claim",
+        )
+        for owner in (WorkflowCommandRepository, DurableCommandQueueService):
+            public = tuple(
+                name
+                for name, value in owner.__dict__.items()
+                if not name.startswith("_") and callable(value)
+            )
+            self.assertEqual(expected, public)
+        query = {"get", "list_project", "history"}
+        self.assertEqual(3, len(query))
+        self.assertEqual(9, len(set(expected) - query))
+        self.assertEqual(
+            ("self", "repository", "registry", "lease_duration_seconds", "clock", "id_factory"),
+            tuple(inspect.signature(DurableCommandQueueService.__init__).parameters),
+        )
+        self.assertEqual(
+            inspect.Parameter.KEYWORD_ONLY,
+            inspect.signature(DurableCommandQueueService.__init__).parameters["clock"].kind,
+        )
+
+    def test_exact_thirteen_additive_exports(self) -> None:
+        import panam_development_loop as package
+
+        expected = {
+            "CommandDefinition", "CommandDefinitionRegistry", "DurableCommandQueueService",
+            "QueueMutationKind", "QueueResult", "QueueResultCode",
+            "SqliteWorkflowCommandRepository", "ValidatedCommandEnvelope", "WorkflowCommand",
+            "WorkflowCommandEvent", "WorkflowCommandEventKind",
+            "WorkflowCommandRepository", "WorkflowCommandState",
+        }
+        p1 = {
+            "AcceptedStateEvent", "ApprovalBinding", "ApprovalBindingRepository",
+            "DevelopmentRunInspectionRepository", "ApprovalKind", "ApprovalSnapshot",
+            "ApprovalSnapshotStatus", "ApprovalTargetKind", "ApprovalValidationCode",
+            "ApprovalValidationError", "ApprovalVersion", "ContractValidationCode",
+            "ContractValidationError", "ContractVersion", "DevelopmentRun",
+            "DevelopmentRunState", "EscalationTrigger", "EvidenceKind", "EvidenceSnapshot",
+            "EvidenceVerdict", "ExpectedEvidenceBinding", "MilestoneContract",
+            "MilestoneContractRepository", "PhaseContract", "PhaseContractRepository",
+            "ProjectPolicy", "ProjectPolicyReadOutcome", "ProjectPolicyReadResult",
+            "ProjectPolicyReader", "ProjectPolicyRepository", "ProjectPolicyVersion",
+            "RepositoryError", "RepositoryEvidenceBinding", "RepositoryFailureCode",
+            "SnapshotProducerKind", "SqliteApprovalBindingRepository",
+            "SqliteDevelopmentRunInspectionRepository", "SqliteMilestoneContractRepository",
+            "SqlitePhaseContractRepository", "SqliteProjectPolicyRepository", "SqliteRunStore",
+            "TransactionalTransitionReasonCode", "TransactionalTransitionResult",
+            "TransitionEvaluationDecision", "TransitionEvaluationReasonCode",
+            "TransitionEvaluationRequest", "TransitionEvaluationResult", "TransitionPolicy",
+            "TransitionReasonCode", "TransitionRequirement", "TransitionRequest",
+            "TransitionResult", "TransitionRule", "TransitionRuleId",
+            "TransitionRuleValidationCode", "TransitionRuleValidationError",
+            "TransitionService", "WorkflowEdgeType", "WorkflowNodeType",
+            "FoundationQueryOutcome", "FoundationQueryResult", "FoundationQueryService",
+            "exit_code_for", "render_error", "render_json", "render_text",
+        }
+        self.assertEqual(p1 | expected, set(package.__all__))
+        self.assertEqual(79, len(package.__all__))
+        self.assertEqual(13, len(expected))
+        for forbidden in ("Worker", "OperationJournal", "QueueQueryKind", "Executor"):
+            self.assertNotIn(forbidden, package.__all__)
+
+    def test_exact_result_sets_by_operation(self) -> None:
+        matrix = {
+            "enqueue": {"APPLIED", "EXISTING_IDENTICAL", "IDEMPOTENCY_CONFLICT", "TRANSIENT_CONTENTION"},
+            "get": {"FOUND", "NOT_FOUND"},
+            "list_project": {"LISTED"},
+            "history": {"HISTORY_RETURNED", "NOT_FOUND"},
+            "claim_next": {"APPLIED", "NO_ELIGIBLE_COMMAND", "TRANSIENT_CONTENTION"},
+            "renew_lease": {"APPLIED", "NOT_FOUND", "CAS_CONFLICT", "LEASE_OWNER_MISMATCH", "LEASE_EXPIRED", "TERMINAL_OBSERVED", "TRANSIENT_CONTENTION"},
+            "mark_running": {"APPLIED", "NOT_FOUND", "CAS_CONFLICT", "LEASE_OWNER_MISMATCH", "LEASE_EXPIRED", "TERMINAL_OBSERVED", "TRANSIENT_CONTENTION"},
+            "request_cancellation": {"APPLIED", "NOT_FOUND", "CAS_CONFLICT", "CANCELLATION_ALREADY_REQUESTED", "TERMINAL_OBSERVED", "TRANSIENT_CONTENTION"},
+            "acknowledge_cancellation": {"APPLIED", "NOT_FOUND", "CAS_CONFLICT", "LEASE_OWNER_MISMATCH", "LEASE_EXPIRED", "CANCELLATION_NOT_REQUESTED", "TERMINAL_OBSERVED", "TRANSIENT_CONTENTION"},
+            "mark_succeeded": {"APPLIED", "NOT_FOUND", "CAS_CONFLICT", "LEASE_OWNER_MISMATCH", "LEASE_EXPIRED", "TERMINAL_OBSERVED", "TRANSIENT_CONTENTION"},
+            "mark_failed": {"APPLIED", "NOT_FOUND", "CAS_CONFLICT", "LEASE_OWNER_MISMATCH", "LEASE_EXPIRED", "TERMINAL_OBSERVED", "TRANSIENT_CONTENTION"},
+            "recover_expired_claim": {"APPLIED", "NOT_FOUND", "CAS_CONFLICT", "LEASE_NOT_EXPIRED", "TERMINAL_OBSERVED", "RECONCILIATION_REQUIRED", "TRANSIENT_CONTENTION"},
+        }
+        self.assertEqual(12, len(matrix))
+        self.assertEqual(set(QueueResultCode), {QueueResultCode[name] for codes in matrix.values() for name in codes})
+
+    def test_exact_twelve_by_ten_normative_matrix_and_signatures(self) -> None:
+        service_parameters = {
+            "enqueue": ("project_id", "command_kind", "command_schema_version", "payload", "idempotency_key", "actor_id", "development_run_id", "phase_id", "priority"),
+            "get": ("command_id",), "list_project": ("project_id",), "history": ("command_id",),
+            "claim_next": ("lease_owner",),
+            "renew_lease": ("command_id", "expected_state", "expected_state_version", "lease_owner"),
+            "mark_running": ("command_id", "expected_state", "expected_state_version", "lease_owner"),
+            "request_cancellation": ("command_id", "expected_state", "expected_state_version", "requested_by", "reason_code"),
+            "acknowledge_cancellation": ("command_id", "expected_state", "expected_state_version", "lease_owner"),
+            "mark_succeeded": ("command_id", "expected_state", "expected_state_version", "lease_owner"),
+            "mark_failed": ("command_id", "expected_state", "expected_state_version", "lease_owner", "failure_code"),
+            "recover_expired_claim": ("command_id", "expected_state", "expected_state_version", "recovery_actor"),
+        }
+        repository_parameters = {
+            "enqueue": ("command_id", "event_id", "envelope", "actor_id", "occurred_at"),
+            "get": ("command_id",), "list_project": ("project_id",), "history": ("command_id",),
+            "claim_next": ("event_id", "lease_owner", "lease_acquired_at", "lease_expires_at"),
+            "renew_lease": ("command_id", "expected_state", "expected_state_version", "lease_owner", "observed_at", "lease_expires_at", "event_id"),
+            "mark_running": ("command_id", "expected_state", "expected_state_version", "lease_owner", "occurred_at", "event_id"),
+            "request_cancellation": ("command_id", "expected_state", "expected_state_version", "requested_by", "reason_code", "occurred_at", "event_id"),
+            "acknowledge_cancellation": ("command_id", "expected_state", "expected_state_version", "lease_owner", "observed_at", "event_id"),
+            "mark_succeeded": ("command_id", "expected_state", "expected_state_version", "lease_owner", "observed_at", "event_id"),
+            "mark_failed": ("command_id", "expected_state", "expected_state_version", "lease_owner", "failure_code", "observed_at", "event_id"),
+            "recover_expired_claim": ("command_id", "expected_state", "expected_state_version", "recovery_actor", "observed_at", "event_id"),
+        }
+        kinds = {name: QueueMutationKind[name.upper()] for name in service_parameters if name not in {"get", "list_project", "history"}}
+        codes = {
+            "enqueue": ("APPLIED", "EXISTING_IDENTICAL", "IDEMPOTENCY_CONFLICT", "TRANSIENT_CONTENTION"),
+            "get": ("FOUND", "NOT_FOUND"), "list_project": ("LISTED",),
+            "history": ("HISTORY_RETURNED", "NOT_FOUND"),
+            "claim_next": ("APPLIED", "NO_ELIGIBLE_COMMAND", "TRANSIENT_CONTENTION"),
+            "renew_lease": ("APPLIED", "NOT_FOUND", "CAS_CONFLICT", "LEASE_OWNER_MISMATCH", "LEASE_EXPIRED", "TERMINAL_OBSERVED", "TRANSIENT_CONTENTION"),
+            "mark_running": ("APPLIED", "NOT_FOUND", "CAS_CONFLICT", "LEASE_OWNER_MISMATCH", "LEASE_EXPIRED", "TERMINAL_OBSERVED", "TRANSIENT_CONTENTION"),
+            "request_cancellation": ("APPLIED", "NOT_FOUND", "CAS_CONFLICT", "CANCELLATION_ALREADY_REQUESTED", "TERMINAL_OBSERVED", "TRANSIENT_CONTENTION"),
+            "acknowledge_cancellation": ("APPLIED", "NOT_FOUND", "CAS_CONFLICT", "LEASE_OWNER_MISMATCH", "LEASE_EXPIRED", "CANCELLATION_NOT_REQUESTED", "TERMINAL_OBSERVED", "TRANSIENT_CONTENTION"),
+            "mark_succeeded": ("APPLIED", "NOT_FOUND", "CAS_CONFLICT", "LEASE_OWNER_MISMATCH", "LEASE_EXPIRED", "TERMINAL_OBSERVED", "TRANSIENT_CONTENTION"),
+            "mark_failed": ("APPLIED", "NOT_FOUND", "CAS_CONFLICT", "LEASE_OWNER_MISMATCH", "LEASE_EXPIRED", "TERMINAL_OBSERVED", "TRANSIENT_CONTENTION"),
+            "recover_expired_claim": ("APPLIED", "NOT_FOUND", "CAS_CONFLICT", "LEASE_NOT_EXPIRED", "TERMINAL_OBSERVED", "RECONCILIATION_REQUIRED", "TRANSIENT_CONTENTION"),
+        }
+        effects = {
+            "enqueue": ("ABSENT_TO_PENDING", "ENQUEUED"), "get": ("NONE", "NONE"),
+            "list_project": ("NONE", "NONE"), "history": ("NONE", "NONE"),
+            "claim_next": ("PENDING_TO_CLAIMED", "CLAIMED"),
+            "renew_lease": ("ACTIVE_SAME_STATE", "LEASE_RENEWED"),
+            "mark_running": ("CLAIMED_TO_RUNNING", "STARTED"),
+            "request_cancellation": ("PENDING_TO_CANCELLED_OR_ACTIVE_SAME", "CANCELLED_OR_CANCELLATION_REQUESTED"),
+            "acknowledge_cancellation": ("ACTIVE_TO_CANCELLED", "CANCELLED"),
+            "mark_succeeded": ("RUNNING_TO_SUCCEEDED", "SUCCEEDED"),
+            "mark_failed": ("RUNNING_TO_FAILED", "FAILED"),
+            "recover_expired_claim": ("EXPIRED_CLAIMED_TO_PENDING_OR_CANCELLED", "EXPIRED_CLAIM_RELEASED_OR_CANCELLED"),
+        }
+        type_by_parameter = {
+            "command_schema_version": int, "expected_state_version": int,
+            "priority": int, "lease_duration_seconds": int,
+            "payload": dict[str, object], "envelope": ValidatedCommandEnvelope,
+            "expected_state": WorkflowCommandState,
+            "development_run_id": str | None, "phase_id": str | None,
+        }
+        repository_returns = {
+            "get": WorkflowCommand | None,
+            "list_project": tuple[WorkflowCommand, ...],
+            "history": tuple[WorkflowCommandEvent, ...] | None,
+        }
+        headers = (
+            "SERVICE_OPERATION", "QUERY_OR_MUTATION",
+            "QUEUE_MUTATION_KIND_IF_APPLICABLE", "ARGUMENTS", "RETURN_TYPE",
+            "QUEUE_RESULT_CODES", "EXCEPTIONS", "REPOSITORY_MAPPING",
+            "STATE_EFFECT", "EVENT_EFFECT",
+        )
+        rows = []
+        for name in service_parameters:
+            service_signature = inspect.signature(getattr(DurableCommandQueueService, name))
+            repository_signature = inspect.signature(getattr(WorkflowCommandRepository, name))
+            self.assertEqual(("self",) + service_parameters[name], tuple(service_signature.parameters))
+            self.assertEqual(("self",) + repository_parameters[name], tuple(repository_signature.parameters))
+            self.assertIs(QueueResult, service_signature.return_annotation)
+            service_hints = get_type_hints(getattr(DurableCommandQueueService, name))
+            repository_hints = get_type_hints(getattr(WorkflowCommandRepository, name))
+            for parameter in service_parameters[name]:
+                self.assertEqual(type_by_parameter.get(parameter, str), service_hints[parameter])
+            for parameter in repository_parameters[name]:
+                self.assertEqual(type_by_parameter.get(parameter, str), repository_hints[parameter])
+            self.assertEqual(QueueResult, service_hints["return"])
+            self.assertEqual(repository_returns.get(name, QueueResult), repository_hints["return"])
+            service_nonself = tuple(service_signature.parameters.values())[1:]
+            repository_nonself = tuple(repository_signature.parameters.values())[1:]
+            if name not in {"get", "list_project", "history"}:
+                self.assertTrue(all(parameter.kind is inspect.Parameter.KEYWORD_ONLY for parameter in service_nonself))
+                self.assertTrue(all(parameter.kind is inspect.Parameter.KEYWORD_ONLY for parameter in repository_nonself))
+            else:
+                self.assertTrue(all(parameter.kind is inspect.Parameter.POSITIONAL_OR_KEYWORD for parameter in service_nonself + repository_nonself))
+            if name == "enqueue":
+                self.assertEqual((None, None, 0), tuple(service_signature.parameters[key].default for key in ("development_run_id", "phase_id", "priority")))
+            else:
+                self.assertTrue(all(parameter.default is inspect.Parameter.empty for parameter in service_nonself))
+            self.assertTrue(all(parameter.default is inspect.Parameter.empty for parameter in repository_nonself))
+            exceptions = (
+                (TypeError, ValueError, LookupError, RepositoryError)
+                if name == "enqueue"
+                else (TypeError, ValueError, RepositoryError)
+            )
+            row = {
+                "SERVICE_OPERATION": name,
+                "QUERY_OR_MUTATION": "QUERY" if name in {"get", "list_project", "history"} else "MUTATION",
+                "QUEUE_MUTATION_KIND_IF_APPLICABLE": kinds.get(name),
+                "ARGUMENTS": service_parameters[name],
+                "RETURN_TYPE": QueueResult,
+                "QUEUE_RESULT_CODES": tuple(QueueResultCode[value] for value in codes[name]),
+                "EXCEPTIONS": exceptions,
+                "REPOSITORY_MAPPING": getattr(WorkflowCommandRepository, name),
+                "STATE_EFFECT": effects[name][0],
+                "EVENT_EFFECT": effects[name][1],
+            }
+            self.assertEqual(headers, tuple(row))
+            rows.append(row)
+        self.assertEqual(12, len(rows))
+        self.assertEqual(12, len({row["SERVICE_OPERATION"] for row in rows}))
+        self.assertEqual((3, 9), (sum(row["QUERY_OR_MUTATION"] == "QUERY" for row in rows), sum(row["QUERY_OR_MUTATION"] == "MUTATION" for row in rows)))
+        constructor = inspect.signature(DurableCommandQueueService.__init__)
+        constructor_hints = get_type_hints(DurableCommandQueueService.__init__)
+        self.assertEqual(
+            ("self", "repository", "registry", "lease_duration_seconds", "clock", "id_factory"),
+            tuple(constructor.parameters),
+        )
+        self.assertEqual(
+            {
+                "repository": WorkflowCommandRepository,
+                "registry": CommandDefinitionRegistry,
+                "lease_duration_seconds": int,
+                "clock": Callable[[], datetime],
+                "id_factory": Callable[[], str],
+                "return": type(None),
+            },
+            constructor_hints,
+        )
+        self.assertTrue(all(parameter.default is inspect.Parameter.empty for parameter in tuple(constructor.parameters.values())[1:]))
+        self.assertEqual(inspect.Parameter.KEYWORD_ONLY, constructor.parameters["clock"].kind)
+        self.assertEqual(inspect.Parameter.KEYWORD_ONLY, constructor.parameters["id_factory"].kind)
+
+    def test_service_clock_id_counts_repository_mapping_and_no_retry(self) -> None:
+        query_repository = Mock(spec=WorkflowCommandRepository)
+        query_repository.get.return_value = None
+        query_repository.list_project.return_value = ()
+        query_repository.history.return_value = None
+        query_providers = QueueProviders()
+        query_service = DurableCommandQueueService(
+            query_repository, CommandDefinitionRegistry((_queue_definition(),)), 10,
+            clock=query_providers.clock, id_factory=query_providers.identifier,
+        )
+        self.assertEqual(QueueResultCode.NOT_FOUND, query_service.get(str(UUID(int=99))).code)
+        self.assertEqual(QueueResultCode.LISTED, query_service.list_project("panam").code)
+        self.assertEqual(QueueResultCode.NOT_FOUND, query_service.history(str(UUID(int=99))).code)
+        self.assertEqual((0, 0), (query_providers.clock_calls, query_providers.id_calls))
+        for method in (query_repository.get, query_repository.list_project, query_repository.history):
+            self.assertEqual(1, method.call_count)
+
+        calls = {
+            "enqueue": dict(project_id="panam", command_kind="TEST_COMMAND", command_schema_version=1, payload={"value": 1}, idempotency_key="key", actor_id="actor"),
+            "claim_next": dict(lease_owner="worker"),
+            "renew_lease": dict(command_id=str(UUID(int=99)), expected_state=WorkflowCommandState.CLAIMED, expected_state_version=1, lease_owner="worker"),
+            "mark_running": dict(command_id=str(UUID(int=99)), expected_state=WorkflowCommandState.CLAIMED, expected_state_version=1, lease_owner="worker"),
+            "request_cancellation": dict(command_id=str(UUID(int=99)), expected_state=WorkflowCommandState.PENDING, expected_state_version=1, requested_by="actor", reason_code="STOP"),
+            "acknowledge_cancellation": dict(command_id=str(UUID(int=99)), expected_state=WorkflowCommandState.CLAIMED, expected_state_version=1, lease_owner="worker"),
+            "mark_succeeded": dict(command_id=str(UUID(int=99)), expected_state=WorkflowCommandState.RUNNING, expected_state_version=1, lease_owner="worker"),
+            "mark_failed": dict(command_id=str(UUID(int=99)), expected_state=WorkflowCommandState.RUNNING, expected_state_version=1, lease_owner="worker", failure_code="FAILED_TEST"),
+            "recover_expired_claim": dict(command_id=str(UUID(int=99)), expected_state=WorkflowCommandState.CLAIMED, expected_state_version=1, recovery_actor="recovery"),
+        }
+        for name, arguments in calls.items():
+            with self.subTest(operation=name):
+                repository = Mock(spec=WorkflowCommandRepository)
+                kind = QueueMutationKind[name.upper()]
+                getattr(repository, name).return_value = QueueResult(QueueResultCode.TRANSIENT_CONTENTION, kind)
+                providers = QueueProviders()
+                service = DurableCommandQueueService(
+                    repository, CommandDefinitionRegistry((_queue_definition(),)), 10,
+                    clock=providers.clock, id_factory=providers.identifier,
+                )
+                result = getattr(service, name)(**arguments)
+                self.assertEqual((QueueResultCode.TRANSIENT_CONTENTION, kind), (result.code, result.mutation_kind))
+                self.assertEqual((1, 2 if name == "enqueue" else 1), (providers.clock_calls, providers.id_calls))
+                getattr(repository, name).assert_called_once()
+                forwarded = getattr(repository, name).call_args.kwargs
+                self.assertEqual(str(UUID(int=2 if name == "enqueue" else 1)), forwarded["event_id"])
+                if name in {"claim_next", "renew_lease"}:
+                    self.assertEqual("2026-08-24T12:00:10.000000Z", forwarded["lease_expires_at"])
+
+        repository = Mock(spec=WorkflowCommandRepository)
+        providers = QueueProviders()
+        providers.current = datetime.max.replace(tzinfo=timezone.utc)
+        service = DurableCommandQueueService(
+            repository, CommandDefinitionRegistry((_queue_definition(),)), 1,
+            clock=providers.clock, id_factory=providers.identifier,
+        )
+        with self.assertRaises(ValueError):
+            service.claim_next(lease_owner="worker")
+        self.assertEqual((1, 0), (providers.clock_calls, providers.id_calls))
+        repository.claim_next.assert_not_called()
+
+    def test_claim_next_uses_elapsed_utc_duration_across_offset_transition(self) -> None:
+        repository = Mock(spec=WorkflowCommandRepository)
+        repository.claim_next.return_value = QueueResult(
+            QueueResultCode.NO_ELIGIBLE_COMMAND,
+            QueueMutationKind.CLAIM_NEXT,
+        )
+        clock_value = datetime(
+            2026,
+            10,
+            25,
+            2,
+            59,
+            tzinfo=DeterministicFallbackTimezone(),
+        )
+        service = DurableCommandQueueService(
+            repository,
+            CommandDefinitionRegistry(),
+            120,
+            clock=lambda: clock_value,
+            id_factory=lambda: str(UUID(int=1)),
+        )
+
+        service.claim_next(lease_owner="worker")
+
+        arguments = repository.claim_next.call_args.kwargs
+        acquired = _parse_queue_timestamp(arguments["lease_acquired_at"], "acquired")
+        expires = _parse_queue_timestamp(arguments["lease_expires_at"], "expires")
+        self.assertEqual("2026-10-25T00:59:00.000000Z", arguments["lease_acquired_at"])
+        self.assertEqual("2026-10-25T01:01:00.000000Z", arguments["lease_expires_at"])
+        self.assertEqual(timedelta(seconds=120), expires - acquired)
+
+    def test_renew_lease_uses_elapsed_utc_duration_across_offset_transition(self) -> None:
+        repository = Mock(spec=WorkflowCommandRepository)
+        repository.renew_lease.return_value = QueueResult(
+            QueueResultCode.TRANSIENT_CONTENTION,
+            QueueMutationKind.RENEW_LEASE,
+        )
+        clock_value = datetime(
+            2026,
+            10,
+            25,
+            2,
+            59,
+            tzinfo=DeterministicFallbackTimezone(),
+        )
+        service = DurableCommandQueueService(
+            repository,
+            CommandDefinitionRegistry(),
+            120,
+            clock=lambda: clock_value,
+            id_factory=lambda: str(UUID(int=1)),
+        )
+
+        service.renew_lease(
+            command_id=str(UUID(int=2)),
+            expected_state=WorkflowCommandState.CLAIMED,
+            expected_state_version=2,
+            lease_owner="worker",
+        )
+
+        arguments = repository.renew_lease.call_args.kwargs
+        observed = _parse_queue_timestamp(arguments["observed_at"], "observed")
+        expires = _parse_queue_timestamp(arguments["lease_expires_at"], "expires")
+        self.assertEqual("2026-10-25T00:59:00.000000Z", arguments["observed_at"])
+        self.assertEqual("2026-10-25T01:01:00.000000Z", arguments["lease_expires_at"])
+        self.assertEqual(timedelta(seconds=120), expires - observed)
+
+    def test_service_constructor_lease_bounds_and_required_dependencies(self) -> None:
+        repository = Mock(spec=WorkflowCommandRepository)
+        registry = CommandDefinitionRegistry()
+        DurableCommandQueueService(
+            repository, registry, 1,
+            clock=lambda: datetime.now(timezone.utc), id_factory=lambda: str(UUID(int=1)),
+        )
+        with self.assertRaises(RuntimeError):
+            registry.register(_queue_definition())
+        for duration in (1, 86_400):
+            DurableCommandQueueService(
+                repository, CommandDefinitionRegistry(), duration,
+                clock=lambda: datetime.now(timezone.utc), id_factory=lambda: str(UUID(int=1)),
+            )
+        for duration in (0, 86_401, True):
+            with self.subTest(duration=duration), self.assertRaises((TypeError, ValueError)):
+                DurableCommandQueueService(
+                    repository, CommandDefinitionRegistry(), duration,
+                    clock=lambda: datetime.now(timezone.utc), id_factory=lambda: str(UUID(int=1)),
+                )
+        with self.assertRaises(TypeError):
+            DurableCommandQueueService(None, CommandDefinitionRegistry(), 1, clock=lambda: datetime.now(timezone.utc), id_factory=lambda: str(UUID(int=1)))
+        with self.assertRaises(TypeError):
+            DurableCommandQueueService(repository, CommandDefinitionRegistry(), 1, clock=None, id_factory=lambda: str(UUID(int=1)))
+        with self.assertRaises(TypeError):
+            DurableCommandQueueService(repository, CommandDefinitionRegistry(), 1, clock=lambda: datetime.now(timezone.utc), id_factory=None)
+        bad_ids = DurableCommandQueueService(
+            repository, CommandDefinitionRegistry((_queue_definition(),)), 1,
+            clock=lambda: datetime(2026, 8, 24, tzinfo=timezone.utc),
+            id_factory=lambda: "not-a-uuid",
+        )
+        with self.assertRaises(ValueError):
+            bad_ids.enqueue(
+                project_id="panam", command_kind="TEST_COMMAND",
+                command_schema_version=1, payload={"value": 1},
+                idempotency_key="key", actor_id="actor",
+            )
+        repository.enqueue.assert_not_called()
+
+    def test_complete_service_exception_boundary(self) -> None:
+        command_id = str(UUID(int=77))
+        valid = {
+            "enqueue": dict(project_id="panam", command_kind="TEST_COMMAND", command_schema_version=1, payload={"value": 1}, idempotency_key="key", actor_id="actor"),
+            "get": dict(command_id=command_id), "list_project": dict(project_id="panam"),
+            "history": dict(command_id=command_id), "claim_next": dict(lease_owner="worker"),
+            "renew_lease": dict(command_id=command_id, expected_state=WorkflowCommandState.CLAIMED, expected_state_version=1, lease_owner="worker"),
+            "mark_running": dict(command_id=command_id, expected_state=WorkflowCommandState.CLAIMED, expected_state_version=1, lease_owner="worker"),
+            "request_cancellation": dict(command_id=command_id, expected_state=WorkflowCommandState.PENDING, expected_state_version=1, requested_by="actor", reason_code="STOPPED"),
+            "acknowledge_cancellation": dict(command_id=command_id, expected_state=WorkflowCommandState.CLAIMED, expected_state_version=1, lease_owner="worker"),
+            "mark_succeeded": dict(command_id=command_id, expected_state=WorkflowCommandState.RUNNING, expected_state_version=1, lease_owner="worker"),
+            "mark_failed": dict(command_id=command_id, expected_state=WorkflowCommandState.RUNNING, expected_state_version=1, lease_owner="worker", failure_code="FAILED_TEST"),
+            "recover_expired_claim": dict(command_id=command_id, expected_state=WorkflowCommandState.CLAIMED, expected_state_version=1, recovery_actor="recovery"),
+        }
+        invalid_type = {
+            "enqueue": {**valid["enqueue"], "payload": []}, "get": {"command_id": 1},
+            "list_project": {"project_id": 1}, "history": {"command_id": 1},
+            "claim_next": {"lease_owner": 1},
+            **{name: {**valid[name], "expected_state": "CLAIMED"} for name in (
+                "renew_lease", "mark_running", "request_cancellation",
+                "acknowledge_cancellation", "mark_succeeded", "mark_failed",
+                "recover_expired_claim",
+            )},
+        }
+        invalid_value = {
+            "enqueue": {**valid["enqueue"], "priority": -1}, "get": {"command_id": "bad"},
+            "list_project": {"project_id": ""}, "history": {"command_id": "bad"},
+            "claim_next": {"lease_owner": "-bad"},
+            "renew_lease": {**valid["renew_lease"], "expected_state": WorkflowCommandState.PENDING},
+            "mark_running": {**valid["mark_running"], "expected_state": WorkflowCommandState.RUNNING},
+            "request_cancellation": {**valid["request_cancellation"], "reason_code": "lower"},
+            "acknowledge_cancellation": {**valid["acknowledge_cancellation"], "expected_state": WorkflowCommandState.PENDING},
+            "mark_succeeded": {**valid["mark_succeeded"], "expected_state": WorkflowCommandState.CLAIMED},
+            "mark_failed": {**valid["mark_failed"], "expected_state": WorkflowCommandState.CLAIMED},
+            "recover_expired_claim": {**valid["recover_expired_claim"], "expected_state": WorkflowCommandState.PENDING},
+        }
+        for name in valid:
+            with self.subTest(operation=name):
+                repository = Mock(spec=WorkflowCommandRepository)
+                service = DurableCommandQueueService(
+                    repository, CommandDefinitionRegistry((_queue_definition(),)), 10,
+                    clock=lambda: datetime(2026, 8, 24, tzinfo=timezone.utc),
+                    id_factory=lambda: str(UUID(int=1)),
+                )
+                with self.assertRaises(TypeError):
+                    getattr(service, name)(**invalid_type[name])
+                getattr(repository, name).assert_not_called()
+                with self.assertRaises(ValueError):
+                    getattr(service, name)(**invalid_value[name])
+                getattr(repository, name).assert_not_called()
+                getattr(repository, name).side_effect = RepositoryError(
+                    RepositoryFailureCode.SQLITE_OPERATIONAL_FAILURE,
+                    "WorkflowCommand", name,
+                )
+                with self.assertRaises(RepositoryError):
+                    getattr(service, name)(**valid[name])
+                getattr(repository, name).assert_called_once()
+
+
+class SqliteMigrationFourTest(unittest.TestCase):
+    def setUp(self) -> None:
+        self._temporary_directory = tempfile.TemporaryDirectory()
+        self.directory = Path(self._temporary_directory.name)
+        self.path = self.directory / "queue.sqlite3"
+
+    def tearDown(self) -> None:
+        self._temporary_directory.cleanup()
+
+    def test_fresh_migration_four_schema_is_exact(self) -> None:
+        SqliteRunStore(self.path).initialize("initialized-at")
+        connection = sqlite3.connect(self.path)
+        connection.row_factory = sqlite3.Row
+        try:
+            self.assertEqual([1, 2, 3, 4], [row[0] for row in connection.execute("SELECT version FROM schema_migrations ORDER BY version")])
+            tables = {row[0] for row in connection.execute("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'")}
+            self.assertEqual({"workflow_commands", "workflow_command_events"}, tables - {"schema_migrations", "development_runs", "state_events", "phases", "milestone_contracts", "approvals", "project_policies"})
+            self.assertEqual(
+                ["workflow_commands_claim_order_idx", "workflow_commands_lease_expiry_idx", "workflow_commands_project_sequence_idx"],
+                sorted(row[0] for row in connection.execute("SELECT name FROM sqlite_master WHERE type='index' AND name LIKE 'workflow_commands_%_idx'")),
+            )
+            self.assertEqual([], connection.execute("SELECT name FROM sqlite_master WHERE type='trigger'").fetchall())
+            command_columns = [
+                ("queue_sequence", "INTEGER", 0, None, 1), ("command_id", "TEXT", 1, None, 0),
+                ("project_id", "TEXT", 1, None, 0), ("development_run_id", "TEXT", 0, None, 0),
+                ("phase_id", "TEXT", 0, None, 0), ("command_kind", "TEXT", 1, None, 0),
+                ("command_schema_version", "INTEGER", 1, None, 0), ("payload_json", "TEXT", 1, None, 0),
+                ("intent_digest", "TEXT", 1, None, 0), ("idempotency_key", "TEXT", 1, None, 0),
+                ("priority", "INTEGER", 1, "0", 0), ("state", "TEXT", 1, None, 0),
+                ("state_version", "INTEGER", 1, None, 0), ("claim_count", "INTEGER", 1, "0", 0),
+                ("lease_owner", "TEXT", 0, None, 0), ("lease_acquired_at", "TEXT", 0, None, 0),
+                ("lease_expires_at", "TEXT", 0, None, 0), ("cancellation_requested_at", "TEXT", 0, None, 0),
+                ("cancellation_requested_by", "TEXT", 0, None, 0), ("cancellation_reason_code", "TEXT", 0, None, 0),
+                ("failure_code", "TEXT", 0, None, 0), ("created_at", "TEXT", 1, None, 0),
+                ("updated_at", "TEXT", 1, None, 0), ("started_at", "TEXT", 0, None, 0),
+                ("completed_at", "TEXT", 0, None, 0),
+            ]
+            event_columns = [
+                ("event_sequence", "INTEGER", 0, None, 1), ("event_id", "TEXT", 1, None, 0),
+                ("command_id", "TEXT", 1, None, 0), ("event_kind", "TEXT", 1, None, 0),
+                ("prior_state", "TEXT", 0, None, 0), ("next_state", "TEXT", 1, None, 0),
+                ("prior_state_version", "INTEGER", 0, None, 0), ("next_state_version", "INTEGER", 1, None, 0),
+                ("actor_id", "TEXT", 1, None, 0), ("occurred_at", "TEXT", 1, None, 0),
+                ("lease_owner", "TEXT", 0, None, 0), ("lease_expires_at", "TEXT", 0, None, 0),
+                ("claim_count", "INTEGER", 1, None, 0), ("reason_code", "TEXT", 0, None, 0),
+            ]
+            shape = lambda table: [
+                (row[1], row[2], row[3], row[4], row[5])
+                for row in connection.execute(f"PRAGMA table_info({table})")
+            ]
+            self.assertEqual(command_columns, shape("workflow_commands"))
+            self.assertEqual(event_columns, shape("workflow_command_events"))
+
+            def index_shapes(table: str) -> dict[str, tuple[object, ...]]:
+                result = {}
+                for row in connection.execute(f"PRAGMA index_list({table})"):
+                    columns = tuple(
+                        (item[2], item[3], item[4], item[5])
+                        for item in connection.execute(f"PRAGMA index_xinfo('{row[1]}')")
+                        if item[5] == 1
+                    )
+                    result[row[1]] = (row[2], row[3], row[4], columns)
+                return result
+
+            command_indexes = index_shapes("workflow_commands")
+            event_indexes = index_shapes("workflow_command_events")
+            self.assertEqual(5, len(command_indexes))
+            self.assertEqual(2, len(event_indexes))
+            self.assertEqual(
+                {
+                    (("command_id", 0, "BINARY", 1),),
+                    (("project_id", 0, "BINARY", 1), ("idempotency_key", 0, "BINARY", 1)),
+                },
+                {value[3] for value in command_indexes.values() if value[1] == "u"},
+            )
+            self.assertEqual(
+                {
+                    (("event_id", 0, "BINARY", 1),),
+                    (("command_id", 0, "BINARY", 1), ("next_state_version", 0, "BINARY", 1)),
+                },
+                {value[3] for value in event_indexes.values() if value[1] == "u"},
+            )
+            self.assertEqual(
+                [("state", 0), ("priority", 1), ("queue_sequence", 0)],
+                [(item[0], item[1]) for item in command_indexes["workflow_commands_claim_order_idx"][3]],
+            )
+            self.assertEqual(
+                [("state", 0), ("lease_expires_at", 0)],
+                [(item[0], item[1]) for item in command_indexes["workflow_commands_lease_expiry_idx"][3]],
+            )
+            self.assertEqual(
+                [("project_id", 0), ("queue_sequence", 0)],
+                [(item[0], item[1]) for item in command_indexes["workflow_commands_project_sequence_idx"][3]],
+            )
+            self.assertEqual(
+                [("phases", "project_id", "project_id", "RESTRICT", "RESTRICT"),
+                 ("phases", "phase_id", "phase_id", "RESTRICT", "RESTRICT"),
+                 ("development_runs", "development_run_id", "run_id", "RESTRICT", "RESTRICT")],
+                [(row[2], row[3], row[4], row[5], row[6]) for row in connection.execute("PRAGMA foreign_key_list(workflow_commands)")],
+            )
+            self.assertEqual(
+                [("workflow_commands", "command_id", "command_id", "RESTRICT", "RESTRICT")],
+                [(row[2], row[3], row[4], row[5], row[6]) for row in connection.execute("PRAGMA foreign_key_list(workflow_command_events)")],
+            )
+            normalize = lambda value: " ".join(value.strip().rstrip(";").split()).lower()
+            sql = dict(connection.execute("SELECT name, sql FROM sqlite_master WHERE type='table' AND name LIKE 'workflow_command%'").fetchall())
+            self.assertEqual(normalize(PRODUCTION_MIGRATIONS[3].statements[0]), normalize(sql["workflow_commands"]))
+            self.assertEqual(normalize(PRODUCTION_MIGRATIONS[3].statements[1]), normalize(sql["workflow_command_events"]))
+        finally:
+            connection.close()
+
+    def test_populated_version_three_upgrades_preserving_all_p1_tables(self) -> None:
+        connection = sqlite3.connect(self.path)
+        connection.row_factory = sqlite3.Row
+        connection.execute("PRAGMA foreign_keys=ON")
+        try:
+            apply_migrations(connection, "v3-at", PRODUCTION_MIGRATIONS[:3])
+            connection.execute("INSERT INTO development_runs VALUES('run-1','digest','DRAFT',1,'created','updated')")
+            connection.execute("INSERT INTO state_events VALUES('event-1','run-1','DRAFT','FEASIBILITY_CHECKING','ACCEPTED','event-at',1)")
+            connection.execute("INSERT INTO phases VALUES('panam','phase-1','1',?)", ("a" * 64,))
+            connection.execute("INSERT INTO milestone_contracts VALUES('panam','phase-1','milestone-1','1','objective','[]','[]','[]','[]','[]','[]','[]',?)", ("b" * 64,))
+            connection.execute("INSERT INTO approvals VALUES('approval-1','1','SOURCE','subject',?,'PHASE','target','branch','commit','[]','[]','owner','at',?)", ("c" * 64, "d" * 64))
+            connection.execute("INSERT INTO project_policies VALUES('panam','1','C:\\workspace\\panam')")
+            connection.commit()
+            before = {
+                table: [tuple(row) for row in connection.execute(f"SELECT * FROM {table}")]
+                for table in ("schema_migrations", "development_runs", "state_events", "phases", "milestone_contracts", "approvals", "project_policies")
+            }
+            apply_migrations(connection, "v4-at", PRODUCTION_MIGRATIONS)
+            for table in before:
+                expected = before[table]
+                if table == "schema_migrations":
+                    expected = expected + [(4, "v4-at")]
+                self.assertEqual(expected, [tuple(row) for row in connection.execute(f"SELECT * FROM {table}")])
+            self.assertEqual(0, connection.execute("SELECT count(*) FROM workflow_commands").fetchone()[0])
+            self.assertEqual(0, connection.execute("SELECT count(*) FROM workflow_command_events").fetchone()[0])
+        finally:
+            connection.close()
+
+    def test_migration_four_statement_and_ledger_failures_roll_back_version_three(self) -> None:
+        for failure_kind in ("statement", "ledger"):
+            with self.subTest(failure=failure_kind):
+                path = self.directory / f"v4-{failure_kind}.sqlite3"
+                connection = sqlite3.connect(path)
+                connection.row_factory = sqlite3.Row
+                try:
+                    apply_migrations(connection, "v3-at", PRODUCTION_MIGRATIONS[:3])
+                    connection.execute("INSERT INTO project_policies VALUES('panam','1','C:\\repo')")
+                    connection.commit()
+                    if failure_kind == "statement":
+                        registry = PRODUCTION_MIGRATIONS[:3] + (
+                            Migration(4, (PRODUCTION_MIGRATIONS[3].statements[0], "INSERT INTO absent_table VALUES(1)")),
+                        )
+                    else:
+                        connection.execute(
+                            "CREATE TRIGGER reject_v4 BEFORE INSERT ON schema_migrations "
+                            "WHEN NEW.version=4 BEGIN SELECT RAISE(ABORT,'reject'); END"
+                        )
+                        connection.commit()
+                        registry = PRODUCTION_MIGRATIONS
+                    with self.assertRaises(MigrationError):
+                        apply_migrations(connection, "v4-at", registry)
+                    self.assertEqual([1, 2, 3], [row[0] for row in connection.execute("SELECT version FROM schema_migrations ORDER BY version")])
+                    self.assertEqual(("panam", "1", "C:\\repo"), tuple(connection.execute("SELECT * FROM project_policies").fetchone()))
+                    self.assertIsNone(connection.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='workflow_commands'").fetchone())
+                    self.assertIsNone(connection.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='workflow_command_events'").fetchone())
+                finally:
+                    connection.close()
+
+
+class SqliteWorkflowCommandRepositoryTest(unittest.TestCase):
+    def setUp(self) -> None:
+        self._temporary_directory = tempfile.TemporaryDirectory()
+        self.directory = Path(self._temporary_directory.name)
+        self.path = self.directory / "queue.sqlite3"
+        SqliteRunStore(self.path).initialize("initialized-at")
+        self.repository = SqliteWorkflowCommandRepository(self.path)
+        self.providers = QueueProviders()
+        registry = CommandDefinitionRegistry((_queue_definition(),))
+        self.service = DurableCommandQueueService(
+            self.repository,
+            registry,
+            10,
+            clock=self.providers.clock,
+            id_factory=self.providers.identifier,
+        )
+
+    def tearDown(self) -> None:
+        self._temporary_directory.cleanup()
+
+    def _enqueue(self, *, key: str = "key-1", priority: int = 0, value: int = 1) -> QueueResult:
+        return self.service.enqueue(
+            project_id="panam",
+            command_kind="TEST_COMMAND",
+            command_schema_version=1,
+            payload={"value": value},
+            idempotency_key=key,
+            actor_id="requester",
+            priority=priority,
+        )
+
+    def test_enqueue_idempotency_queries_reopen_and_ordering(self) -> None:
+        first = self._enqueue(priority=1)
+        self.assertEqual(QueueResultCode.APPLIED, first.code)
+        duplicate = self._enqueue(priority=1)
+        self.assertEqual(QueueResultCode.EXISTING_IDENTICAL, duplicate.code)
+        conflict = self._enqueue(priority=1, value=2)
+        self.assertEqual(QueueResultCode.IDEMPOTENCY_CONFLICT, conflict.code)
+        second = self._enqueue(key="key-2", priority=9)
+        self.assertEqual(QueueResultCode.APPLIED, second.code)
+        listed = self.service.list_project("panam")
+        self.assertEqual(QueueResultCode.LISTED, listed.code)
+        self.assertEqual((first.command.command_id, second.command.command_id), tuple(command.command_id for command in listed.commands))
+        reopened = SqliteWorkflowCommandRepository(self.path)
+        self.assertEqual(first.command, reopened.get(first.command.command_id))
+        self.assertEqual(1, len(reopened.history(first.command.command_id)))
+
+    def test_database_checks_reject_invalid_grammar_and_cross_field_rows(self) -> None:
+        enqueued = self._enqueue()
+        command_id = enqueued.command.command_id
+        event_id = enqueued.event.event_id
+        connection = sqlite3.connect(self.path)
+        try:
+            before = tuple(connection.iterdump())
+            invalid_updates = (
+                ("UPDATE workflow_commands SET command_id=? WHERE command_id=?", ("-0000000-0000-0000-0000-000000000001", command_id)),
+                ("UPDATE workflow_commands SET created_at=? WHERE command_id=?", ("-026-08-24T12:00:00.000000Z", command_id)),
+                ("UPDATE workflow_commands SET command_schema_version=0 WHERE command_id=?", (command_id,)),
+                ("UPDATE workflow_commands SET payload_json='x' WHERE command_id=?", (command_id,)),
+                ("UPDATE workflow_commands SET intent_digest=? WHERE command_id=?", ("A" * 64, command_id)),
+                ("UPDATE workflow_commands SET idempotency_key='-bad' WHERE command_id=?", (command_id,)),
+                ("UPDATE workflow_commands SET priority=101 WHERE command_id=?", (command_id,)),
+                ("UPDATE workflow_commands SET state='UNKNOWN' WHERE command_id=?", (command_id,)),
+                ("UPDATE workflow_commands SET state_version=0 WHERE command_id=?", (command_id,)),
+                ("UPDATE workflow_commands SET claim_count=-1 WHERE command_id=?", (command_id,)),
+                ("UPDATE workflow_commands SET lease_owner='worker' WHERE command_id=?", (command_id,)),
+                ("UPDATE workflow_commands SET state='CLAIMED', lease_owner='worker', lease_acquired_at=created_at, lease_expires_at=created_at WHERE command_id=?", (command_id,)),
+                ("UPDATE workflow_commands SET cancellation_requested_by='actor' WHERE command_id=?", (command_id,)),
+                ("UPDATE workflow_commands SET failure_code='FAILED_TEST' WHERE command_id=?", (command_id,)),
+                ("UPDATE workflow_commands SET started_at=created_at WHERE command_id=?", (command_id,)),
+                ("UPDATE workflow_commands SET completed_at=created_at WHERE command_id=?", (command_id,)),
+                ("UPDATE workflow_command_events SET event_id=? WHERE event_id=?", ("-0000000-0000-0000-0000-000000000002", event_id)),
+                ("UPDATE workflow_command_events SET event_kind='UNKNOWN' WHERE event_id=?", (event_id,)),
+                ("UPDATE workflow_command_events SET actor_id='-bad' WHERE event_id=?", (event_id,)),
+                ("UPDATE workflow_command_events SET occurred_at='-026-08-24T12:00:00.000000Z' WHERE event_id=?", (event_id,)),
+                ("UPDATE workflow_command_events SET claim_count=-1 WHERE event_id=?", (event_id,)),
+                ("UPDATE workflow_command_events SET next_state_version=2 WHERE event_id=?", (event_id,)),
+                ("UPDATE workflow_command_events SET lease_owner='worker' WHERE event_id=?", (event_id,)),
+            )
+            for statement, parameters in invalid_updates:
+                with self.subTest(statement=statement), self.assertRaises(sqlite3.IntegrityError):
+                    connection.execute(statement, parameters)
+                connection.rollback()
+                self.assertEqual(before, tuple(connection.iterdump()))
+        finally:
+            connection.close()
+
+    def test_exact_schema_validation_rejects_extra_table_and_event_index(self) -> None:
+        self._enqueue()
+        connection = sqlite3.connect(self.path)
+        try:
+            connection.execute("CREATE TABLE extra_queue_scope(value INTEGER)")
+            connection.commit()
+        finally:
+            connection.close()
+        with self.assertRaises(RepositoryError) as raised:
+            self.repository.list_project("panam")
+        self.assertEqual(RepositoryFailureCode.SCHEMA_MISMATCH, raised.exception.code)
+
+        connection = sqlite3.connect(self.path)
+        try:
+            connection.execute("DROP TABLE extra_queue_scope")
+            connection.execute("CREATE INDEX unexpected_event_idx ON workflow_command_events(actor_id)")
+            connection.commit()
+        finally:
+            connection.close()
+        with self.assertRaises(RepositoryError) as raised:
+            self.repository.list_project("panam")
+        self.assertEqual(RepositoryFailureCode.SCHEMA_MISMATCH, raised.exception.code)
+
+    def test_relationship_foreign_keys_and_read_queries_never_migrate(self) -> None:
+        with self.assertRaises(RepositoryError):
+            self.service.enqueue(
+                project_id="panam", development_run_id="missing-run", phase_id=None,
+                command_kind="TEST_COMMAND", command_schema_version=1,
+                payload={"value": 1}, idempotency_key="missing-run", actor_id="actor",
+            )
+        with self.assertRaises(RepositoryError):
+            self.service.enqueue(
+                project_id="panam", development_run_id=None, phase_id="missing-phase",
+                command_kind="TEST_COMMAND", command_schema_version=1,
+                payload={"value": 1}, idempotency_key="missing-phase", actor_id="actor",
+            )
+        connection = sqlite3.connect(self.path)
+        try:
+            connection.execute("INSERT INTO development_runs VALUES('run-1','digest','DRAFT',1,'created','updated')")
+            connection.execute("INSERT INTO phases VALUES('panam','phase-1','1',?)", ("a" * 64,))
+            connection.commit()
+        finally:
+            connection.close()
+        linked = self.service.enqueue(
+            project_id="panam", development_run_id="run-1", phase_id="phase-1",
+            command_kind="TEST_COMMAND", command_schema_version=1,
+            payload={"value": 1}, idempotency_key="linked", actor_id="actor",
+        )
+        self.assertEqual(QueueResultCode.APPLIED, linked.code)
+        with (
+            patch.object(SqliteRunStore, "initialize", side_effect=AssertionError("initialize")) as initialize,
+            patch("panam_development_loop.sqlite_migrations.initialize_database", side_effect=AssertionError("migrate")) as migrate,
+        ):
+            self.service.get(linked.command.command_id)
+            self.service.list_project("panam")
+            self.service.history(linked.command.command_id)
+        initialize.assert_not_called()
+        migrate.assert_not_called()
+
+    def test_full_success_and_failure_paths(self) -> None:
+        enqueued = self._enqueue()
+        command = enqueued.command
+        claimed = self.service.claim_next(lease_owner="worker-1")
+        self.assertEqual((WorkflowCommandState.CLAIMED, 2, 1), (claimed.command.state, claimed.command.state_version, claimed.command.claim_count))
+        self.providers.current += timedelta(seconds=1)
+        running = self.service.mark_running(command_id=command.command_id, expected_state=WorkflowCommandState.CLAIMED, expected_state_version=2, lease_owner="worker-1")
+        self.assertEqual(WorkflowCommandState.RUNNING, running.command.state)
+        self.providers.current += timedelta(seconds=1)
+        succeeded = self.service.mark_succeeded(command_id=command.command_id, expected_state=WorkflowCommandState.RUNNING, expected_state_version=3, lease_owner="worker-1")
+        self.assertEqual(WorkflowCommandState.SUCCEEDED, succeeded.command.state)
+        self.assertEqual((WorkflowCommandEventKind.ENQUEUED, WorkflowCommandEventKind.CLAIMED, WorkflowCommandEventKind.STARTED, WorkflowCommandEventKind.SUCCEEDED), tuple(event.event_kind for event in self.service.history(command.command_id).events))
+        terminal_reuse = self._enqueue()
+        self.assertEqual(QueueResultCode.EXISTING_IDENTICAL, terminal_reuse.code)
+        self.assertEqual(succeeded.command, terminal_reuse.command)
+        self.assertIsNone(terminal_reuse.event)
+        self.assertEqual(4, len(self.service.history(command.command_id).events))
+        terminal = self.service.mark_failed(command_id=command.command_id, expected_state=WorkflowCommandState.RUNNING, expected_state_version=4, lease_owner="worker-1", failure_code="FAILED_TEST")
+        self.assertEqual(QueueResultCode.TERMINAL_OBSERVED, terminal.code)
+
+    def test_all_normal_result_codes_and_remaining_event_routes(self) -> None:
+        absent = str(UUID(int=999))
+        self.assertEqual(QueueResultCode.NOT_FOUND, self.service.get(absent).code)
+        self.assertEqual(QueueResultCode.NOT_FOUND, self.service.history(absent).code)
+        self.assertEqual(QueueResultCode.NO_ELIGIBLE_COMMAND, self.service.claim_next(lease_owner="worker").code)
+        missing = self.service.mark_running(
+            command_id=absent, expected_state=WorkflowCommandState.CLAIMED,
+            expected_state_version=1, lease_owner="worker",
+        )
+        self.assertEqual(QueueResultCode.NOT_FOUND, missing.code)
+
+        active = self._enqueue(key="routes")
+        claimed = self.service.claim_next(lease_owner="worker")
+        not_expired = self.service.recover_expired_claim(
+            command_id=active.command.command_id, expected_state=WorkflowCommandState.CLAIMED,
+            expected_state_version=2, recovery_actor="recovery",
+        )
+        self.assertEqual(QueueResultCode.LEASE_NOT_EXPIRED, not_expired.code)
+        no_request = self.service.acknowledge_cancellation(
+            command_id=active.command.command_id, expected_state=WorkflowCommandState.CLAIMED,
+            expected_state_version=2, lease_owner="worker",
+        )
+        self.assertEqual(QueueResultCode.CANCELLATION_NOT_REQUESTED, no_request.code)
+        self.providers.current += timedelta(seconds=1)
+        renewed_claimed = self.service.renew_lease(
+            command_id=active.command.command_id, expected_state=WorkflowCommandState.CLAIMED,
+            expected_state_version=2, lease_owner="worker",
+        )
+        self.assertEqual((WorkflowCommandState.CLAIMED, 3, 1, WorkflowCommandEventKind.LEASE_RENEWED), (renewed_claimed.command.state, renewed_claimed.command.state_version, renewed_claimed.command.claim_count, renewed_claimed.event.event_kind))
+        self.providers.current += timedelta(seconds=1)
+        running = self.service.mark_running(
+            command_id=active.command.command_id, expected_state=WorkflowCommandState.CLAIMED,
+            expected_state_version=3, lease_owner="worker",
+        )
+        self.providers.current += timedelta(seconds=1)
+        renewed_running = self.service.renew_lease(
+            command_id=active.command.command_id, expected_state=WorkflowCommandState.RUNNING,
+            expected_state_version=4, lease_owner="worker",
+        )
+        self.assertEqual((WorkflowCommandState.RUNNING, 5, 1, WorkflowCommandEventKind.LEASE_RENEWED), (renewed_running.command.state, renewed_running.command.state_version, renewed_running.command.claim_count, renewed_running.event.event_kind))
+        self.providers.current += timedelta(seconds=1)
+        requested = self.service.request_cancellation(
+            command_id=active.command.command_id, expected_state=WorkflowCommandState.RUNNING,
+            expected_state_version=5, requested_by="requester", reason_code="STOPPED",
+        )
+        repeated = self.service.request_cancellation(
+            command_id=active.command.command_id, expected_state=WorkflowCommandState.RUNNING,
+            expected_state_version=6, requested_by="requester", reason_code="STOPPED",
+        )
+        self.assertEqual(QueueResultCode.CANCELLATION_ALREADY_REQUESTED, repeated.code)
+        self.providers.current += timedelta(seconds=1)
+        cancelled = self.service.acknowledge_cancellation(
+            command_id=active.command.command_id, expected_state=WorkflowCommandState.RUNNING,
+            expected_state_version=6, lease_owner="worker",
+        )
+        self.assertEqual((WorkflowCommandState.CANCELLED, WorkflowCommandEventKind.CANCELLED), (cancelled.command.state, cancelled.event.event_kind))
+
+        failing = self._enqueue(key="failure")
+        claimed_failure = self.service.claim_next(lease_owner="worker")
+        self.providers.current += timedelta(seconds=1)
+        running_failure = self.service.mark_running(
+            command_id=failing.command.command_id, expected_state=WorkflowCommandState.CLAIMED,
+            expected_state_version=2, lease_owner="worker",
+        )
+        self.providers.current += timedelta(seconds=1)
+        failed = self.service.mark_failed(
+            command_id=failing.command.command_id, expected_state=WorkflowCommandState.RUNNING,
+            expected_state_version=3, lease_owner="worker", failure_code="FAILED_TEST",
+        )
+        self.assertEqual((WorkflowCommandState.FAILED, "FAILED_TEST", WorkflowCommandEventKind.FAILED), (failed.command.state, failed.command.failure_code, failed.event.event_kind))
+
+        expiring = self._enqueue(key="expired-owner")
+        expired_claim = self.service.claim_next(lease_owner="worker")
+        self.providers.current += timedelta(seconds=10)
+        expired = self.service.renew_lease(
+            command_id=expiring.command.command_id, expected_state=WorkflowCommandState.CLAIMED,
+            expected_state_version=2, lease_owner="worker",
+        )
+        self.assertEqual(QueueResultCode.LEASE_EXPIRED, expired.code)
+
+    def test_cancellation_request_triplet_survives_success_and_failure(self) -> None:
+        for terminal_operation in ("mark_succeeded", "mark_failed"):
+            with self.subTest(operation=terminal_operation):
+                enqueued = self._enqueue(key=f"preserve-{terminal_operation}")
+                claimed = self.service.claim_next(lease_owner="worker")
+                self.providers.current += timedelta(seconds=1)
+                running = self.service.mark_running(
+                    command_id=enqueued.command.command_id,
+                    expected_state=WorkflowCommandState.CLAIMED,
+                    expected_state_version=2,
+                    lease_owner="worker",
+                )
+                self.providers.current += timedelta(seconds=1)
+                requested = self.service.request_cancellation(
+                    command_id=enqueued.command.command_id,
+                    expected_state=WorkflowCommandState.RUNNING,
+                    expected_state_version=3,
+                    requested_by="requester",
+                    reason_code="STOPPED",
+                )
+                self.providers.current += timedelta(seconds=1)
+                arguments = dict(
+                    command_id=enqueued.command.command_id,
+                    expected_state=WorkflowCommandState.RUNNING,
+                    expected_state_version=4,
+                    lease_owner="worker",
+                )
+                if terminal_operation == "mark_failed":
+                    arguments["failure_code"] = "FAILED_TEST"
+                terminal = getattr(self.service, terminal_operation)(**arguments)
+                self.assertEqual(
+                    (requested.command.cancellation_requested_at, "requester", "STOPPED"),
+                    (
+                        terminal.command.cancellation_requested_at,
+                        terminal.command.cancellation_requested_by,
+                        terminal.command.cancellation_reason_code,
+                    ),
+                )
+                if terminal_operation == "mark_succeeded":
+                    self.assertIsNone(terminal.event.reason_code)
+                else:
+                    self.assertEqual("FAILED_TEST", terminal.event.reason_code)
+
+    def test_claim_priority_fifo_and_idempotency_digest_dimensions(self) -> None:
+        low = self._enqueue(key="low", priority=1)
+        high_first = self._enqueue(key="high-1", priority=9)
+        high_second = self._enqueue(key="high-2", priority=9)
+        claimed = tuple(self.service.claim_next(lease_owner=f"worker-{index}").command.command_id for index in range(3))
+        self.assertEqual(
+            (high_first.command.command_id, high_second.command.command_id, low.command.command_id),
+            claimed,
+        )
+
+        base = _queue_envelope(idempotency_key="digest-key")
+        first = self.repository.enqueue(
+            command_id=str(UUID(int=500)), event_id=str(UUID(int=501)), envelope=base,
+            actor_id="actor", occurred_at="2026-08-24T12:00:00.000000Z",
+        )
+        self.assertEqual(QueueResultCode.APPLIED, first.code)
+
+        def envelope(**updates: object) -> ValidatedCommandEnvelope:
+            values = {
+                "project_id": base.project_id, "development_run_id": base.development_run_id,
+                "phase_id": base.phase_id, "command_kind": base.command_kind,
+                "command_schema_version": base.command_schema_version,
+                "payload": json.loads(base.payload_json), "priority": base.priority,
+                "idempotency_key": base.idempotency_key,
+            }
+            values.update(updates)
+            payload = values.pop("payload")
+            digest = _intent_digest(payload=payload, **{key: values[key] for key in ("project_id", "development_run_id", "phase_id", "command_kind", "command_schema_version", "priority")})
+            return ValidatedCommandEnvelope(
+                values["project_id"], values["development_run_id"], values["phase_id"],
+                values["command_kind"], values["command_schema_version"],
+                _canonical_queue_payload(payload), digest, values["idempotency_key"], values["priority"],
+            )
+
+        variants = (
+            envelope(development_run_id="run-1"), envelope(phase_id="phase-1"),
+            envelope(command_kind="OTHER_COMMAND"), envelope(command_schema_version=2),
+            envelope(payload={"value": 2}), envelope(priority=1),
+        )
+        for index, candidate in enumerate(variants, start=510):
+            with self.subTest(field=index):
+                result = self.repository.enqueue(
+                    command_id=str(UUID(int=index)), event_id=str(UUID(int=index + 100)),
+                    envelope=candidate, actor_id="actor",
+                    occurred_at="2026-08-24T12:00:00.000000Z",
+                )
+                self.assertEqual(QueueResultCode.IDEMPOTENCY_CONFLICT, result.code)
+        independent_project = envelope(project_id="Panam")
+        self.assertEqual(
+            QueueResultCode.APPLIED,
+            self.repository.enqueue(
+                command_id=str(UUID(int=700)), event_id=str(UUID(int=701)),
+                envelope=independent_project, actor_id="actor",
+                occurred_at="2026-08-24T12:00:00.000000Z",
+            ).code,
+        )
+        excluded_key = envelope(idempotency_key="digest-key-2")
+        self.assertEqual(base.intent_digest, excluded_key.intent_digest)
+        self.assertEqual(
+            QueueResultCode.APPLIED,
+            self.repository.enqueue(
+                command_id=str(UUID(int=702)), event_id=str(UUID(int=703)),
+                envelope=excluded_key, actor_id="actor",
+                occurred_at="2026-08-24T12:00:00.000000Z",
+            ).code,
+        )
+
+    def test_cancellation_and_recovery_paths(self) -> None:
+        pending = self._enqueue()
+        cancelled = self.service.request_cancellation(command_id=pending.command.command_id, expected_state=WorkflowCommandState.PENDING, expected_state_version=1, requested_by="owner", reason_code="STOPPED")
+        self.assertEqual(WorkflowCommandState.CANCELLED, cancelled.command.state)
+
+        active = self._enqueue(key="active")
+        claimed = self.service.claim_next(lease_owner="worker")
+        requested = self.service.request_cancellation(command_id=active.command.command_id, expected_state=WorkflowCommandState.CLAIMED, expected_state_version=2, requested_by="owner", reason_code="STOPPED")
+        self.assertEqual(WorkflowCommandState.CLAIMED, requested.command.state)
+        acknowledged = self.service.acknowledge_cancellation(command_id=active.command.command_id, expected_state=WorkflowCommandState.CLAIMED, expected_state_version=3, lease_owner="worker")
+        self.assertEqual(WorkflowCommandState.CANCELLED, acknowledged.command.state)
+
+        recoverable = self._enqueue(key="recover")
+        recovered_claim = self.service.claim_next(lease_owner="worker")
+        self.providers.current += timedelta(seconds=11)
+        recovered = self.service.recover_expired_claim(command_id=recoverable.command.command_id, expected_state=WorkflowCommandState.CLAIMED, expected_state_version=2, recovery_actor="recovery")
+        self.assertEqual(WorkflowCommandState.PENDING, recovered.command.state)
+        self.service.request_cancellation(
+            command_id=recoverable.command.command_id,
+            expected_state=WorkflowCommandState.PENDING,
+            expected_state_version=3,
+            requested_by="owner",
+            reason_code="STOPPED",
+        )
+
+        requested_recovery = self._enqueue(key="recover-cancel")
+        claimed_recovery = self.service.claim_next(lease_owner="worker")
+        requested = self.service.request_cancellation(
+            command_id=requested_recovery.command.command_id,
+            expected_state=WorkflowCommandState.CLAIMED,
+            expected_state_version=2,
+            requested_by="owner",
+            reason_code="STOPPED",
+        )
+        self.providers.current += timedelta(seconds=11)
+        recovered_cancel = self.service.recover_expired_claim(
+            command_id=requested_recovery.command.command_id,
+            expected_state=WorkflowCommandState.CLAIMED,
+            expected_state_version=3,
+            recovery_actor="recovery",
+        )
+        self.assertEqual((WorkflowCommandState.CANCELLED, WorkflowCommandEventKind.CANCELLED), (recovered_cancel.command.state, recovered_cancel.event.event_kind))
+        self.assertEqual("worker", recovered_cancel.event.lease_owner)
+
+    def test_expired_running_reconciliation_and_fencing(self) -> None:
+        enqueued = self._enqueue()
+        claimed = self.service.claim_next(lease_owner="worker")
+        stale = self.service.mark_running(command_id=enqueued.command.command_id, expected_state=WorkflowCommandState.CLAIMED, expected_state_version=1, lease_owner="wrong")
+        self.assertEqual(QueueResultCode.CAS_CONFLICT, stale.code)
+        wrong_owner = self.service.mark_running(command_id=enqueued.command.command_id, expected_state=WorkflowCommandState.CLAIMED, expected_state_version=2, lease_owner="wrong")
+        self.assertEqual(QueueResultCode.LEASE_OWNER_MISMATCH, wrong_owner.code)
+        running = self.service.mark_running(command_id=enqueued.command.command_id, expected_state=WorkflowCommandState.CLAIMED, expected_state_version=2, lease_owner="worker")
+        self.providers.current += timedelta(seconds=11)
+        reconciled = self.service.recover_expired_claim(command_id=enqueued.command.command_id, expected_state=WorkflowCommandState.RUNNING, expected_state_version=3, recovery_actor="recovery")
+        self.assertEqual(QueueResultCode.RECONCILIATION_REQUIRED, reconciled.code)
+        self.assertEqual(running.command, self.service.get(enqueued.command.command_id).command)
+
+    def test_frozen_outcome_precedence_under_colliding_conditions(self) -> None:
+        expired_command = self._enqueue(key="precedence-expired")
+        expired_claim = self.service.claim_next(lease_owner="worker")
+        self.providers.current += timedelta(seconds=11)
+        stale_wrong_expired = self.service.mark_running(
+            command_id=expired_command.command.command_id,
+            expected_state=WorkflowCommandState.CLAIMED,
+            expected_state_version=1,
+            lease_owner="wrong",
+        )
+        self.assertEqual(QueueResultCode.CAS_CONFLICT, stale_wrong_expired.code)
+        wrong_and_expired = self.service.mark_running(
+            command_id=expired_command.command.command_id,
+            expected_state=WorkflowCommandState.CLAIMED,
+            expected_state_version=2,
+            lease_owner="wrong",
+        )
+        self.assertEqual(QueueResultCode.LEASE_OWNER_MISMATCH, wrong_and_expired.code)
+
+        no_request_command = self._enqueue(key="precedence-cancel")
+        no_request_claim = self.service.claim_next(lease_owner="worker-2")
+        cancellation_missing_and_wrong_owner = self.service.acknowledge_cancellation(
+            command_id=no_request_command.command.command_id,
+            expected_state=WorkflowCommandState.CLAIMED,
+            expected_state_version=2,
+            lease_owner="wrong",
+        )
+        self.assertEqual(
+            QueueResultCode.CANCELLATION_NOT_REQUESTED,
+            cancellation_missing_and_wrong_owner.code,
+        )
+
+        terminal_command = self._enqueue(key="precedence-terminal")
+        terminal_claim = self.service.claim_next(lease_owner="worker-3")
+        running = self.service.mark_running(
+            command_id=terminal_command.command.command_id,
+            expected_state=WorkflowCommandState.CLAIMED,
+            expected_state_version=2,
+            lease_owner="worker-3",
+        )
+        succeeded = self.service.mark_succeeded(
+            command_id=terminal_command.command.command_id,
+            expected_state=WorkflowCommandState.RUNNING,
+            expected_state_version=3,
+            lease_owner="worker-3",
+        )
+        terminal_and_stale = self.service.request_cancellation(
+            command_id=terminal_command.command.command_id,
+            expected_state=WorkflowCommandState.PENDING,
+            expected_state_version=1,
+            requested_by="actor",
+            reason_code="STOPPED",
+        )
+        self.assertEqual(QueueResultCode.TERMINAL_OBSERVED, terminal_and_stale.code)
+
+    def test_duplicate_event_rolls_back_claim(self) -> None:
+        enqueued = self._enqueue()
+        with self.assertRaises(RepositoryError):
+            self.repository.claim_next(
+                event_id=enqueued.event.event_id,
+                lease_owner="worker",
+                lease_acquired_at="2026-08-24T12:00:01.000000Z",
+                lease_expires_at="2026-08-24T12:00:11.000000Z",
+            )
+        current = self.repository.get(enqueued.command.command_id)
+        self.assertEqual((WorkflowCommandState.PENDING, 1), (current.state, current.state_version))
+        self.assertEqual(1, len(self.repository.history(enqueued.command.command_id)))
+
+    def test_every_mutation_family_rolls_back_row_when_event_insert_fails(self) -> None:
+        operations = (
+            "enqueue", "claim_next", "renew_lease", "mark_running",
+            "request_cancellation", "acknowledge_cancellation",
+            "mark_succeeded", "mark_failed", "recover_expired_claim",
+        )
+        for ordinal, operation in enumerate(operations, start=1):
+            with self.subTest(operation=operation):
+                path = self.directory / f"rollback-{ordinal}.sqlite3"
+                SqliteRunStore(path).initialize("initialized-at")
+                repository = SqliteWorkflowCommandRepository(path)
+                providers = QueueProviders()
+                service = DurableCommandQueueService(
+                    repository, CommandDefinitionRegistry((_queue_definition(),)), 10,
+                    clock=providers.clock, id_factory=providers.identifier,
+                )
+                command: WorkflowCommand | None = None
+                if operation != "enqueue":
+                    command = service.enqueue(
+                        project_id="panam", command_kind="TEST_COMMAND",
+                        command_schema_version=1, payload={"value": 1},
+                        idempotency_key=f"key-{ordinal}", actor_id="actor",
+                    ).command
+                if operation in {"renew_lease", "mark_running", "acknowledge_cancellation", "mark_succeeded", "mark_failed", "recover_expired_claim"}:
+                    claimed = service.claim_next(lease_owner="worker").command
+                if operation == "acknowledge_cancellation":
+                    requested = service.request_cancellation(
+                        command_id=command.command_id, expected_state=WorkflowCommandState.CLAIMED,
+                        expected_state_version=2, requested_by="actor", reason_code="STOPPED",
+                    ).command
+                if operation in {"mark_succeeded", "mark_failed"}:
+                    running = service.mark_running(
+                        command_id=command.command_id, expected_state=WorkflowCommandState.CLAIMED,
+                        expected_state_version=2, lease_owner="worker",
+                    ).command
+                if operation == "recover_expired_claim":
+                    providers.current += timedelta(seconds=11)
+
+                connection = sqlite3.connect(path)
+                try:
+                    before = tuple(connection.iterdump())
+                finally:
+                    connection.close()
+                arguments = {
+                    "enqueue": dict(project_id="panam", command_kind="TEST_COMMAND", command_schema_version=1, payload={"value": 1}, idempotency_key="new-key", actor_id="actor"),
+                    "claim_next": dict(lease_owner="worker"),
+                    "renew_lease": dict(command_id=command.command_id if command else "", expected_state=WorkflowCommandState.CLAIMED, expected_state_version=2, lease_owner="worker"),
+                    "mark_running": dict(command_id=command.command_id if command else "", expected_state=WorkflowCommandState.CLAIMED, expected_state_version=2, lease_owner="worker"),
+                    "request_cancellation": dict(command_id=command.command_id if command else "", expected_state=WorkflowCommandState.PENDING, expected_state_version=1, requested_by="actor", reason_code="STOPPED"),
+                    "acknowledge_cancellation": dict(command_id=command.command_id if command else "", expected_state=WorkflowCommandState.CLAIMED, expected_state_version=3, lease_owner="worker"),
+                    "mark_succeeded": dict(command_id=command.command_id if command else "", expected_state=WorkflowCommandState.RUNNING, expected_state_version=3, lease_owner="worker"),
+                    "mark_failed": dict(command_id=command.command_id if command else "", expected_state=WorkflowCommandState.RUNNING, expected_state_version=3, lease_owner="worker", failure_code="FAILED_TEST"),
+                    "recover_expired_claim": dict(command_id=command.command_id if command else "", expected_state=WorkflowCommandState.CLAIMED, expected_state_version=2, recovery_actor="recovery"),
+                }[operation]
+                with patch.object(repository, "_insert_event", side_effect=sqlite3.OperationalError("injected event insert")):
+                    with self.assertRaises(RepositoryError):
+                        getattr(service, operation)(**arguments)
+                connection = sqlite3.connect(path)
+                try:
+                    self.assertEqual(before, tuple(connection.iterdump()))
+                finally:
+                    connection.close()
+                for failure_mode in ("row", "commit"):
+                    with self.subTest(operation=operation, failure=failure_mode):
+                        underlying = sqlite3.connect(path, timeout=0.0)
+                        underlying.row_factory = sqlite3.Row
+                        underlying.execute("PRAGMA foreign_keys=ON")
+                        proxy = _ConnectionProxy(
+                            underlying,
+                            fail_statement=(
+                                "INSERT INTO WORKFLOW_COMMANDS"
+                                if failure_mode == "row" and operation == "enqueue"
+                                else "UPDATE WORKFLOW_COMMANDS"
+                                if failure_mode == "row"
+                                else None
+                            ),
+                            fail_commit=failure_mode == "commit",
+                        )
+                        with patch(
+                            "panam_development_loop.sqlite_repositories._open_connection",
+                            return_value=proxy,
+                        ):
+                            with self.assertRaises(RepositoryError):
+                                getattr(service, operation)(**arguments)
+                        self.assertGreaterEqual(proxy.rollback_calls, 1)
+                        self.assertEqual(1, proxy.close_calls)
+                        connection = sqlite3.connect(path)
+                        try:
+                            self.assertEqual(before, tuple(connection.iterdump()))
+                        finally:
+                            connection.close()
+
+    def test_corrupt_history_fails_closed_for_adjacency_sequence_time_and_count(self) -> None:
+        corruptions = {
+            "adjacency": (
+                "UPDATE workflow_command_events SET prior_state='RUNNING', next_state='RUNNING' WHERE next_state_version=3",
+                (),
+            ),
+            "event_sequence": (
+                "UPDATE workflow_command_events SET event_sequence=99 WHERE next_state_version=3",
+                (),
+            ),
+            "time_order": (
+                "UPDATE workflow_command_events SET occurred_at='2026-08-24T12:00:00.500000Z' WHERE next_state_version=3",
+                (),
+            ),
+            "claim_count": (
+                "UPDATE workflow_command_events SET claim_count=2 WHERE next_state_version>=3",
+                (),
+            ),
+        }
+        for ordinal, (name, (statement, parameters)) in enumerate(corruptions.items(), start=1):
+            with self.subTest(corruption=name):
+                path = self.directory / f"corrupt-{ordinal}.sqlite3"
+                SqliteRunStore(path).initialize("initialized-at")
+                providers = QueueProviders()
+                service = DurableCommandQueueService(
+                    SqliteWorkflowCommandRepository(path),
+                    CommandDefinitionRegistry((_queue_definition(),)), 10,
+                    clock=providers.clock, id_factory=providers.identifier,
+                )
+                enqueued = service.enqueue(project_id="panam", command_kind="TEST_COMMAND", command_schema_version=1, payload={"value": 1}, idempotency_key="key", actor_id="actor")
+                providers.current += timedelta(seconds=1)
+                claimed = service.claim_next(lease_owner="worker")
+                providers.current += timedelta(seconds=1)
+                requested = service.request_cancellation(command_id=enqueued.command.command_id, expected_state=WorkflowCommandState.CLAIMED, expected_state_version=2, requested_by="actor", reason_code="STOPPED")
+                providers.current += timedelta(seconds=1)
+                running = service.mark_running(command_id=enqueued.command.command_id, expected_state=WorkflowCommandState.CLAIMED, expected_state_version=3, lease_owner="worker")
+                connection = sqlite3.connect(path)
+                try:
+                    connection.execute("PRAGMA ignore_check_constraints=ON")
+                    connection.execute(statement, parameters)
+                    if name == "time_order":
+                        connection.execute("UPDATE workflow_commands SET cancellation_requested_at='2026-08-24T12:00:00.500000Z'")
+                    if name == "claim_count":
+                        connection.execute("UPDATE workflow_commands SET claim_count=2")
+                    connection.commit()
+                finally:
+                    connection.close()
+                with self.assertRaises(RepositoryError) as raised:
+                    SqliteWorkflowCommandRepository(path).get(enqueued.command.command_id)
+                self.assertEqual(RepositoryFailureCode.MALFORMED_PERSISTED_PAYLOAD, raised.exception.code)
+
+    def test_corrupt_payload_digest_calendar_and_event_facts_fail_closed(self) -> None:
+        corruptions = {
+            "payload": (
+                "UPDATE workflow_commands SET payload_json='{\"value\": 1}'",
+                None,
+            ),
+            "digest": (
+                "UPDATE workflow_commands SET intent_digest=?",
+                ("0" * 64,),
+            ),
+            "calendar": (
+                "UPDATE workflow_commands SET created_at='2026-02-30T12:00:00.000000Z', updated_at='2026-02-30T12:00:00.000000Z'",
+                "UPDATE workflow_command_events SET occurred_at='2026-02-30T12:00:00.000000Z'",
+            ),
+            "event_reason": (
+                "UPDATE workflow_command_events SET reason_code='STOPPED'",
+                None,
+            ),
+        }
+        for ordinal, (name, (first_statement, second)) in enumerate(corruptions.items(), start=1):
+            with self.subTest(corruption=name):
+                path = self.directory / f"payload-corrupt-{ordinal}.sqlite3"
+                SqliteRunStore(path).initialize("initialized-at")
+                service = DurableCommandQueueService(
+                    SqliteWorkflowCommandRepository(path),
+                    CommandDefinitionRegistry((_queue_definition(),)), 10,
+                    clock=lambda: datetime(2026, 8, 24, 12, tzinfo=timezone.utc),
+                    id_factory=iter((str(UUID(int=ordinal * 10 + 1)), str(UUID(int=ordinal * 10 + 2)))).__next__,
+                )
+                enqueued = service.enqueue(
+                    project_id="panam", command_kind="TEST_COMMAND",
+                    command_schema_version=1, payload={"value": 1},
+                    idempotency_key="key", actor_id="actor",
+                )
+                connection = sqlite3.connect(path)
+                try:
+                    if name == "digest":
+                        connection.execute(first_statement, second)
+                    else:
+                        connection.execute(first_statement)
+                        if isinstance(second, str):
+                            connection.execute(second)
+                    connection.commit()
+                finally:
+                    connection.close()
+                with self.assertRaises(RepositoryError) as raised:
+                    SqliteWorkflowCommandRepository(path).get(enqueued.command.command_id)
+                self.assertEqual(RepositoryFailureCode.MALFORMED_PERSISTED_PAYLOAD, raised.exception.code)
+
+    def test_history_rejects_cancel_without_request_and_late_renewal(self) -> None:
+        for ordinal, corruption in enumerate(
+            (
+                "cancel_without_request",
+                "late_renewal",
+                "repeated_request",
+                "mismatched_cancel_reason",
+            ),
+            start=1,
+        ):
+            with self.subTest(corruption=corruption):
+                path = self.directory / f"history-lease-{ordinal}.sqlite3"
+                SqliteRunStore(path).initialize("initialized-at")
+                providers = QueueProviders()
+                service = DurableCommandQueueService(
+                    SqliteWorkflowCommandRepository(path),
+                    CommandDefinitionRegistry((_queue_definition(),)), 10,
+                    clock=providers.clock, id_factory=providers.identifier,
+                )
+                enqueued = service.enqueue(
+                    project_id="panam", command_kind="TEST_COMMAND",
+                    command_schema_version=1, payload={"value": 1},
+                    idempotency_key="key", actor_id="actor",
+                )
+                claimed = service.claim_next(lease_owner="worker")
+                command_id = enqueued.command.command_id
+                if corruption in {"repeated_request", "mismatched_cancel_reason"}:
+                    requested = service.request_cancellation(
+                        command_id=command_id,
+                        expected_state=WorkflowCommandState.CLAIMED,
+                        expected_state_version=2,
+                        requested_by="requester",
+                        reason_code="STOPPED",
+                    )
+                connection = sqlite3.connect(path)
+                try:
+                    if corruption == "cancel_without_request":
+                        occurred = "2026-08-24T12:00:05.000000Z"
+                        connection.execute(
+                            "UPDATE workflow_commands SET state='CANCELLED', state_version=3, "
+                            "lease_owner=NULL, lease_acquired_at=NULL, lease_expires_at=NULL, "
+                            "cancellation_requested_at=?, cancellation_requested_by='requester', "
+                            "cancellation_reason_code='STOPPED', completed_at=?, updated_at=? "
+                            "WHERE command_id=?",
+                            (occurred, occurred, occurred, command_id),
+                        )
+                        connection.execute(
+                            "INSERT INTO workflow_command_events(event_id,command_id,event_kind,prior_state,next_state,prior_state_version,next_state_version,actor_id,occurred_at,lease_owner,lease_expires_at,claim_count,reason_code) "
+                            "VALUES(?,?,'CANCELLED','CLAIMED','CANCELLED',2,3,'worker',?,'worker','2026-08-24T12:00:10.000000Z',1,'STOPPED')",
+                            (str(UUID(int=900)), command_id, occurred),
+                        )
+                    else:
+                        if corruption == "repeated_request":
+                            occurred = "2026-08-24T12:00:05.000000Z"
+                            connection.execute(
+                                "UPDATE workflow_commands SET state_version=4, updated_at=? WHERE command_id=?",
+                                (occurred, command_id),
+                            )
+                            connection.execute(
+                                "INSERT INTO workflow_command_events(event_id,command_id,event_kind,prior_state,next_state,prior_state_version,next_state_version,actor_id,occurred_at,lease_owner,lease_expires_at,claim_count,reason_code) "
+                                "VALUES(?,?,'CANCELLATION_REQUESTED','CLAIMED','CLAIMED',3,4,'other-requester',?,'worker','2026-08-24T12:00:10.000000Z',1,'STOPPED')",
+                                (str(UUID(int=902)), command_id, occurred),
+                            )
+                        elif corruption == "mismatched_cancel_reason":
+                            occurred = "2026-08-24T12:00:05.000000Z"
+                            connection.execute(
+                                "UPDATE workflow_commands SET state='CANCELLED', state_version=4, "
+                                "lease_owner=NULL, lease_acquired_at=NULL, lease_expires_at=NULL, "
+                                "completed_at=?, updated_at=? WHERE command_id=?",
+                                (occurred, occurred, command_id),
+                            )
+                            connection.execute(
+                                "INSERT INTO workflow_command_events(event_id,command_id,event_kind,prior_state,next_state,prior_state_version,next_state_version,actor_id,occurred_at,lease_owner,lease_expires_at,claim_count,reason_code) "
+                                "VALUES(?,?,'CANCELLED','CLAIMED','CANCELLED',3,4,'worker',?,'worker','2026-08-24T12:00:10.000000Z',1,'OTHER')",
+                                (str(UUID(int=903)), command_id, occurred),
+                            )
+                        else:
+                            occurred = "2026-08-24T12:00:11.000000Z"
+                            new_expiry = "2026-08-24T12:00:21.000000Z"
+                            connection.execute(
+                                "UPDATE workflow_commands SET state_version=3, lease_expires_at=?, updated_at=? WHERE command_id=?",
+                                (new_expiry, occurred, command_id),
+                            )
+                            connection.execute(
+                                "INSERT INTO workflow_command_events(event_id,command_id,event_kind,prior_state,next_state,prior_state_version,next_state_version,actor_id,occurred_at,lease_owner,lease_expires_at,claim_count,reason_code) "
+                                "VALUES(?,?,'LEASE_RENEWED','CLAIMED','CLAIMED',2,3,'worker',?,'worker',?,1,NULL)",
+                                (str(UUID(int=901)), command_id, occurred, new_expiry),
+                            )
+                    connection.commit()
+                finally:
+                    connection.close()
+                with self.assertRaises(RepositoryError) as raised:
+                    SqliteWorkflowCommandRepository(path).get(command_id)
+                self.assertEqual(RepositoryFailureCode.MALFORMED_PERSISTED_PAYLOAD, raised.exception.code)
+
+    def test_mutation_time_regression_is_value_error_and_snapshot_unchanged(self) -> None:
+        enqueued = self._enqueue()
+        self.providers.current += timedelta(seconds=1)
+        claimed = self.service.claim_next(lease_owner="worker")
+        connection = sqlite3.connect(self.path)
+        try:
+            before = tuple(connection.iterdump())
+        finally:
+            connection.close()
+        self.providers.current -= timedelta(microseconds=1)
+        with self.assertRaises(ValueError):
+            self.service.renew_lease(
+                command_id=enqueued.command.command_id,
+                expected_state=WorkflowCommandState.CLAIMED,
+                expected_state_version=2,
+                lease_owner="worker",
+            )
+        connection = sqlite3.connect(self.path)
+        try:
+            self.assertEqual(before, tuple(connection.iterdump()))
+        finally:
+            connection.close()
+
+    def test_busy_claim_is_typed_and_not_retried(self) -> None:
+        self._enqueue()
+        lock = sqlite3.connect(self.path, timeout=0.0)
+        lock.execute("BEGIN IMMEDIATE")
+        try:
+            with patch(
+                "panam_development_loop.sqlite_repositories._open_connection",
+                wraps=sqlite_repository_module._open_connection,
+            ) as opened:
+                result = self.service.claim_next(lease_owner="worker")
+            self.assertEqual(1, opened.call_count)
+            self.assertEqual(QueueResultCode.TRANSIENT_CONTENTION, result.code)
+        finally:
+            lock.rollback()
+            lock.close()
+        self.assertEqual(WorkflowCommandState.PENDING, self.service.list_project("panam").commands[0].state)
+
+    def test_exclusive_lock_during_schema_validation_is_typed_contention(self) -> None:
+        self._enqueue()
+        lock = sqlite3.connect(self.path, timeout=0.0)
+        lock.execute("BEGIN EXCLUSIVE")
+        try:
+            result = self.service.claim_next(lease_owner="worker")
+            self.assertEqual(QueueResultCode.TRANSIENT_CONTENTION, result.code)
+            self.assertEqual(QueueMutationKind.CLAIM_NEXT, result.mutation_kind)
+        finally:
+            lock.rollback()
+            lock.close()
+        current = self.service.list_project("panam").commands[0]
+        self.assertEqual((WorkflowCommandState.PENDING, 1, 0), (current.state, current.state_version, current.claim_count))
+
+    def test_claim_contention_has_one_winner(self) -> None:
+        self._enqueue()
+        barrier = threading.Barrier(2)
+        results: list[QueueResult] = []
+        errors: list[BaseException] = []
+
+        def claim(owner: str, identifier_base: int) -> None:
+            providers = QueueProviders()
+            providers.id_calls = identifier_base
+            registry = CommandDefinitionRegistry((_queue_definition(),))
+            service = DurableCommandQueueService(SqliteWorkflowCommandRepository(self.path), registry, 10, clock=providers.clock, id_factory=providers.identifier)
+            try:
+                barrier.wait(timeout=5)
+                results.append(service.claim_next(lease_owner=owner))
+            except BaseException as error:
+                errors.append(error)
+
+        threads = [threading.Thread(target=claim, args=("worker-a", 100)), threading.Thread(target=claim, args=("worker-b", 200))]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(timeout=5)
+        self.assertEqual([], errors)
+        self.assertEqual(1, sum(result.code is QueueResultCode.APPLIED for result in results))
+        self.assertEqual(1, sum(result.code in {QueueResultCode.NO_ELIGIBLE_COMMAND, QueueResultCode.TRANSIENT_CONTENTION} for result in results))
+        current = self.service.list_project("panam").commands[0]
+        history = self.service.history(current.command_id).events
+        self.assertEqual((WorkflowCommandState.CLAIMED, 2, 1), (current.state, current.state_version, current.claim_count))
+        self.assertEqual((WorkflowCommandEventKind.ENQUEUED, WorkflowCommandEventKind.CLAIMED), tuple(event.event_kind for event in history))
+        self.assertEqual((1, 2), tuple(event.next_state_version for event in history))
+
+    def test_concurrent_same_key_enqueue_has_one_durable_identity(self) -> None:
+        barrier = threading.Barrier(2)
+        results: list[QueueResult] = []
+        errors: list[BaseException] = []
+
+        def enqueue(identifier_base: int) -> None:
+            providers = QueueProviders()
+            providers.id_calls = identifier_base
+            service = DurableCommandQueueService(
+                SqliteWorkflowCommandRepository(self.path),
+                CommandDefinitionRegistry((_queue_definition(),)), 10,
+                clock=providers.clock, id_factory=providers.identifier,
+            )
+            try:
+                barrier.wait(timeout=5)
+                results.append(service.enqueue(
+                    project_id="panam", command_kind="TEST_COMMAND",
+                    command_schema_version=1, payload={"value": 1},
+                    idempotency_key="concurrent-key", actor_id="actor",
+                ))
+            except BaseException as error:
+                errors.append(error)
+
+        threads = [threading.Thread(target=enqueue, args=(100,)), threading.Thread(target=enqueue, args=(200,))]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(timeout=5)
+        self.assertEqual([], errors)
+        self.assertEqual(1, sum(result.code is QueueResultCode.APPLIED for result in results))
+        self.assertEqual(1, sum(result.code in {QueueResultCode.EXISTING_IDENTICAL, QueueResultCode.TRANSIENT_CONTENTION} for result in results))
+        listed = self.service.list_project("panam")
+        self.assertEqual(1, len(listed.commands))
+        self.assertEqual(1, len(self.service.history(listed.commands[0].command_id).events))
+        if any(result.code is QueueResultCode.TRANSIENT_CONTENTION for result in results):
+            identical = self.service.enqueue(
+                project_id="panam", command_kind="TEST_COMMAND",
+                command_schema_version=1, payload={"value": 1},
+                idempotency_key="concurrent-key", actor_id="actor",
+            )
+            self.assertEqual(QueueResultCode.EXISTING_IDENTICAL, identical.code)
+
+    def test_no_free_form_execution_gateways(self) -> None:
+        with (
+            patch("subprocess.run", side_effect=AssertionError("process")) as process,
+            patch("os.system", side_effect=AssertionError("shell")) as shell,
+            patch("urllib.request.urlopen", side_effect=AssertionError("network")) as network,
+            patch("threading.Thread.start", side_effect=AssertionError("thread")) as thread_start,
+            patch.object(Path, "write_text", side_effect=AssertionError("file write")) as file_write,
+            patch.object(TransitionService, "transition", side_effect=AssertionError("transition")) as transition,
+            patch.object(SqliteApprovalBindingRepository, "create", side_effect=AssertionError("approval")) as approval,
+        ):
+            self._enqueue()
+            self.service.list_project("panam")
+        for sentinel in (process, shell, network, thread_start, file_write, transition, approval):
+            sentinel.assert_not_called()
 
 
 if __name__ == "__main__":

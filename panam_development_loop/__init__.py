@@ -44,6 +44,14 @@ from .models import (
     TransitionRuleValidationError,
     WorkflowEdgeType,
     WorkflowNodeType,
+    QueueMutationKind,
+    QueueResult,
+    QueueResultCode,
+    ValidatedCommandEnvelope,
+    WorkflowCommand,
+    WorkflowCommandEvent,
+    WorkflowCommandEventKind,
+    WorkflowCommandState,
 )
 from .repositories import (
     ApprovalBindingRepository,
@@ -53,6 +61,7 @@ from .repositories import (
     ProjectPolicyRepository,
     RepositoryError,
     RepositoryFailureCode,
+    WorkflowCommandRepository,
 )
 from .sqlite_repositories import (
     SqliteApprovalBindingRepository,
@@ -60,6 +69,12 @@ from .sqlite_repositories import (
     SqliteMilestoneContractRepository,
     SqlitePhaseContractRepository,
     SqliteProjectPolicyRepository,
+    SqliteWorkflowCommandRepository,
+)
+from .command_queue import (
+    CommandDefinition,
+    CommandDefinitionRegistry,
+    DurableCommandQueueService,
 )
 from .foundation_query import (
     FoundationQueryOutcome,
@@ -135,6 +150,19 @@ __all__ = [
     "TransitionService",
     "WorkflowEdgeType",
     "WorkflowNodeType",
+    "CommandDefinition",
+    "CommandDefinitionRegistry",
+    "DurableCommandQueueService",
+    "QueueMutationKind",
+    "QueueResult",
+    "QueueResultCode",
+    "SqliteWorkflowCommandRepository",
+    "ValidatedCommandEnvelope",
+    "WorkflowCommand",
+    "WorkflowCommandEvent",
+    "WorkflowCommandEventKind",
+    "WorkflowCommandRepository",
+    "WorkflowCommandState",
     "FoundationQueryOutcome",
     "FoundationQueryResult",
     "FoundationQueryService",

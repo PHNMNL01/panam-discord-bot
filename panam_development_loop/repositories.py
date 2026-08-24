@@ -10,6 +10,11 @@ from .models import (
     MilestoneContract,
     PhaseContract,
     ProjectPolicy,
+    QueueResult,
+    ValidatedCommandEnvelope,
+    WorkflowCommand,
+    WorkflowCommandEvent,
+    WorkflowCommandState,
 )
 
 
@@ -84,3 +89,110 @@ class DevelopmentRunInspectionRepository(Protocol):
     def get_run(self, run_id: str) -> DevelopmentRun | None: ...
 
     def get_history(self, run_id: str) -> list[AcceptedStateEvent]: ...
+
+
+class WorkflowCommandRepository(Protocol):
+    def enqueue(
+        self,
+        *,
+        command_id: str,
+        event_id: str,
+        envelope: ValidatedCommandEnvelope,
+        actor_id: str,
+        occurred_at: str,
+    ) -> QueueResult: ...
+
+    def get(self, command_id: str) -> WorkflowCommand | None: ...
+
+    def list_project(self, project_id: str) -> tuple[WorkflowCommand, ...]: ...
+
+    def history(self, command_id: str) -> tuple[WorkflowCommandEvent, ...] | None: ...
+
+    def claim_next(
+        self,
+        *,
+        event_id: str,
+        lease_owner: str,
+        lease_acquired_at: str,
+        lease_expires_at: str,
+    ) -> QueueResult: ...
+
+    def renew_lease(
+        self,
+        *,
+        command_id: str,
+        expected_state: WorkflowCommandState,
+        expected_state_version: int,
+        lease_owner: str,
+        observed_at: str,
+        lease_expires_at: str,
+        event_id: str,
+    ) -> QueueResult: ...
+
+    def mark_running(
+        self,
+        *,
+        command_id: str,
+        expected_state: WorkflowCommandState,
+        expected_state_version: int,
+        lease_owner: str,
+        occurred_at: str,
+        event_id: str,
+    ) -> QueueResult: ...
+
+    def request_cancellation(
+        self,
+        *,
+        command_id: str,
+        expected_state: WorkflowCommandState,
+        expected_state_version: int,
+        requested_by: str,
+        reason_code: str,
+        occurred_at: str,
+        event_id: str,
+    ) -> QueueResult: ...
+
+    def acknowledge_cancellation(
+        self,
+        *,
+        command_id: str,
+        expected_state: WorkflowCommandState,
+        expected_state_version: int,
+        lease_owner: str,
+        observed_at: str,
+        event_id: str,
+    ) -> QueueResult: ...
+
+    def mark_succeeded(
+        self,
+        *,
+        command_id: str,
+        expected_state: WorkflowCommandState,
+        expected_state_version: int,
+        lease_owner: str,
+        observed_at: str,
+        event_id: str,
+    ) -> QueueResult: ...
+
+    def mark_failed(
+        self,
+        *,
+        command_id: str,
+        expected_state: WorkflowCommandState,
+        expected_state_version: int,
+        lease_owner: str,
+        failure_code: str,
+        observed_at: str,
+        event_id: str,
+    ) -> QueueResult: ...
+
+    def recover_expired_claim(
+        self,
+        *,
+        command_id: str,
+        expected_state: WorkflowCommandState,
+        expected_state_version: int,
+        recovery_actor: str,
+        observed_at: str,
+        event_id: str,
+    ) -> QueueResult: ...

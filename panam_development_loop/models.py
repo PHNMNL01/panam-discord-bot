@@ -4,6 +4,7 @@ import hashlib
 import json
 import re
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from enum import Enum
 from typing import Optional
 
@@ -1218,3 +1219,765 @@ class TransactionalTransitionResult:
         elif self.reason_code is TransactionalTransitionReasonCode.STALE_PERSISTED_RUN:
             if not evaluation_allowed or self.persisted_run is None:
                 raise ValueError("stale result")
+
+
+# DL-2.1 durable command queue domain ---------------------------------------
+
+_QUEUE_UUID_PATTERN = re.compile(
+    r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+)
+_QUEUE_COMMAND_KIND_PATTERN = re.compile(r"^[A-Z][A-Z0-9_]{0,63}$")
+_QUEUE_IDEMPOTENCY_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$")
+_QUEUE_ACTOR_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:@/-]{0,127}$")
+_QUEUE_CODE_PATTERN = re.compile(r"^[A-Z][A-Z0-9_]{0,63}$")
+_QUEUE_PAYLOAD_KEY_PATTERN = re.compile(r"^[A-Za-z][A-Za-z0-9_]{0,63}$")
+_QUEUE_TIMESTAMP_PATTERN = re.compile(
+    r"^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\.[0-9]{6}Z$"
+)
+_QUEUE_RESERVED_KEYS = frozenset(
+    {
+        "shell",
+        "command_line",
+        "argv",
+        "executable",
+        "executable_path",
+        "script",
+        "python_code",
+        "import_target",
+        "callback",
+        "sql",
+        "url",
+        "http_request",
+        "approved",
+        "authorized",
+    }
+)
+_SIGNED_64_MAX = 9_223_372_036_854_775_807
+
+
+class WorkflowCommandState(str, Enum):
+    PENDING = "PENDING"
+    CLAIMED = "CLAIMED"
+    RUNNING = "RUNNING"
+    SUCCEEDED = "SUCCEEDED"
+    FAILED = "FAILED"
+    CANCELLED = "CANCELLED"
+
+
+class WorkflowCommandEventKind(str, Enum):
+    ENQUEUED = "ENQUEUED"
+    CLAIMED = "CLAIMED"
+    LEASE_RENEWED = "LEASE_RENEWED"
+    STARTED = "STARTED"
+    CANCELLATION_REQUESTED = "CANCELLATION_REQUESTED"
+    CANCELLED = "CANCELLED"
+    EXPIRED_CLAIM_RELEASED = "EXPIRED_CLAIM_RELEASED"
+    SUCCEEDED = "SUCCEEDED"
+    FAILED = "FAILED"
+
+
+class QueueMutationKind(str, Enum):
+    ENQUEUE = "ENQUEUE"
+    CLAIM_NEXT = "CLAIM_NEXT"
+    RENEW_LEASE = "RENEW_LEASE"
+    MARK_RUNNING = "MARK_RUNNING"
+    REQUEST_CANCELLATION = "REQUEST_CANCELLATION"
+    ACKNOWLEDGE_CANCELLATION = "ACKNOWLEDGE_CANCELLATION"
+    MARK_SUCCEEDED = "MARK_SUCCEEDED"
+    MARK_FAILED = "MARK_FAILED"
+    RECOVER_EXPIRED_CLAIM = "RECOVER_EXPIRED_CLAIM"
+
+
+class QueueResultCode(str, Enum):
+    APPLIED = "APPLIED"
+    FOUND = "FOUND"
+    NOT_FOUND = "NOT_FOUND"
+    LISTED = "LISTED"
+    HISTORY_RETURNED = "HISTORY_RETURNED"
+    NO_ELIGIBLE_COMMAND = "NO_ELIGIBLE_COMMAND"
+    EXISTING_IDENTICAL = "EXISTING_IDENTICAL"
+    IDEMPOTENCY_CONFLICT = "IDEMPOTENCY_CONFLICT"
+    CAS_CONFLICT = "CAS_CONFLICT"
+    LEASE_OWNER_MISMATCH = "LEASE_OWNER_MISMATCH"
+    LEASE_EXPIRED = "LEASE_EXPIRED"
+    LEASE_NOT_EXPIRED = "LEASE_NOT_EXPIRED"
+    CANCELLATION_ALREADY_REQUESTED = "CANCELLATION_ALREADY_REQUESTED"
+    CANCELLATION_NOT_REQUESTED = "CANCELLATION_NOT_REQUESTED"
+    TERMINAL_OBSERVED = "TERMINAL_OBSERVED"
+    TRANSIENT_CONTENTION = "TRANSIENT_CONTENTION"
+    RECONCILIATION_REQUIRED = "RECONCILIATION_REQUIRED"
+
+
+def _queue_text(value: object, field_name: str, pattern: re.Pattern[str] | None = None) -> str:
+    if type(value) is not str:
+        raise TypeError(field_name)
+    if not value or value != value.strip():
+        raise ValueError(field_name)
+    try:
+        encoded = value.encode("utf-8")
+    except UnicodeEncodeError as error:
+        raise ValueError(field_name) from error
+    if any(ord(character) < 32 or ord(character) == 127 for character in value):
+        raise ValueError(field_name)
+    if pattern is not None and pattern.fullmatch(value) is None:
+        raise ValueError(field_name)
+    return value
+
+
+def _queue_identity(value: object, field_name: str) -> str:
+    text = _queue_text(value, field_name)
+    if len(text.encode("utf-8")) > 256:
+        raise ValueError(field_name)
+    return text
+
+
+def _queue_optional_identity(value: object, field_name: str) -> str | None:
+    return None if value is None else _queue_identity(value, field_name)
+
+
+def _queue_uuid(value: object, field_name: str) -> str:
+    return _queue_text(value, field_name, _QUEUE_UUID_PATTERN)
+
+
+def _queue_integer(value: object, field_name: str, minimum: int, maximum: int) -> int:
+    if type(value) is not int:
+        raise TypeError(field_name)
+    if value < minimum or value > maximum:
+        raise ValueError(field_name)
+    return value
+
+
+def _parse_queue_timestamp(value: object, field_name: str) -> datetime:
+    if type(value) is not str:
+        raise TypeError(field_name)
+    if _QUEUE_TIMESTAMP_PATTERN.fullmatch(value) is None:
+        raise ValueError(field_name)
+    try:
+        parsed = datetime.strptime(value, "%Y-%m-%dT%H:%M:%S.%fZ")
+    except ValueError as error:
+        raise ValueError(field_name) from error
+    return parsed.replace(tzinfo=timezone.utc)
+
+
+def _queue_optional_timestamp(value: object, field_name: str) -> str | None:
+    if value is None:
+        return None
+    _parse_queue_timestamp(value, field_name)
+    return value
+
+
+def _validate_payload_object(payload: object) -> dict[str, object]:
+    if type(payload) is not dict:
+        raise TypeError("payload")
+    node_count = 0
+
+    def visit(value: object, depth: int, field_name: str) -> None:
+        nonlocal node_count
+        node_count += 1
+        if node_count > 1_024:
+            raise ValueError("payload nodes")
+        if depth > 8:
+            raise ValueError("payload depth")
+        if value is None or type(value) is bool:
+            return
+        if type(value) is int:
+            if value < -9_223_372_036_854_775_808 or value > _SIGNED_64_MAX:
+                raise ValueError(field_name)
+            return
+        if type(value) is str:
+            try:
+                encoded = value.encode("utf-8")
+            except UnicodeEncodeError as error:
+                raise ValueError(field_name) from error
+            if len(encoded) > 4_096:
+                raise ValueError(field_name)
+            return
+        if type(value) is list:
+            if len(value) > 256:
+                raise ValueError(field_name)
+            for index, item in enumerate(value):
+                visit(item, depth + 1, f"{field_name}[{index}]")
+            return
+        if type(value) is dict:
+            if len(value) > 64:
+                raise ValueError(field_name)
+            for key, item in value.items():
+                if type(key) is not str:
+                    raise TypeError("payload key")
+                if _QUEUE_PAYLOAD_KEY_PATTERN.fullmatch(key) is None:
+                    raise ValueError("payload key")
+                if key.lower() in _QUEUE_RESERVED_KEYS:
+                    raise ValueError("reserved payload key")
+                visit(item, depth + 1, f"{field_name}.{key}")
+            return
+        raise TypeError(field_name)
+
+    visit(payload, 1, "payload")
+    canonical = _canonical_json(payload)
+    size = len(canonical.encode("utf-8"))
+    if size < 2 or size > 65_536:
+        raise ValueError("payload bytes")
+    return payload
+
+
+def _canonical_queue_payload(payload: object) -> str:
+    validated = _validate_payload_object(payload)
+    return _canonical_json(validated)
+
+
+def _intent_digest(
+    *,
+    project_id: str,
+    development_run_id: str | None,
+    phase_id: str | None,
+    command_kind: str,
+    command_schema_version: int,
+    payload: dict[str, object],
+    priority: int,
+) -> str:
+    canonical = _canonical_json(
+        {
+            "command_kind": command_kind,
+            "command_schema_version": command_schema_version,
+            "development_run_id": development_run_id,
+            "payload": payload,
+            "phase_id": phase_id,
+            "priority": priority,
+            "project_id": project_id,
+        }
+    )
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def _validated_payload_json(value: object) -> tuple[str, dict[str, object]]:
+    if type(value) is not str:
+        raise TypeError("payload_json")
+    try:
+        parsed = json.loads(value)
+    except (json.JSONDecodeError, UnicodeError) as error:
+        raise ValueError("payload_json") from error
+    validated = _validate_payload_object(parsed)
+    if _canonical_json(validated) != value:
+        raise ValueError("payload_json")
+    return value, validated
+
+
+@dataclass(frozen=True)
+class ValidatedCommandEnvelope:
+    project_id: str
+    development_run_id: str | None
+    phase_id: str | None
+    command_kind: str
+    command_schema_version: int
+    payload_json: str
+    intent_digest: str
+    idempotency_key: str
+    priority: int
+
+    def __post_init__(self) -> None:
+        project_id = _queue_identity(self.project_id, "project_id")
+        development_run_id = _queue_optional_identity(
+            self.development_run_id, "development_run_id"
+        )
+        phase_id = _queue_optional_identity(self.phase_id, "phase_id")
+        command_kind = _queue_text(
+            self.command_kind, "command_kind", _QUEUE_COMMAND_KIND_PATTERN
+        )
+        command_schema_version = _queue_integer(
+            self.command_schema_version, "command_schema_version", 1, 2_147_483_647
+        )
+        payload_json, payload = _validated_payload_json(self.payload_json)
+        intent_digest = _queue_text(
+            self.intent_digest,
+            "intent_digest",
+            re.compile(r"^[0-9a-f]{64}$"),
+        )
+        idempotency_key = _queue_text(
+            self.idempotency_key, "idempotency_key", _QUEUE_IDEMPOTENCY_PATTERN
+        )
+        priority = _queue_integer(self.priority, "priority", 0, 100)
+        expected_digest = _intent_digest(
+            project_id=project_id,
+            development_run_id=development_run_id,
+            phase_id=phase_id,
+            command_kind=command_kind,
+            command_schema_version=command_schema_version,
+            payload=payload,
+            priority=priority,
+        )
+        if intent_digest != expected_digest:
+            raise ValueError("intent_digest")
+        object.__setattr__(self, "payload_json", payload_json)
+
+
+@dataclass(frozen=True)
+class WorkflowCommand:
+    queue_sequence: int
+    command_id: str
+    project_id: str
+    development_run_id: str | None
+    phase_id: str | None
+    command_kind: str
+    command_schema_version: int
+    payload_json: str
+    intent_digest: str
+    idempotency_key: str
+    priority: int
+    state: WorkflowCommandState
+    state_version: int
+    claim_count: int
+    lease_owner: str | None
+    lease_acquired_at: str | None
+    lease_expires_at: str | None
+    cancellation_requested_at: str | None
+    cancellation_requested_by: str | None
+    cancellation_reason_code: str | None
+    failure_code: str | None
+    created_at: str
+    updated_at: str
+    started_at: str | None
+    completed_at: str | None
+
+    def __post_init__(self) -> None:
+        _queue_integer(self.queue_sequence, "queue_sequence", 1, _SIGNED_64_MAX)
+        _queue_uuid(self.command_id, "command_id")
+        envelope = ValidatedCommandEnvelope(
+            project_id=self.project_id,
+            development_run_id=self.development_run_id,
+            phase_id=self.phase_id,
+            command_kind=self.command_kind,
+            command_schema_version=self.command_schema_version,
+            payload_json=self.payload_json,
+            intent_digest=self.intent_digest,
+            idempotency_key=self.idempotency_key,
+            priority=self.priority,
+        )
+        if type(self.state) is not WorkflowCommandState:
+            raise TypeError("state")
+        _queue_integer(self.state_version, "state_version", 1, _SIGNED_64_MAX)
+        _queue_integer(self.claim_count, "claim_count", 0, _SIGNED_64_MAX)
+        lease_owner = None if self.lease_owner is None else _queue_text(
+            self.lease_owner, "lease_owner", _QUEUE_ACTOR_PATTERN
+        )
+        lease_acquired = _queue_optional_timestamp(
+            self.lease_acquired_at, "lease_acquired_at"
+        )
+        lease_expires = _queue_optional_timestamp(self.lease_expires_at, "lease_expires_at")
+        lease_values = (lease_owner, lease_acquired, lease_expires)
+        active = self.state in {WorkflowCommandState.CLAIMED, WorkflowCommandState.RUNNING}
+        if active != all(value is not None for value in lease_values):
+            raise ValueError("lease")
+        if not active and any(value is not None for value in lease_values):
+            raise ValueError("lease")
+        if active and lease_acquired >= lease_expires:  # type: ignore[operator]
+            raise ValueError("lease_expires_at")
+
+        cancellation_at = _queue_optional_timestamp(
+            self.cancellation_requested_at, "cancellation_requested_at"
+        )
+        cancellation_by = None if self.cancellation_requested_by is None else _queue_text(
+            self.cancellation_requested_by,
+            "cancellation_requested_by",
+            _QUEUE_ACTOR_PATTERN,
+        )
+        cancellation_reason = (
+            None
+            if self.cancellation_reason_code is None
+            else _queue_text(
+                self.cancellation_reason_code,
+                "cancellation_reason_code",
+                _QUEUE_CODE_PATTERN,
+            )
+        )
+        cancellation_values = (cancellation_at, cancellation_by, cancellation_reason)
+        complete_cancellation = all(value is not None for value in cancellation_values)
+        if any(value is not None for value in cancellation_values) and not complete_cancellation:
+            raise ValueError("cancellation")
+        if self.state is WorkflowCommandState.PENDING and complete_cancellation:
+            raise ValueError("cancellation")
+        if self.state is WorkflowCommandState.CANCELLED and not complete_cancellation:
+            raise ValueError("cancellation")
+
+        if self.failure_code is None:
+            failure = None
+        else:
+            failure = _queue_text(self.failure_code, "failure_code", _QUEUE_CODE_PATTERN)
+        if (self.state is WorkflowCommandState.FAILED) != (failure is not None):
+            raise ValueError("failure_code")
+
+        created = _parse_queue_timestamp(self.created_at, "created_at")
+        updated = _parse_queue_timestamp(self.updated_at, "updated_at")
+        started = (
+            None
+            if self.started_at is None
+            else _parse_queue_timestamp(self.started_at, "started_at")
+        )
+        completed = (
+            None
+            if self.completed_at is None
+            else _parse_queue_timestamp(self.completed_at, "completed_at")
+        )
+        if updated < created:
+            raise ValueError("updated_at")
+        if self.state in {WorkflowCommandState.PENDING, WorkflowCommandState.CLAIMED} and started:
+            raise ValueError("started_at")
+        if self.state in {
+            WorkflowCommandState.RUNNING,
+            WorkflowCommandState.SUCCEEDED,
+            WorkflowCommandState.FAILED,
+        } and started is None:
+            raise ValueError("started_at")
+        terminal = self.state in {
+            WorkflowCommandState.SUCCEEDED,
+            WorkflowCommandState.FAILED,
+            WorkflowCommandState.CANCELLED,
+        }
+        if terminal != (completed is not None):
+            raise ValueError("completed_at")
+        if completed is not None and (completed < created or (started and completed < started)):
+            raise ValueError("completed_at")
+        if cancellation_at is not None and _parse_queue_timestamp(
+            cancellation_at, "cancellation_requested_at"
+        ) < created:
+            raise ValueError("cancellation_requested_at")
+        if started is not None and started < created:
+            raise ValueError("started_at")
+        if envelope.project_id != self.project_id:
+            raise ValueError("project_id")
+
+
+@dataclass(frozen=True)
+class WorkflowCommandEvent:
+    event_sequence: int
+    event_id: str
+    command_id: str
+    event_kind: WorkflowCommandEventKind
+    prior_state: WorkflowCommandState | None
+    next_state: WorkflowCommandState
+    prior_state_version: int | None
+    next_state_version: int
+    actor_id: str
+    occurred_at: str
+    lease_owner: str | None
+    lease_expires_at: str | None
+    claim_count: int
+    reason_code: str | None
+
+    def __post_init__(self) -> None:
+        _queue_integer(self.event_sequence, "event_sequence", 1, _SIGNED_64_MAX)
+        _queue_uuid(self.event_id, "event_id")
+        _queue_uuid(self.command_id, "command_id")
+        if type(self.event_kind) is not WorkflowCommandEventKind:
+            raise TypeError("event_kind")
+        if self.prior_state is not None and type(self.prior_state) is not WorkflowCommandState:
+            raise TypeError("prior_state")
+        if type(self.next_state) is not WorkflowCommandState:
+            raise TypeError("next_state")
+        if self.prior_state_version is not None:
+            _queue_integer(
+                self.prior_state_version, "prior_state_version", 1, _SIGNED_64_MAX - 1
+            )
+        _queue_integer(self.next_state_version, "next_state_version", 1, _SIGNED_64_MAX)
+        _queue_text(self.actor_id, "actor_id", _QUEUE_ACTOR_PATTERN)
+        occurred = _parse_queue_timestamp(self.occurred_at, "occurred_at")
+        owner = None if self.lease_owner is None else _queue_text(
+            self.lease_owner, "lease_owner", _QUEUE_ACTOR_PATTERN
+        )
+        expiry = _queue_optional_timestamp(self.lease_expires_at, "lease_expires_at")
+        expiry_instant = (
+            None
+            if expiry is None
+            else _parse_queue_timestamp(expiry, "lease_expires_at")
+        )
+        if (owner is None) != (expiry is None):
+            raise ValueError("lease snapshot")
+        _queue_integer(self.claim_count, "claim_count", 0, _SIGNED_64_MAX)
+        reason = None if self.reason_code is None else _queue_text(
+            self.reason_code, "reason_code", _QUEUE_CODE_PATTERN
+        )
+        if self.event_kind is WorkflowCommandEventKind.ENQUEUED:
+            if (
+                self.prior_state is not None
+                or self.prior_state_version is not None
+                or self.next_state is not WorkflowCommandState.PENDING
+                or self.next_state_version != 1
+                or self.claim_count != 0
+                or owner is not None
+                or reason is not None
+            ):
+                raise ValueError("event compatibility")
+            return
+        if self.prior_state is None or self.prior_state_version is None:
+            raise ValueError("prior_state")
+        if self.next_state_version != self.prior_state_version + 1:
+            raise ValueError("next_state_version")
+        before_after = (self.prior_state, self.next_state)
+        kind = self.event_kind
+        active_states = {WorkflowCommandState.CLAIMED, WorkflowCommandState.RUNNING}
+        if kind is WorkflowCommandEventKind.CLAIMED:
+            valid = before_after == (WorkflowCommandState.PENDING, WorkflowCommandState.CLAIMED)
+            valid = (
+                valid
+                and owner is not None
+                and self.actor_id == owner
+                and reason is None
+                and self.claim_count >= 1
+                and occurred < expiry_instant  # type: ignore[operator]
+            )
+        elif kind is WorkflowCommandEventKind.LEASE_RENEWED:
+            valid = self.prior_state in active_states and self.next_state is self.prior_state
+            valid = (
+                valid
+                and owner is not None
+                and self.actor_id == owner
+                and reason is None
+                and self.claim_count >= 1
+                and occurred < expiry_instant  # type: ignore[operator]
+            )
+        elif kind is WorkflowCommandEventKind.STARTED:
+            valid = before_after == (WorkflowCommandState.CLAIMED, WorkflowCommandState.RUNNING)
+            valid = (
+                valid
+                and owner is not None
+                and self.actor_id == owner
+                and reason is None
+                and self.claim_count >= 1
+                and occurred < expiry_instant  # type: ignore[operator]
+            )
+        elif kind is WorkflowCommandEventKind.CANCELLATION_REQUESTED:
+            valid = self.prior_state in active_states and self.next_state is self.prior_state
+            valid = valid and owner is not None and reason is not None and self.claim_count >= 1
+        elif kind is WorkflowCommandEventKind.CANCELLED:
+            valid = self.next_state is WorkflowCommandState.CANCELLED and self.prior_state in {
+                WorkflowCommandState.PENDING,
+                WorkflowCommandState.CLAIMED,
+                WorkflowCommandState.RUNNING,
+            }
+            valid = valid and reason is not None
+            if self.prior_state is WorkflowCommandState.PENDING:
+                valid = valid and owner is None
+            elif self.prior_state is WorkflowCommandState.RUNNING:
+                valid = (
+                    valid
+                    and owner is not None
+                    and self.actor_id == owner
+                    and self.claim_count >= 1
+                    and occurred < expiry_instant  # type: ignore[operator]
+                )
+            else:
+                valid = valid and owner is not None and self.claim_count >= 1
+                valid = valid and (
+                    occurred >= expiry_instant  # type: ignore[operator]
+                    or self.actor_id == owner
+                )
+        elif kind is WorkflowCommandEventKind.EXPIRED_CLAIM_RELEASED:
+            valid = before_after == (WorkflowCommandState.CLAIMED, WorkflowCommandState.PENDING)
+            valid = (
+                valid
+                and owner is not None
+                and reason == "LEASE_EXPIRED"
+                and self.claim_count >= 1
+                and occurred >= expiry_instant  # type: ignore[operator]
+            )
+        elif kind is WorkflowCommandEventKind.SUCCEEDED:
+            valid = before_after == (WorkflowCommandState.RUNNING, WorkflowCommandState.SUCCEEDED)
+            valid = (
+                valid
+                and owner is not None
+                and self.actor_id == owner
+                and reason is None
+                and self.claim_count >= 1
+                and occurred < expiry_instant  # type: ignore[operator]
+            )
+        elif kind is WorkflowCommandEventKind.FAILED:
+            valid = before_after == (WorkflowCommandState.RUNNING, WorkflowCommandState.FAILED)
+            valid = (
+                valid
+                and owner is not None
+                and self.actor_id == owner
+                and reason is not None
+                and self.claim_count >= 1
+                and occurred < expiry_instant  # type: ignore[operator]
+            )
+        else:  # pragma: no cover - closed enum
+            valid = False
+        if not valid:
+            raise ValueError("event compatibility")
+
+
+_EVENT_KINDS_BY_MUTATION = {
+    QueueMutationKind.ENQUEUE: {WorkflowCommandEventKind.ENQUEUED},
+    QueueMutationKind.CLAIM_NEXT: {WorkflowCommandEventKind.CLAIMED},
+    QueueMutationKind.RENEW_LEASE: {WorkflowCommandEventKind.LEASE_RENEWED},
+    QueueMutationKind.MARK_RUNNING: {WorkflowCommandEventKind.STARTED},
+    QueueMutationKind.REQUEST_CANCELLATION: {
+        WorkflowCommandEventKind.CANCELLATION_REQUESTED,
+        WorkflowCommandEventKind.CANCELLED,
+    },
+    QueueMutationKind.ACKNOWLEDGE_CANCELLATION: {WorkflowCommandEventKind.CANCELLED},
+    QueueMutationKind.MARK_SUCCEEDED: {WorkflowCommandEventKind.SUCCEEDED},
+    QueueMutationKind.MARK_FAILED: {WorkflowCommandEventKind.FAILED},
+    QueueMutationKind.RECOVER_EXPIRED_CLAIM: {
+        WorkflowCommandEventKind.EXPIRED_CLAIM_RELEASED,
+        WorkflowCommandEventKind.CANCELLED,
+    },
+}
+
+
+@dataclass(frozen=True)
+class QueueResult:
+    code: QueueResultCode
+    mutation_kind: QueueMutationKind | None = None
+    command: WorkflowCommand | None = None
+    event: WorkflowCommandEvent | None = None
+    commands: tuple[WorkflowCommand, ...] = ()
+    events: tuple[WorkflowCommandEvent, ...] = ()
+
+    def __post_init__(self) -> None:
+        if type(self.code) is not QueueResultCode:
+            raise TypeError("code")
+        if self.mutation_kind is not None and type(self.mutation_kind) is not QueueMutationKind:
+            raise TypeError("mutation_kind")
+        if self.command is not None and type(self.command) is not WorkflowCommand:
+            raise TypeError("command")
+        if self.event is not None and type(self.event) is not WorkflowCommandEvent:
+            raise TypeError("event")
+        if type(self.commands) is not tuple or any(type(v) is not WorkflowCommand for v in self.commands):
+            raise TypeError("commands")
+        if type(self.events) is not tuple or any(type(v) is not WorkflowCommandEvent for v in self.events):
+            raise TypeError("events")
+
+        code = self.code
+        kind = self.mutation_kind
+        singular_empty = self.command is None and self.event is None
+        plural_empty = not self.commands and not self.events
+        if code is QueueResultCode.APPLIED:
+            if kind is None or self.command is None or self.event is None or not plural_empty:
+                raise ValueError("APPLIED")
+            if (
+                self.event.command_id != self.command.command_id
+                or self.event.next_state is not self.command.state
+                or self.event.next_state_version != self.command.state_version
+                or self.event.claim_count != self.command.claim_count
+                or self.event.event_kind not in _EVENT_KINDS_BY_MUTATION[kind]
+                or self.event.occurred_at != self.command.updated_at
+            ):
+                raise ValueError("APPLIED binding")
+            if self.command.state in {
+                WorkflowCommandState.CLAIMED,
+                WorkflowCommandState.RUNNING,
+            } and (
+                self.event.lease_owner != self.command.lease_owner
+                or self.event.lease_expires_at != self.command.lease_expires_at
+            ):
+                raise ValueError("APPLIED lease binding")
+            if self.event.event_kind is WorkflowCommandEventKind.ENQUEUED and (
+                self.event.occurred_at != self.command.created_at
+            ):
+                raise ValueError("APPLIED enqueue binding")
+            if self.event.event_kind is WorkflowCommandEventKind.STARTED and (
+                self.event.occurred_at != self.command.started_at
+            ):
+                raise ValueError("APPLIED start binding")
+            if kind is QueueMutationKind.CLAIM_NEXT and (
+                self.event.occurred_at != self.command.lease_acquired_at
+            ):
+                raise ValueError("APPLIED claim binding")
+            if self.command.state in {
+                WorkflowCommandState.SUCCEEDED,
+                WorkflowCommandState.FAILED,
+                WorkflowCommandState.CANCELLED,
+            } and self.event.occurred_at != self.command.completed_at:
+                raise ValueError("APPLIED completion binding")
+            if self.event.event_kind in {
+                WorkflowCommandEventKind.CANCELLATION_REQUESTED,
+                WorkflowCommandEventKind.CANCELLED,
+            } and self.event.reason_code != self.command.cancellation_reason_code:
+                raise ValueError("APPLIED cancellation binding")
+            if (
+                kind is QueueMutationKind.REQUEST_CANCELLATION
+                and (
+                    self.event.occurred_at
+                    != self.command.cancellation_requested_at
+                    or self.event.actor_id
+                    != self.command.cancellation_requested_by
+                )
+            ):
+                raise ValueError("APPLIED cancellation-request facts")
+            if self.event.event_kind is WorkflowCommandEventKind.FAILED and (
+                self.event.reason_code != self.command.failure_code
+            ):
+                raise ValueError("APPLIED failure binding")
+            if (
+                kind is QueueMutationKind.REQUEST_CANCELLATION
+                and self.event.event_kind is WorkflowCommandEventKind.CANCELLED
+                and self.event.prior_state is not WorkflowCommandState.PENDING
+            ):
+                raise ValueError("APPLIED cancellation-request route")
+            if kind is QueueMutationKind.ACKNOWLEDGE_CANCELLATION and (
+                self.event.event_kind is not WorkflowCommandEventKind.CANCELLED
+                or self.event.prior_state
+                not in {WorkflowCommandState.CLAIMED, WorkflowCommandState.RUNNING}
+                or self.event.lease_owner != self.event.actor_id
+                or self.event.lease_expires_at is None
+                or self.event.occurred_at >= self.event.lease_expires_at
+            ):
+                raise ValueError("APPLIED cancellation-acknowledgement route")
+            if kind is QueueMutationKind.RECOVER_EXPIRED_CLAIM and (
+                self.event.prior_state is not WorkflowCommandState.CLAIMED
+                or self.event.lease_expires_at is None
+                or self.event.occurred_at < self.event.lease_expires_at
+            ):
+                raise ValueError("APPLIED expired-claim route")
+            return
+        if self.event is not None:
+            raise ValueError("non-applied event")
+        if code is QueueResultCode.FOUND:
+            valid = kind is None and self.command is not None and plural_empty
+        elif code is QueueResultCode.NOT_FOUND:
+            valid = singular_empty and plural_empty and kind not in {
+                QueueMutationKind.ENQUEUE,
+                QueueMutationKind.CLAIM_NEXT,
+            }
+        elif code is QueueResultCode.LISTED:
+            valid = kind is None and self.command is None and not self.events
+        elif code is QueueResultCode.HISTORY_RETURNED:
+            valid = kind is None and self.command is None and not self.commands and bool(self.events)
+        elif code is QueueResultCode.NO_ELIGIBLE_COMMAND:
+            valid = kind is QueueMutationKind.CLAIM_NEXT and singular_empty and plural_empty
+        elif code in {QueueResultCode.EXISTING_IDENTICAL, QueueResultCode.IDEMPOTENCY_CONFLICT}:
+            valid = kind is QueueMutationKind.ENQUEUE and self.command is not None and plural_empty
+        elif code is QueueResultCode.CAS_CONFLICT:
+            valid = kind in {
+                QueueMutationKind.RENEW_LEASE,
+                QueueMutationKind.MARK_RUNNING,
+                QueueMutationKind.REQUEST_CANCELLATION,
+                QueueMutationKind.ACKNOWLEDGE_CANCELLATION,
+                QueueMutationKind.MARK_SUCCEEDED,
+                QueueMutationKind.MARK_FAILED,
+                QueueMutationKind.RECOVER_EXPIRED_CLAIM,
+            } and self.command is not None and plural_empty
+        elif code in {QueueResultCode.LEASE_OWNER_MISMATCH, QueueResultCode.LEASE_EXPIRED}:
+            valid = kind in {
+                QueueMutationKind.RENEW_LEASE,
+                QueueMutationKind.MARK_RUNNING,
+                QueueMutationKind.ACKNOWLEDGE_CANCELLATION,
+                QueueMutationKind.MARK_SUCCEEDED,
+                QueueMutationKind.MARK_FAILED,
+            } and self.command is not None and plural_empty
+        elif code is QueueResultCode.LEASE_NOT_EXPIRED:
+            valid = kind is QueueMutationKind.RECOVER_EXPIRED_CLAIM and self.command is not None and plural_empty
+        elif code is QueueResultCode.CANCELLATION_ALREADY_REQUESTED:
+            valid = kind is QueueMutationKind.REQUEST_CANCELLATION and self.command is not None and plural_empty
+        elif code is QueueResultCode.CANCELLATION_NOT_REQUESTED:
+            valid = kind is QueueMutationKind.ACKNOWLEDGE_CANCELLATION and self.command is not None and plural_empty
+        elif code is QueueResultCode.TERMINAL_OBSERVED:
+            valid = kind not in {None, QueueMutationKind.ENQUEUE, QueueMutationKind.CLAIM_NEXT} and self.command is not None and plural_empty
+        elif code is QueueResultCode.TRANSIENT_CONTENTION:
+            valid = kind is not None and singular_empty and plural_empty
+        elif code is QueueResultCode.RECONCILIATION_REQUIRED:
+            valid = kind is QueueMutationKind.RECOVER_EXPIRED_CLAIM and self.command is not None and plural_empty
+        else:  # pragma: no cover - closed enum
+            valid = False
+        if not valid:
+            raise ValueError(code.value)
