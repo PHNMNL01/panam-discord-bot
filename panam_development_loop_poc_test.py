@@ -10,6 +10,7 @@ import sqlite3
 import subprocess
 import tempfile
 import threading
+import time
 import urllib.request
 import unittest
 from contextlib import redirect_stderr, redirect_stdout
@@ -4320,7 +4321,7 @@ class WorkflowCommandPublicContractTest(unittest.TestCase):
         expected = {
             WorkflowCommandState: ("PENDING", "CLAIMED", "RUNNING", "SUCCEEDED", "FAILED", "CANCELLED"),
             WorkflowCommandEventKind: ("ENQUEUED", "CLAIMED", "LEASE_RENEWED", "STARTED", "CANCELLATION_REQUESTED", "CANCELLED", "EXPIRED_CLAIM_RELEASED", "SUCCEEDED", "FAILED"),
-            QueueMutationKind: ("ENQUEUE", "CLAIM_NEXT", "RENEW_LEASE", "MARK_RUNNING", "REQUEST_CANCELLATION", "ACKNOWLEDGE_CANCELLATION", "MARK_SUCCEEDED", "MARK_FAILED", "RECOVER_EXPIRED_CLAIM"),
+            QueueMutationKind: ("ENQUEUE", "CLAIM_NEXT", "CLAIM_NEXT_ELIGIBLE", "RENEW_LEASE", "MARK_RUNNING", "REQUEST_CANCELLATION", "ACKNOWLEDGE_CANCELLATION", "MARK_SUCCEEDED", "MARK_FAILED", "RECOVER_EXPIRED_CLAIM"),
             QueueResultCode: ("APPLIED", "FOUND", "NOT_FOUND", "LISTED", "HISTORY_RETURNED", "NO_ELIGIBLE_COMMAND", "EXISTING_IDENTICAL", "IDEMPOTENCY_CONFLICT", "CAS_CONFLICT", "LEASE_OWNER_MISMATCH", "LEASE_EXPIRED", "LEASE_NOT_EXPIRED", "CANCELLATION_ALREADY_REQUESTED", "CANCELLATION_NOT_REQUESTED", "TERMINAL_OBSERVED", "TRANSIENT_CONTENTION", "RECONCILIATION_REQUIRED"),
         }
         for enum_type, names in expected.items():
@@ -4733,7 +4734,10 @@ class WorkflowCommandPublicContractTest(unittest.TestCase):
         }
         applicability = {
             QueueResultCode.NOT_FOUND: {None} | cas_kinds,
-            QueueResultCode.NO_ELIGIBLE_COMMAND: {QueueMutationKind.CLAIM_NEXT},
+            QueueResultCode.NO_ELIGIBLE_COMMAND: {
+                QueueMutationKind.CLAIM_NEXT,
+                QueueMutationKind.CLAIM_NEXT_ELIGIBLE,
+            },
             QueueResultCode.EXISTING_IDENTICAL: {QueueMutationKind.ENQUEUE},
             QueueResultCode.IDEMPOTENCY_CONFLICT: {QueueMutationKind.ENQUEUE},
             QueueResultCode.CAS_CONFLICT: cas_kinds,
@@ -4978,7 +4982,7 @@ class CommandDefinitionRegistryTest(unittest.TestCase):
 class Dl21OperationMatrixCompatibilityTest(unittest.TestCase):
     def test_repository_and_service_exact_method_sets_and_signatures(self) -> None:
         expected = (
-            "enqueue", "get", "list_project", "history", "claim_next", "renew_lease",
+            "enqueue", "get", "list_project", "history", "claim_next", "claim_next_eligible", "renew_lease",
             "mark_running", "request_cancellation", "acknowledge_cancellation",
             "mark_succeeded", "mark_failed", "recover_expired_claim",
         )
@@ -4991,7 +4995,7 @@ class Dl21OperationMatrixCompatibilityTest(unittest.TestCase):
             self.assertEqual(expected, public)
         query = {"get", "list_project", "history"}
         self.assertEqual(3, len(query))
-        self.assertEqual(9, len(set(expected) - query))
+        self.assertEqual(10, len(set(expected) - query))
         self.assertEqual(
             ("self", "repository", "registry", "lease_duration_seconds", "clock", "id_factory"),
             tuple(inspect.signature(DurableCommandQueueService.__init__).parameters),
@@ -5049,6 +5053,7 @@ class Dl21OperationMatrixCompatibilityTest(unittest.TestCase):
             "list_project": {"LISTED"},
             "history": {"HISTORY_RETURNED", "NOT_FOUND"},
             "claim_next": {"APPLIED", "NO_ELIGIBLE_COMMAND", "TRANSIENT_CONTENTION"},
+            "claim_next_eligible": {"APPLIED", "NO_ELIGIBLE_COMMAND", "TRANSIENT_CONTENTION"},
             "renew_lease": {"APPLIED", "NOT_FOUND", "CAS_CONFLICT", "LEASE_OWNER_MISMATCH", "LEASE_EXPIRED", "TERMINAL_OBSERVED", "TRANSIENT_CONTENTION"},
             "mark_running": {"APPLIED", "NOT_FOUND", "CAS_CONFLICT", "LEASE_OWNER_MISMATCH", "LEASE_EXPIRED", "TERMINAL_OBSERVED", "TRANSIENT_CONTENTION"},
             "request_cancellation": {"APPLIED", "NOT_FOUND", "CAS_CONFLICT", "CANCELLATION_ALREADY_REQUESTED", "TERMINAL_OBSERVED", "TRANSIENT_CONTENTION"},
@@ -5057,14 +5062,15 @@ class Dl21OperationMatrixCompatibilityTest(unittest.TestCase):
             "mark_failed": {"APPLIED", "NOT_FOUND", "CAS_CONFLICT", "LEASE_OWNER_MISMATCH", "LEASE_EXPIRED", "TERMINAL_OBSERVED", "TRANSIENT_CONTENTION"},
             "recover_expired_claim": {"APPLIED", "NOT_FOUND", "CAS_CONFLICT", "LEASE_NOT_EXPIRED", "TERMINAL_OBSERVED", "RECONCILIATION_REQUIRED", "TRANSIENT_CONTENTION"},
         }
-        self.assertEqual(12, len(matrix))
+        self.assertEqual(13, len(matrix))
         self.assertEqual(set(QueueResultCode), {QueueResultCode[name] for codes in matrix.values() for name in codes})
 
-    def test_exact_twelve_by_ten_normative_matrix_and_signatures(self) -> None:
+    def test_exact_thirteen_by_ten_normative_matrix_and_signatures(self) -> None:
         service_parameters = {
             "enqueue": ("project_id", "command_kind", "command_schema_version", "payload", "idempotency_key", "actor_id", "development_run_id", "phase_id", "priority"),
             "get": ("command_id",), "list_project": ("project_id",), "history": ("command_id",),
             "claim_next": ("lease_owner",),
+            "claim_next_eligible": ("eligible_definition_keys", "lease_owner"),
             "renew_lease": ("command_id", "expected_state", "expected_state_version", "lease_owner"),
             "mark_running": ("command_id", "expected_state", "expected_state_version", "lease_owner"),
             "request_cancellation": ("command_id", "expected_state", "expected_state_version", "requested_by", "reason_code"),
@@ -5077,6 +5083,7 @@ class Dl21OperationMatrixCompatibilityTest(unittest.TestCase):
             "enqueue": ("command_id", "event_id", "envelope", "actor_id", "occurred_at"),
             "get": ("command_id",), "list_project": ("project_id",), "history": ("command_id",),
             "claim_next": ("event_id", "lease_owner", "lease_acquired_at", "lease_expires_at"),
+            "claim_next_eligible": ("event_id", "eligible_definition_keys", "lease_owner", "lease_acquired_at", "lease_expires_at"),
             "renew_lease": ("command_id", "expected_state", "expected_state_version", "lease_owner", "observed_at", "lease_expires_at", "event_id"),
             "mark_running": ("command_id", "expected_state", "expected_state_version", "lease_owner", "occurred_at", "event_id"),
             "request_cancellation": ("command_id", "expected_state", "expected_state_version", "requested_by", "reason_code", "occurred_at", "event_id"),
@@ -5091,6 +5098,7 @@ class Dl21OperationMatrixCompatibilityTest(unittest.TestCase):
             "get": ("FOUND", "NOT_FOUND"), "list_project": ("LISTED",),
             "history": ("HISTORY_RETURNED", "NOT_FOUND"),
             "claim_next": ("APPLIED", "NO_ELIGIBLE_COMMAND", "TRANSIENT_CONTENTION"),
+            "claim_next_eligible": ("APPLIED", "NO_ELIGIBLE_COMMAND", "TRANSIENT_CONTENTION"),
             "renew_lease": ("APPLIED", "NOT_FOUND", "CAS_CONFLICT", "LEASE_OWNER_MISMATCH", "LEASE_EXPIRED", "TERMINAL_OBSERVED", "TRANSIENT_CONTENTION"),
             "mark_running": ("APPLIED", "NOT_FOUND", "CAS_CONFLICT", "LEASE_OWNER_MISMATCH", "LEASE_EXPIRED", "TERMINAL_OBSERVED", "TRANSIENT_CONTENTION"),
             "request_cancellation": ("APPLIED", "NOT_FOUND", "CAS_CONFLICT", "CANCELLATION_ALREADY_REQUESTED", "TERMINAL_OBSERVED", "TRANSIENT_CONTENTION"),
@@ -5103,6 +5111,7 @@ class Dl21OperationMatrixCompatibilityTest(unittest.TestCase):
             "enqueue": ("ABSENT_TO_PENDING", "ENQUEUED"), "get": ("NONE", "NONE"),
             "list_project": ("NONE", "NONE"), "history": ("NONE", "NONE"),
             "claim_next": ("PENDING_TO_CLAIMED", "CLAIMED"),
+            "claim_next_eligible": ("PENDING_TO_CLAIMED", "CLAIMED"),
             "renew_lease": ("ACTIVE_SAME_STATE", "LEASE_RENEWED"),
             "mark_running": ("CLAIMED_TO_RUNNING", "STARTED"),
             "request_cancellation": ("PENDING_TO_CANCELLED_OR_ACTIVE_SAME", "CANCELLED_OR_CANCELLATION_REQUESTED"),
@@ -5117,6 +5126,7 @@ class Dl21OperationMatrixCompatibilityTest(unittest.TestCase):
             "payload": dict[str, object], "envelope": ValidatedCommandEnvelope,
             "expected_state": WorkflowCommandState,
             "development_run_id": str | None, "phase_id": str | None,
+            "eligible_definition_keys": tuple[tuple[str, int], ...],
         }
         repository_returns = {
             "get": WorkflowCommand | None,
@@ -5175,9 +5185,9 @@ class Dl21OperationMatrixCompatibilityTest(unittest.TestCase):
             }
             self.assertEqual(headers, tuple(row))
             rows.append(row)
-        self.assertEqual(12, len(rows))
-        self.assertEqual(12, len({row["SERVICE_OPERATION"] for row in rows}))
-        self.assertEqual((3, 9), (sum(row["QUERY_OR_MUTATION"] == "QUERY" for row in rows), sum(row["QUERY_OR_MUTATION"] == "MUTATION" for row in rows)))
+        self.assertEqual(13, len(rows))
+        self.assertEqual(13, len({row["SERVICE_OPERATION"] for row in rows}))
+        self.assertEqual((3, 10), (sum(row["QUERY_OR_MUTATION"] == "QUERY" for row in rows), sum(row["QUERY_OR_MUTATION"] == "MUTATION" for row in rows)))
         constructor = inspect.signature(DurableCommandQueueService.__init__)
         constructor_hints = get_type_hints(DurableCommandQueueService.__init__)
         self.assertEqual(
@@ -5219,6 +5229,7 @@ class Dl21OperationMatrixCompatibilityTest(unittest.TestCase):
         calls = {
             "enqueue": dict(project_id="panam", command_kind="TEST_COMMAND", command_schema_version=1, payload={"value": 1}, idempotency_key="key", actor_id="actor"),
             "claim_next": dict(lease_owner="worker"),
+            "claim_next_eligible": dict(eligible_definition_keys=(("TEST_COMMAND", 1),), lease_owner="worker"),
             "renew_lease": dict(command_id=str(UUID(int=99)), expected_state=WorkflowCommandState.CLAIMED, expected_state_version=1, lease_owner="worker"),
             "mark_running": dict(command_id=str(UUID(int=99)), expected_state=WorkflowCommandState.CLAIMED, expected_state_version=1, lease_owner="worker"),
             "request_cancellation": dict(command_id=str(UUID(int=99)), expected_state=WorkflowCommandState.PENDING, expected_state_version=1, requested_by="actor", reason_code="STOP"),
@@ -5243,7 +5254,7 @@ class Dl21OperationMatrixCompatibilityTest(unittest.TestCase):
                 getattr(repository, name).assert_called_once()
                 forwarded = getattr(repository, name).call_args.kwargs
                 self.assertEqual(str(UUID(int=2 if name == "enqueue" else 1)), forwarded["event_id"])
-                if name in {"claim_next", "renew_lease"}:
+                if name in {"claim_next", "claim_next_eligible", "renew_lease"}:
                     self.assertEqual("2026-08-24T12:00:10.000000Z", forwarded["lease_expires_at"])
 
         repository = Mock(spec=WorkflowCommandRepository)
@@ -5370,6 +5381,7 @@ class Dl21OperationMatrixCompatibilityTest(unittest.TestCase):
             "enqueue": dict(project_id="panam", command_kind="TEST_COMMAND", command_schema_version=1, payload={"value": 1}, idempotency_key="key", actor_id="actor"),
             "get": dict(command_id=command_id), "list_project": dict(project_id="panam"),
             "history": dict(command_id=command_id), "claim_next": dict(lease_owner="worker"),
+            "claim_next_eligible": dict(eligible_definition_keys=(("TEST_COMMAND", 1),), lease_owner="worker"),
             "renew_lease": dict(command_id=command_id, expected_state=WorkflowCommandState.CLAIMED, expected_state_version=1, lease_owner="worker"),
             "mark_running": dict(command_id=command_id, expected_state=WorkflowCommandState.CLAIMED, expected_state_version=1, lease_owner="worker"),
             "request_cancellation": dict(command_id=command_id, expected_state=WorkflowCommandState.PENDING, expected_state_version=1, requested_by="actor", reason_code="STOPPED"),
@@ -5382,6 +5394,7 @@ class Dl21OperationMatrixCompatibilityTest(unittest.TestCase):
             "enqueue": {**valid["enqueue"], "payload": []}, "get": {"command_id": 1},
             "list_project": {"project_id": 1}, "history": {"command_id": 1},
             "claim_next": {"lease_owner": 1},
+            "claim_next_eligible": {"eligible_definition_keys": (("TEST_COMMAND", 1),), "lease_owner": 1},
             **{name: {**valid[name], "expected_state": "CLAIMED"} for name in (
                 "renew_lease", "mark_running", "request_cancellation",
                 "acknowledge_cancellation", "mark_succeeded", "mark_failed",
@@ -5392,6 +5405,7 @@ class Dl21OperationMatrixCompatibilityTest(unittest.TestCase):
             "enqueue": {**valid["enqueue"], "priority": -1}, "get": {"command_id": "bad"},
             "list_project": {"project_id": ""}, "history": {"command_id": "bad"},
             "claim_next": {"lease_owner": "-bad"},
+            "claim_next_eligible": {"eligible_definition_keys": (), "lease_owner": "worker"},
             "renew_lease": {**valid["renew_lease"], "expected_state": WorkflowCommandState.PENDING},
             "mark_running": {**valid["mark_running"], "expected_state": WorkflowCommandState.RUNNING},
             "request_cancellation": {**valid["request_cancellation"], "reason_code": "lower"},
@@ -6502,6 +6516,817 @@ class SqliteWorkflowCommandRepositoryTest(unittest.TestCase):
             self.service.list_project("panam")
         for sentinel in (process, shell, network, thread_start, file_write, transition, approval):
             sentinel.assert_not_called()
+
+
+class Dl21Ca001CompatibilityTest(unittest.TestCase):
+    class _RecordingConnection:
+        def __init__(self, connection: sqlite3.Connection, records: list[tuple[str, tuple[object, ...]]]) -> None:
+            self._connection = connection
+            self._records = records
+
+        def execute(self, statement: str, parameters: tuple[object, ...] = ()) -> sqlite3.Cursor:
+            if "FROM workflow_commands AS candidate" in statement:
+                self._records.append((statement, tuple(parameters)))
+            return self._connection.execute(statement, parameters)
+
+        def __getattr__(self, name: str) -> object:
+            return getattr(self._connection, name)
+
+    def setUp(self) -> None:
+        self._temporary_directory = tempfile.TemporaryDirectory()
+        self.directory = Path(self._temporary_directory.name)
+        self.path = self.directory / "ca001.sqlite3"
+        SqliteRunStore(self.path).initialize("initialized-at")
+        self.repository = SqliteWorkflowCommandRepository(self.path)
+        self.providers = QueueProviders()
+        definitions = tuple(
+            replace(_queue_definition(), command_kind=kind)
+            for kind in ("ALT_COMMAND", "OTHER_COMMAND", "TEST_COMMAND")
+        )
+        self.service = DurableCommandQueueService(
+            self.repository,
+            CommandDefinitionRegistry(definitions),
+            10,
+            clock=self.providers.clock,
+            id_factory=self.providers.identifier,
+        )
+
+    def tearDown(self) -> None:
+        self._temporary_directory.cleanup()
+
+    def _enqueue(
+        self,
+        kind: str = "TEST_COMMAND",
+        *,
+        priority: int = 0,
+        key: str | None = None,
+    ) -> WorkflowCommand:
+        result = self.service.enqueue(
+            project_id="panam",
+            command_kind=kind,
+            command_schema_version=1,
+            payload={"value": 1},
+            idempotency_key=key or f"key-{self.providers.id_calls + 1}",
+            actor_id="requester",
+            priority=priority,
+        )
+        self.assertEqual(QueueResultCode.APPLIED, result.code)
+        return result.command  # type: ignore[return-value]
+
+    def _eligible(
+        self,
+        *keys: tuple[str, int],
+        owner: str = "worker",
+    ) -> QueueResult:
+        return self.service.claim_next_eligible(
+            eligible_definition_keys=tuple(keys),
+            lease_owner=owner,
+        )
+
+    def _skipped_scenario(
+        self,
+    ) -> tuple[WorkflowCommand, WorkflowCommand, tuple[WorkflowCommandEvent, ...]]:
+        skipped = self._enqueue("OTHER_COMMAND", priority=100, key="unsupported")
+        self._enqueue("TEST_COMMAND", priority=50, key="supported")
+        before_history = self.repository.history(skipped.command_id)
+        result = self._eligible(("TEST_COMMAND", 1))
+        self.assertEqual(QueueResultCode.APPLIED, result.code)
+        current = self.repository.get(skipped.command_id)
+        return skipped, current, before_history  # type: ignore[return-value]
+
+    def _record_next_eligible_select(
+        self,
+        action: Callable[[], QueueResult],
+    ) -> tuple[QueueResult, str, tuple[object, ...]]:
+        records: list[tuple[str, tuple[object, ...]]] = []
+        original = sqlite_repository_module._open_connection
+
+        def open_recording(*args: object, **kwargs: object) -> Dl21Ca001CompatibilityTest._RecordingConnection:
+            return self._RecordingConnection(original(*args, **kwargs), records)
+
+        with patch(
+            "panam_development_loop.sqlite_repositories._open_connection",
+            side_effect=open_recording,
+        ):
+            result = action()
+        self.assertEqual(1, len(records))
+        return result, records[0][0], records[0][1]
+
+    def _run_bounded_concurrent_queue_actions(
+        self,
+        actions: tuple[tuple[str, Callable[[], QueueResult]], ...],
+    ) -> dict[str, QueueResult]:
+        expected_ids = tuple(participant_id for participant_id, _ in actions)
+        self.assertGreater(len(actions), 0)
+        self.assertEqual(
+            len(expected_ids), len(set(expected_ids)), "duplicate participant identity"
+        )
+        barrier = threading.Barrier(len(actions))
+        outcomes: list[tuple[str, QueueResult]] = []
+        errors: list[tuple[str, BaseException]] = []
+        record_lock = threading.Lock()
+
+        def run(participant_id: str, action: Callable[[], QueueResult]) -> None:
+            try:
+                barrier.wait(timeout=5)
+                outcome = action()
+            except BaseException as error:
+                with record_lock:
+                    errors.append((participant_id, error))
+            else:
+                with record_lock:
+                    outcomes.append((participant_id, outcome))
+
+        threads = tuple(
+            threading.Thread(
+                target=run,
+                args=(participant_id, action),
+                name=f"ca001-{participant_id}",
+                daemon=True,
+            )
+            for participant_id, action in actions
+        )
+        for thread in threads:
+            thread.start()
+        deadline = time.monotonic() + 5
+        for thread in threads:
+            thread.join(timeout=max(0.0, deadline - time.monotonic()))
+        self.assertEqual(
+            [], [thread.name for thread in threads if thread.is_alive()],
+            "participant threads remained alive",
+        )
+        self.assertEqual(
+            [],
+            [
+                (participant_id, type(error).__name__, str(error))
+                for participant_id, error in errors
+            ],
+            "unexpected participant exceptions",
+        )
+        self.assertEqual(
+            len(actions), len(outcomes), "missing participant outcome"
+        )
+        observed_ids = tuple(participant_id for participant_id, _ in outcomes)
+        self.assertEqual(
+            len(observed_ids), len(set(observed_ids)), "duplicate participant outcome"
+        )
+        self.assertCountEqual(expected_ids, observed_ids)
+        return dict(outcomes)
+
+    def _new_service(
+        self,
+        path: Path,
+        providers: QueueProviders,
+    ) -> DurableCommandQueueService:
+        SqliteRunStore(path).initialize("initialized-at")
+        return DurableCommandQueueService(
+            SqliteWorkflowCommandRepository(path),
+            CommandDefinitionRegistry((_queue_definition(),)),
+            10,
+            clock=providers.clock,
+            id_factory=providers.identifier,
+        )
+
+    def test_legacy_constructor_claim_and_missing_capability_precedence(self) -> None:
+        class LegacyRepository:
+            pass
+
+        repository = LegacyRepository()
+        required = (
+            "enqueue", "get", "list_project", "history", "claim_next", "renew_lease",
+            "mark_running", "request_cancellation", "acknowledge_cancellation",
+            "mark_succeeded", "mark_failed", "recover_expired_claim",
+        )
+        for name in required:
+            setattr(repository, name, Mock())
+        repository.claim_next.return_value = QueueResult(
+            QueueResultCode.NO_ELIGIBLE_COMMAND, QueueMutationKind.CLAIM_NEXT
+        )
+        providers = QueueProviders()
+        service = DurableCommandQueueService(
+            repository,  # type: ignore[arg-type]
+            CommandDefinitionRegistry(),
+            10,
+            clock=providers.clock,
+            id_factory=providers.identifier,
+        )
+        self.assertEqual(
+            QueueResultCode.NO_ELIGIBLE_COMMAND,
+            service.claim_next(lease_owner="worker").code,
+        )
+        before = (providers.clock_calls, providers.id_calls)
+        with self.assertRaisesRegex(TypeError, "^repository$"):
+            service.claim_next_eligible(
+                eligible_definition_keys=(("TEST_COMMAND", 1),),
+                lease_owner="worker",
+            )
+        self.assertEqual(before, (providers.clock_calls, providers.id_calls))
+
+    def test_single_eligible_key_claims_matching_pending_command(self) -> None:
+        expected = self._enqueue()
+        result = self._eligible(("TEST_COMMAND", 1))
+        self.assertEqual((QueueResultCode.APPLIED, expected.command_id), (result.code, result.command.command_id))
+
+    def test_key_order_is_canonical_for_repository_and_sql_parameters(self) -> None:
+        repository = Mock(spec=WorkflowCommandRepository)
+        repository.claim_next_eligible.return_value = QueueResult(
+            QueueResultCode.NO_ELIGIBLE_COMMAND,
+            QueueMutationKind.CLAIM_NEXT_ELIGIBLE,
+        )
+        service = DurableCommandQueueService(
+            repository,
+            CommandDefinitionRegistry(),
+            10,
+            clock=QueueProviders().clock,
+            id_factory=QueueProviders().identifier,
+        )
+        for keys in (
+            (("TEST_COMMAND", 1), ("ALT_COMMAND", 1)),
+            (("ALT_COMMAND", 1), ("TEST_COMMAND", 1)),
+        ):
+            service.claim_next_eligible(
+                eligible_definition_keys=keys,
+                lease_owner="worker",
+            )
+        expected = (("ALT_COMMAND", 1), ("TEST_COMMAND", 1))
+        self.assertEqual(
+            [expected, expected],
+            [call.kwargs["eligible_definition_keys"] for call in repository.claim_next_eligible.call_args_list],
+        )
+        self._enqueue()
+        result, _, parameters = self._record_next_eligible_select(
+            lambda: self._eligible(("TEST_COMMAND", 1), ("ALT_COMMAND", 1))
+        )
+        self.assertEqual(QueueResultCode.APPLIED, result.code)
+        self.assertEqual(("ALT_COMMAND", 1, "TEST_COMMAND", 1), parameters)
+        actual_candidates = []
+        for name, keys in (
+            ("caller-order-a.sqlite3", (("TEST_COMMAND", 1), ("ALT_COMMAND", 1))),
+            ("caller-order-b.sqlite3", (("ALT_COMMAND", 1), ("TEST_COMMAND", 1))),
+        ):
+            providers = QueueProviders()
+            candidate_service = self._new_service(self.directory / name, providers)
+            candidate_service.enqueue(
+                project_id="panam", command_kind="TEST_COMMAND",
+                command_schema_version=1, payload={"value": 1},
+                idempotency_key="key", actor_id="requester",
+            )
+            actual_candidates.append(
+                candidate_service.claim_next_eligible(
+                    eligible_definition_keys=keys,
+                    lease_owner="worker",
+                ).command.command_id
+            )
+        self.assertEqual(actual_candidates[0], actual_candidates[1])
+
+    def test_eligible_subset_uses_highest_priority(self) -> None:
+        self._enqueue(priority=1, key="low")
+        high = self._enqueue(priority=9, key="high")
+        self.assertEqual(high.command_id, self._eligible(("TEST_COMMAND", 1)).command.command_id)
+
+    def test_eligible_subset_uses_fifo_queue_sequence(self) -> None:
+        first = self._enqueue(priority=5, key="first")
+        self._enqueue(priority=5, key="second")
+        self.assertEqual(first.command_id, self._eligible(("TEST_COMMAND", 1)).command.command_id)
+
+    def test_high_priority_nonmatching_row_is_skipped(self) -> None:
+        skipped = self._enqueue("OTHER_COMMAND", priority=100, key="unsupported")
+        selected = self._enqueue("TEST_COMMAND", priority=50, key="supported")
+        result = self._eligible(("TEST_COMMAND", 1))
+        self.assertEqual(selected.command_id, result.command.command_id)
+        self.assertEqual(WorkflowCommandState.PENDING, self.repository.get(skipped.command_id).state)
+
+    def test_skipped_row_state_is_unchanged(self) -> None:
+        before, after, _ = self._skipped_scenario()
+        self.assertEqual(before.state, after.state)
+
+    def test_skipped_row_state_version_is_unchanged(self) -> None:
+        before, after, _ = self._skipped_scenario()
+        self.assertEqual(before.state_version, after.state_version)
+
+    def test_skipped_row_lease_is_unchanged(self) -> None:
+        before, after, _ = self._skipped_scenario()
+        self.assertEqual(
+            (before.lease_owner, before.lease_acquired_at, before.lease_expires_at),
+            (after.lease_owner, after.lease_acquired_at, after.lease_expires_at),
+        )
+
+    def test_skipped_row_claim_count_is_unchanged(self) -> None:
+        before, after, _ = self._skipped_scenario()
+        self.assertEqual(before.claim_count, after.claim_count)
+
+    def test_skipped_row_history_is_unchanged(self) -> None:
+        skipped, _, history = self._skipped_scenario()
+        self.assertEqual(history, self.repository.history(skipped.command_id))
+
+    def test_skipped_row_is_later_claimable_by_compatible_key(self) -> None:
+        skipped, _, _ = self._skipped_scenario()
+        result = self._eligible(("OTHER_COMMAND", 1), owner="other-worker")
+        self.assertEqual((QueueResultCode.APPLIED, skipped.command_id), (result.code, result.command.command_id))
+
+    def test_collection_outer_inner_types_and_empty_fail_before_providers(self) -> None:
+        repository = Mock(spec=WorkflowCommandRepository)
+        providers = QueueProviders()
+        service = DurableCommandQueueService(
+            repository, CommandDefinitionRegistry(), 10,
+            clock=providers.clock, id_factory=providers.identifier,
+        )
+        cases = (([], TypeError), ((), ValueError), ((["TEST_COMMAND", 1],), TypeError))
+        for value, error in cases:
+            with self.subTest(value=value), self.assertRaises(error):
+                service.claim_next_eligible(eligible_definition_keys=value, lease_owner="worker")  # type: ignore[arg-type]
+        self.assertEqual((0, 0), (providers.clock_calls, providers.id_calls))
+        repository.claim_next_eligible.assert_not_called()
+
+    def test_duplicate_key_is_rejected_without_effects(self) -> None:
+        with self.assertRaises(ValueError):
+            self._eligible(("TEST_COMMAND", 1), ("TEST_COMMAND", 1))
+        self.assertEqual((0, 0), (self.providers.clock_calls, self.providers.id_calls))
+
+    def test_kind_and_arity_validation(self) -> None:
+        cases = (
+            ((("TEST_COMMAND",),), ValueError),
+            ((("TEST_COMMAND", 1, 2),), ValueError),
+            (((1, 1),), TypeError),
+            ((("lower", 1),), ValueError),
+            (((" TEST_COMMAND", 1),), ValueError),
+        )
+        for value, error in cases:
+            with self.subTest(value=value), self.assertRaises(error):
+                self.service.claim_next_eligible(eligible_definition_keys=value, lease_owner="worker")  # type: ignore[arg-type]
+        self.assertEqual((0, 0), (self.providers.clock_calls, self.providers.id_calls))
+
+    def test_schema_version_validation(self) -> None:
+        cases = ((True, TypeError), ("1", TypeError), (0, ValueError), (2_147_483_648, ValueError))
+        for version, error in cases:
+            with self.subTest(version=version), self.assertRaises(error):
+                self.service.claim_next_eligible(
+                    eligible_definition_keys=(("TEST_COMMAND", version),),  # type: ignore[arg-type]
+                    lease_owner="worker",
+                )
+        self.assertEqual((0, 0), (self.providers.clock_calls, self.providers.id_calls))
+
+    def test_256_keys_are_accepted_with_512_bound_parameters(self) -> None:
+        keys = tuple((f"K{index:03d}", 1) for index in range(256))
+        result, statement, parameters = self._record_next_eligible_select(
+            lambda: self.service.claim_next_eligible(
+                eligible_definition_keys=keys,
+                lease_owner="worker",
+            )
+        )
+        self.assertEqual(QueueResultCode.NO_ELIGIBLE_COMMAND, result.code)
+        self.assertEqual((256, 512), (statement.count("command_kind=?"), len(parameters)))
+
+    def test_257_keys_are_rejected_before_providers_or_transaction(self) -> None:
+        keys = tuple((f"K{index:03d}", 1) for index in range(257))
+        with patch(
+            "panam_development_loop.sqlite_repositories._open_connection",
+            side_effect=AssertionError("connection opened"),
+        ) as opened:
+            with self.assertRaises(ValueError):
+                self.service.claim_next_eligible(
+                    eligible_definition_keys=keys,
+                    lease_owner="worker",
+                )
+        opened.assert_not_called()
+        self.assertEqual((0, 0), (self.providers.clock_calls, self.providers.id_calls))
+
+    def test_no_matching_row_returns_no_eligible_without_mutation(self) -> None:
+        command = self._enqueue("OTHER_COMMAND")
+        before = self.repository.get(command.command_id)
+        history = self.repository.history(command.command_id)
+        result = self._eligible(("TEST_COMMAND", 1))
+        self.assertEqual((QueueResultCode.NO_ELIGIBLE_COMMAND, QueueMutationKind.CLAIM_NEXT_ELIGIBLE), (result.code, result.mutation_kind))
+        self.assertEqual(before, self.repository.get(command.command_id))
+        self.assertEqual(history, self.repository.history(command.command_id))
+
+    def test_success_result_contains_claimed_command_and_event(self) -> None:
+        command = self._enqueue()
+        result = self._eligible(("TEST_COMMAND", 1))
+        self.assertEqual((QueueResultCode.APPLIED, QueueMutationKind.CLAIM_NEXT_ELIGIBLE), (result.code, result.mutation_kind))
+        self.assertEqual((command.command_id, WorkflowCommandState.CLAIMED, WorkflowCommandEventKind.CLAIMED), (result.command.command_id, result.command.state, result.event.event_kind))
+
+    def test_busy_returns_contention_once_without_retry(self) -> None:
+        self._enqueue()
+        lock = sqlite3.connect(self.path, timeout=0.0)
+        lock.execute("BEGIN IMMEDIATE")
+        try:
+            with patch(
+                "panam_development_loop.sqlite_repositories._open_connection",
+                wraps=sqlite_repository_module._open_connection,
+            ) as opened:
+                result = self._eligible(("TEST_COMMAND", 1))
+            self.assertEqual(1, opened.call_count)
+            self.assertEqual((QueueResultCode.TRANSIENT_CONTENTION, QueueMutationKind.CLAIM_NEXT_ELIGIBLE), (result.code, result.mutation_kind))
+        finally:
+            lock.rollback()
+            lock.close()
+
+    def test_queue_result_closure_for_eligible_claim(self) -> None:
+        QueueResult(QueueResultCode.NO_ELIGIBLE_COMMAND, QueueMutationKind.CLAIM_NEXT_ELIGIBLE)
+        command = self._enqueue()
+        result = self._eligible(("TEST_COMMAND", 1))
+        QueueResult(QueueResultCode.APPLIED, QueueMutationKind.CLAIM_NEXT_ELIGIBLE, result.command, result.event)
+        with self.assertRaises(ValueError):
+            QueueResult(
+                QueueResultCode.APPLIED,
+                QueueMutationKind.CLAIM_NEXT_ELIGIBLE,
+                replace(
+                    result.command,
+                    lease_acquired_at="2026-08-24T11:59:59.000000Z",
+                ),
+                result.event,
+            )
+
+    def test_eligible_claim_reuses_exact_claimed_event_facts(self) -> None:
+        pending = self._enqueue()
+        result = self._eligible(("TEST_COMMAND", 1), owner="worker-a")
+        event = result.event
+        self.assertEqual(
+            (WorkflowCommandEventKind.CLAIMED, WorkflowCommandState.PENDING, WorkflowCommandState.CLAIMED, 1, 2, "worker-a", 1),
+            (event.event_kind, event.prior_state, event.next_state, event.prior_state_version, event.next_state_version, event.actor_id, event.claim_count),
+        )
+        self.assertEqual(pending.command_id, event.command_id)
+        history = self.repository.history(result.command.command_id)
+        self.assertIsNotNone(history)
+        self.assertEqual(
+            (WorkflowCommandEventKind.ENQUEUED, WorkflowCommandEventKind.CLAIMED),
+            tuple(persisted.event_kind for persisted in history),
+        )
+        self.assertEqual(event, history[-1])
+
+    def test_closed_vocabularies_and_result_exclusions(self) -> None:
+        self.assertEqual((10, 17, 6, 9), (len(QueueMutationKind), len(QueueResultCode), len(WorkflowCommandState), len(WorkflowCommandEventKind)))
+        command = self._enqueue()
+        for code in (QueueResultCode.NOT_FOUND, QueueResultCode.TERMINAL_OBSERVED):
+            with self.subTest(code=code), self.assertRaises(ValueError):
+                QueueResult(code, QueueMutationKind.CLAIM_NEXT_ELIGIBLE, command=command)
+
+    def test_eligible_lease_effects_match_legacy(self) -> None:
+        legacy_providers = QueueProviders()
+        eligible_providers = QueueProviders()
+        legacy = self._new_service(self.directory / "legacy.sqlite3", legacy_providers)
+        eligible = self._new_service(self.directory / "eligible.sqlite3", eligible_providers)
+        for service in (legacy, eligible):
+            service.enqueue(
+                project_id="panam", command_kind="TEST_COMMAND", command_schema_version=1,
+                payload={"value": 1}, idempotency_key="key", actor_id="requester",
+            )
+        legacy_result = legacy.claim_next(lease_owner="worker")
+        eligible_result = eligible.claim_next_eligible(
+            eligible_definition_keys=(("TEST_COMMAND", 1),), lease_owner="worker"
+        )
+        self.assertEqual(
+            (legacy_result.command.lease_owner, legacy_result.command.lease_acquired_at, legacy_result.command.lease_expires_at, legacy_result.command.updated_at),
+            (eligible_result.command.lease_owner, eligible_result.command.lease_acquired_at, eligible_result.command.lease_expires_at, eligible_result.command.updated_at),
+        )
+
+    def test_eligible_version_increment_matches_legacy(self) -> None:
+        legacy_providers = QueueProviders()
+        eligible_providers = QueueProviders()
+        legacy = self._new_service(self.directory / "legacy-version.sqlite3", legacy_providers)
+        eligible = self._new_service(self.directory / "eligible-version.sqlite3", eligible_providers)
+        pending = []
+        for service in (legacy, eligible):
+            pending.append(service.enqueue(
+                project_id="panam", command_kind="TEST_COMMAND",
+                command_schema_version=1, payload={"value": 1},
+                idempotency_key="key", actor_id="requester",
+            ).command)
+        legacy_result = legacy.claim_next(lease_owner="worker")
+        eligible_result = eligible.claim_next_eligible(
+            eligible_definition_keys=(("TEST_COMMAND", 1),), lease_owner="worker"
+        )
+        self.assertEqual(
+            (pending[0].state_version + 1, pending[1].state_version + 1),
+            (legacy_result.command.state_version, eligible_result.command.state_version),
+        )
+
+    def test_eligible_claim_count_increment_matches_legacy(self) -> None:
+        legacy_providers = QueueProviders()
+        eligible_providers = QueueProviders()
+        legacy = self._new_service(self.directory / "legacy-count.sqlite3", legacy_providers)
+        eligible = self._new_service(self.directory / "eligible-count.sqlite3", eligible_providers)
+        pending = []
+        for service in (legacy, eligible):
+            pending.append(service.enqueue(
+                project_id="panam", command_kind="TEST_COMMAND",
+                command_schema_version=1, payload={"value": 1},
+                idempotency_key="key", actor_id="requester",
+            ).command)
+        legacy_result = legacy.claim_next(lease_owner="worker")
+        eligible_result = eligible.claim_next_eligible(
+            eligible_definition_keys=(("TEST_COMMAND", 1),), lease_owner="worker"
+        )
+        self.assertEqual(
+            (pending[0].claim_count + 1, pending[1].claim_count + 1),
+            (legacy_result.command.claim_count, eligible_result.command.claim_count),
+        )
+
+    def test_legacy_and_eligible_concurrency_do_not_duplicate_ownership(self) -> None:
+        pending = self._enqueue()
+
+        def claim(eligible: bool, base: int) -> QueueResult:
+            providers = QueueProviders()
+            providers.id_calls = base
+            service = DurableCommandQueueService(
+                SqliteWorkflowCommandRepository(self.path), CommandDefinitionRegistry(), 10,
+                clock=providers.clock, id_factory=providers.identifier,
+            )
+            return (
+                service.claim_next_eligible(
+                    eligible_definition_keys=(("TEST_COMMAND", 1),),
+                    lease_owner="eligible",
+                )
+                if eligible
+                else service.claim_next(lease_owner="legacy")
+            )
+
+        outcomes = self._run_bounded_concurrent_queue_actions((
+            ("legacy", lambda: claim(False, 100)),
+            ("eligible", lambda: claim(True, 200)),
+        ))
+        self.assertEqual(2, len(outcomes))
+        self.assertIs(QueueMutationKind.CLAIM_NEXT, outcomes["legacy"].mutation_kind)
+        self.assertIs(
+            QueueMutationKind.CLAIM_NEXT_ELIGIBLE,
+            outcomes["eligible"].mutation_kind,
+        )
+        winners = tuple(
+            (participant_id, result)
+            for participant_id, result in outcomes.items()
+            if result.code is QueueResultCode.APPLIED
+        )
+        losers = tuple(
+            result for result in outcomes.values()
+            if result.code is not QueueResultCode.APPLIED
+        )
+        self.assertEqual(1, len(winners))
+        self.assertEqual(1, len(losers))
+        self.assertIn(
+            losers[0].code,
+            {QueueResultCode.TRANSIENT_CONTENTION, QueueResultCode.NO_ELIGIBLE_COMMAND},
+        )
+        self.assertIsNone(losers[0].command)
+        self.assertIsNone(losers[0].event)
+        winner_id, winner = winners[0]
+        self.assertEqual(pending.command_id, winner.command.command_id)
+        current = self.repository.get(pending.command_id)
+        self.assertEqual(
+            (WorkflowCommandState.CLAIMED, 1, winner.command.lease_owner),
+            (current.state, current.claim_count, current.lease_owner),
+        )
+        self.assertEqual(
+            "legacy" if winner_id == "legacy" else "eligible", current.lease_owner
+        )
+
+    def test_overlapping_eligible_claims_do_not_duplicate_ownership(self) -> None:
+        def crash() -> QueueResult:
+            raise RuntimeError("injected participant failure")
+
+        with self.assertRaisesRegex(AssertionError, "unexpected participant exceptions"):
+            self._run_bounded_concurrent_queue_actions((
+                (
+                    "synthetic-outcome",
+                    lambda: QueueResult(
+                        QueueResultCode.NO_ELIGIBLE_COMMAND,
+                        QueueMutationKind.CLAIM_NEXT_ELIGIBLE,
+                    ),
+                ),
+                ("synthetic-crash", crash),
+            ))
+
+        pending = self._enqueue()
+
+        def claim(owner: str, base: int) -> QueueResult:
+            providers = QueueProviders()
+            providers.id_calls = base
+            service = DurableCommandQueueService(
+                SqliteWorkflowCommandRepository(self.path), CommandDefinitionRegistry(), 10,
+                clock=providers.clock, id_factory=providers.identifier,
+            )
+            return service.claim_next_eligible(
+                eligible_definition_keys=(("TEST_COMMAND", 1),), lease_owner=owner
+            )
+
+        outcomes = self._run_bounded_concurrent_queue_actions((
+            ("worker-a", lambda: claim("worker-a", 100)),
+            ("worker-b", lambda: claim("worker-b", 200)),
+        ))
+        self.assertEqual(2, len(outcomes))
+        self.assertTrue(all(
+            result.mutation_kind is QueueMutationKind.CLAIM_NEXT_ELIGIBLE
+            for result in outcomes.values()
+        ))
+        winners = tuple(
+            (owner, result) for owner, result in outcomes.items()
+            if result.code is QueueResultCode.APPLIED
+        )
+        losers = tuple(
+            result for result in outcomes.values()
+            if result.code is not QueueResultCode.APPLIED
+        )
+        self.assertEqual(1, len(winners))
+        self.assertEqual(1, len(losers))
+        self.assertIn(
+            losers[0].code,
+            {QueueResultCode.TRANSIENT_CONTENTION, QueueResultCode.NO_ELIGIBLE_COMMAND},
+        )
+        self.assertIsNone(losers[0].command)
+        self.assertIsNone(losers[0].event)
+        winner_owner, winner = winners[0]
+        self.assertEqual(pending.command_id, winner.command.command_id)
+        self.assertEqual(winner_owner, winner.command.lease_owner)
+        current = self.repository.get(pending.command_id)
+        self.assertEqual(
+            (WorkflowCommandState.CLAIMED, 1, winner_owner),
+            (current.state, current.claim_count, current.lease_owner),
+        )
+
+    def test_disjoint_eligible_claims_serialize_and_remain_claimable(self) -> None:
+        test_command = self._enqueue("TEST_COMMAND", key="test")
+        other_command = self._enqueue("OTHER_COMMAND", key="other")
+        barrier = threading.Barrier(2)
+        results: list[QueueResult] = []
+        errors: list[BaseException] = []
+
+        def claim(key: tuple[str, int], owner: str, base: int) -> None:
+            providers = QueueProviders()
+            providers.id_calls = base
+            service = DurableCommandQueueService(
+                SqliteWorkflowCommandRepository(self.path), CommandDefinitionRegistry(), 10,
+                clock=providers.clock, id_factory=providers.identifier,
+            )
+            try:
+                barrier.wait(timeout=5)
+                results.append(service.claim_next_eligible(eligible_definition_keys=(key,), lease_owner=owner))
+            except BaseException as error:
+                errors.append(error)
+
+        threads = [
+            threading.Thread(target=claim, args=(("TEST_COMMAND", 1), "worker-a", 100)),
+            threading.Thread(target=claim, args=(("OTHER_COMMAND", 1), "worker-b", 200)),
+        ]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(timeout=5)
+        self.assertEqual([], errors)
+        self.assertEqual(2, len(results))
+        self.assertTrue(all(
+            result.code in {QueueResultCode.APPLIED, QueueResultCode.TRANSIENT_CONTENTION}
+            and result.mutation_kind is QueueMutationKind.CLAIM_NEXT_ELIGIBLE
+            for result in results
+        ))
+        self.assertGreaterEqual(sum(result.code is QueueResultCode.APPLIED for result in results), 1)
+        for key, owner, base in ((('TEST_COMMAND', 1), 'worker-a', 300), (('OTHER_COMMAND', 1), 'worker-b', 400)):
+            command = test_command if key[0] == "TEST_COMMAND" else other_command
+            if self.repository.get(command.command_id).state is WorkflowCommandState.PENDING:
+                providers = QueueProviders()
+                providers.id_calls = base
+                service = DurableCommandQueueService(
+                    SqliteWorkflowCommandRepository(self.path), CommandDefinitionRegistry(), 10,
+                    clock=providers.clock, id_factory=providers.identifier,
+                )
+                self.assertEqual(QueueResultCode.APPLIED, service.claim_next_eligible(eligible_definition_keys=(key,), lease_owner=owner).code)
+        self.assertEqual(
+            (WorkflowCommandState.CLAIMED, WorkflowCommandState.CLAIMED),
+            (self.repository.get(test_command.command_id).state, self.repository.get(other_command.command_id).state),
+        )
+
+    def test_direct_repository_key_validation_precedes_transaction(self) -> None:
+        with patch(
+            "panam_development_loop.sqlite_repositories._open_connection",
+            side_effect=AssertionError("connection opened"),
+        ) as opened:
+            with self.assertRaisesRegex(ValueError, "^eligible_definition_keys$"):
+                self.repository.claim_next_eligible(
+                    event_id=str(UUID(int=900)),
+                    eligible_definition_keys=(),
+                    lease_owner="worker",
+                    lease_acquired_at="2026-08-24T12:00:00.000000Z",
+                    lease_expires_at="2026-08-24T12:00:10.000000Z",
+                )
+            with self.assertRaisesRegex(ValueError, "^event_id$"):
+                self.repository.claim_next_eligible(
+                    event_id="bad",
+                    eligible_definition_keys=(),
+                    lease_owner="worker",
+                    lease_acquired_at="2026-08-24T12:00:00.000000Z",
+                    lease_expires_at="2026-08-24T12:00:10.000000Z",
+                )
+        opened.assert_not_called()
+
+    def test_sql_uses_bound_parameters_and_rejects_malformed_metacharacters(self) -> None:
+        with self.assertRaises(ValueError):
+            self._eligible(("TEST_COMMAND') OR 1=1 --", 1))
+        result, statement, parameters = self._record_next_eligible_select(
+            lambda: self._eligible(("TEST_COMMAND", 1))
+        )
+        self.assertEqual(QueueResultCode.NO_ELIGIBLE_COMMAND, result.code)
+        self.assertIn("command_kind=?", statement)
+        self.assertNotIn("TEST_COMMAND", statement)
+        self.assertEqual(("TEST_COMMAND", 1), parameters)
+
+    def test_migration_version_remains_four(self) -> None:
+        self.assertEqual([1, 2, 3, 4], [migration.version for migration in PRODUCTION_MIGRATIONS])
+        connection = sqlite3.connect(self.path)
+        try:
+            self.assertEqual([1, 2, 3, 4], [row[0] for row in connection.execute("SELECT version FROM schema_migrations ORDER BY version")])
+        finally:
+            connection.close()
+
+    def test_schema_and_three_indexes_are_unchanged(self) -> None:
+        connection = sqlite3.connect(self.path)
+        connection.row_factory = sqlite3.Row
+        try:
+            explicit = {
+                row["name"] for row in connection.execute("PRAGMA index_list(workflow_commands)")
+                if row["origin"] == "c"
+            }
+            self.assertEqual(
+                {
+                    "workflow_commands_claim_order_idx",
+                    "workflow_commands_lease_expiry_idx",
+                    "workflow_commands_project_sequence_idx",
+                },
+                explicit,
+            )
+            self.assertEqual([], [row["name"] for row in connection.execute("SELECT name FROM sqlite_master WHERE type='trigger' AND tbl_name IN ('workflow_commands','workflow_command_events')")])
+            table_sql = {
+                row["name"]: row["sql"]
+                for row in connection.execute(
+                    "SELECT name, sql FROM sqlite_master WHERE type='table' "
+                    "AND name IN ('workflow_commands','workflow_command_events')"
+                )
+            }
+            normalize = lambda value: re.sub(r"\s+", " ", value).strip().rstrip(";")
+            self.assertEqual(
+                normalize(PRODUCTION_MIGRATIONS[3].statements[0]),
+                normalize(table_sql["workflow_commands"]),
+            )
+            self.assertEqual(
+                normalize(PRODUCTION_MIGRATIONS[3].statements[1]),
+                normalize(table_sql["workflow_command_events"]),
+            )
+        finally:
+            connection.close()
+
+    def test_additive_api_signatures_counts_and_exports(self) -> None:
+        import panam_development_loop as package
+
+        method_contracts = (
+            (
+                DurableCommandQueueService.claim_next_eligible,
+                ("self", "eligible_definition_keys", "lease_owner"),
+                {
+                    "eligible_definition_keys": tuple[tuple[str, int], ...],
+                    "lease_owner": str,
+                    "return": QueueResult,
+                },
+            ),
+            *(
+                (
+                    method,
+                    (
+                        "self", "event_id", "eligible_definition_keys", "lease_owner",
+                        "lease_acquired_at", "lease_expires_at",
+                    ),
+                    {
+                        "event_id": str,
+                        "eligible_definition_keys": tuple[tuple[str, int], ...],
+                        "lease_owner": str,
+                        "lease_acquired_at": str,
+                        "lease_expires_at": str,
+                        "return": QueueResult,
+                    },
+                )
+                for method in (
+                    WorkflowCommandRepository.claim_next_eligible,
+                    SqliteWorkflowCommandRepository.claim_next_eligible,
+                )
+            ),
+        )
+        for method, parameter_names, expected_hints in method_contracts:
+            signature = inspect.signature(method)
+            parameters = tuple(signature.parameters.values())
+            self.assertEqual("claim_next_eligible", method.__name__)
+            self.assertEqual(parameter_names, tuple(signature.parameters))
+            self.assertIs(inspect.Parameter.POSITIONAL_OR_KEYWORD, parameters[0].kind)
+            self.assertIs(inspect.Parameter.empty, parameters[0].annotation)
+            self.assertIs(inspect.Parameter.empty, parameters[0].default)
+            self.assertTrue(all(
+                parameter.kind is inspect.Parameter.KEYWORD_ONLY
+                and parameter.default is inspect.Parameter.empty
+                and parameter.annotation == expected_hints[parameter.name]
+                for parameter in parameters[1:]
+            ))
+            self.assertIs(QueueResult, signature.return_annotation)
+            self.assertEqual(expected_hints, get_type_hints(method))
+        service_operations = tuple(name for name, value in DurableCommandQueueService.__dict__.items() if not name.startswith("_") and callable(value))
+        repository_operations = tuple(name for name, value in WorkflowCommandRepository.__dict__.items() if not name.startswith("_") and callable(value))
+        self.assertEqual((13, 13, 10, 17, 6, 9, 79), (len(service_operations), len(repository_operations), len(QueueMutationKind), len(QueueResultCode), len(WorkflowCommandState), len(WorkflowCommandEventKind), len(package.__all__)))
+        self.assertNotIn("MAX_ELIGIBLE_DEFINITION_KEYS", package.__all__)
 
 
 if __name__ == "__main__":

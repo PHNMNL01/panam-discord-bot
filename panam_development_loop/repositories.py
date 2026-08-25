@@ -117,6 +117,16 @@ class WorkflowCommandRepository(Protocol):
         lease_expires_at: str,
     ) -> QueueResult: ...
 
+    def claim_next_eligible(
+        self,
+        *,
+        event_id: str,
+        eligible_definition_keys: tuple[tuple[str, int], ...],
+        lease_owner: str,
+        lease_acquired_at: str,
+        lease_expires_at: str,
+    ) -> QueueResult: ...
+
     def renew_lease(
         self,
         *,

@@ -16,6 +16,7 @@ from .models import (
     _QUEUE_COMMAND_KIND_PATTERN,
     _QUEUE_IDEMPOTENCY_PATTERN,
     _QUEUE_PAYLOAD_KEY_PATTERN,
+    _canonical_eligible_definition_keys,
     _canonical_queue_payload,
     _intent_digest,
     _queue_identity,
@@ -320,6 +321,29 @@ class DurableCommandQueueService:
         expires_at = self._lease_expiry(instant)
         return self._repository.claim_next(
             event_id=self._event_id(),
+            lease_owner=owner,
+            lease_acquired_at=acquired_at,
+            lease_expires_at=expires_at,
+        )
+
+    def claim_next_eligible(
+        self,
+        *,
+        eligible_definition_keys: tuple[tuple[str, int], ...],
+        lease_owner: str,
+    ) -> QueueResult:
+        owner = _queue_text(lease_owner, "lease_owner", _QUEUE_ACTOR_PATTERN)
+        keys = _canonical_eligible_definition_keys(eligible_definition_keys)
+        repository_method = getattr(
+            self._repository, "claim_next_eligible", None
+        )
+        if not callable(repository_method):
+            raise TypeError("repository")
+        instant, acquired_at = self._now()
+        expires_at = self._lease_expiry(instant)
+        return repository_method(
+            event_id=self._event_id(),
+            eligible_definition_keys=keys,
             lease_owner=owner,
             lease_acquired_at=acquired_at,
             lease_expires_at=expires_at,

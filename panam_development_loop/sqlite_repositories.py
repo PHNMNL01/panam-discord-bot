@@ -27,6 +27,7 @@ from .models import (
     WorkflowCommandState,
     _QUEUE_ACTOR_PATTERN,
     _QUEUE_CODE_PATTERN,
+    _canonical_eligible_definition_keys,
     _parse_queue_timestamp,
     _queue_identity,
     _queue_integer,
@@ -1672,6 +1673,102 @@ class SqliteWorkflowCommandRepository:
             )
 
         return self._mutation(QueueMutationKind.CLAIM_NEXT, "claim_next", operation)
+
+    def claim_next_eligible(
+        self,
+        *,
+        event_id: str,
+        eligible_definition_keys: tuple[tuple[str, int], ...],
+        lease_owner: str,
+        lease_acquired_at: str,
+        lease_expires_at: str,
+    ) -> QueueResult:
+        event = _queue_uuid(event_id, "event_id")
+        owner = _queue_text(lease_owner, "lease_owner", _QUEUE_ACTOR_PATTERN)
+        acquired = _parse_queue_timestamp(lease_acquired_at, "lease_acquired_at")
+        expires = _parse_queue_timestamp(lease_expires_at, "lease_expires_at")
+        if acquired >= expires:
+            raise ValueError("lease_expires_at")
+        keys = _canonical_eligible_definition_keys(eligible_definition_keys)
+        predicates = " OR ".join(
+            "(candidate.command_kind=? AND candidate.command_schema_version=?)"
+            for _ in keys
+        )
+        parameters = tuple(value for key in keys for value in key)
+
+        def operation(connection: sqlite3.Connection) -> QueueResult:
+            row = connection.execute(
+                f"SELECT {_COMMAND_COLUMNS} FROM workflow_commands AS candidate "
+                "WHERE candidate.state='PENDING' AND ("
+                f"{predicates}) ORDER BY candidate.priority DESC, "
+                "candidate.queue_sequence ASC LIMIT 1",
+                parameters,
+            ).fetchone()
+            if row is None:
+                return QueueResult(
+                    QueueResultCode.NO_ELIGIBLE_COMMAND,
+                    QueueMutationKind.CLAIM_NEXT_ELIGIBLE,
+                )
+            current = self._command_from_row(
+                connection, row, "claim_next_eligible"
+            )
+            self._require_chronological(current, lease_acquired_at)
+            version = self._next_version(current)
+            if current.claim_count >= 9_223_372_036_854_775_807:
+                _raise_payload_error(
+                    ValueError("claim_count"),
+                    "WorkflowCommand",
+                    self._identity(current.command_id),
+                )
+            count = current.claim_count + 1
+            self._update_one(
+                connection,
+                """
+                UPDATE workflow_commands
+                SET state='CLAIMED', state_version=?, claim_count=?, lease_owner=?,
+                    lease_acquired_at=?, lease_expires_at=?, updated_at=?
+                WHERE command_id=? AND state='PENDING' AND state_version=?
+                """,
+                (
+                    version,
+                    count,
+                    owner,
+                    lease_acquired_at,
+                    lease_expires_at,
+                    lease_acquired_at,
+                    current.command_id,
+                    current.state_version,
+                ),
+                self._identity(current.command_id),
+            )
+            self._insert_event(
+                connection,
+                event_id=event,
+                command_id=current.command_id,
+                event_kind=WorkflowCommandEventKind.CLAIMED,
+                prior_state=WorkflowCommandState.PENDING,
+                next_state=WorkflowCommandState.CLAIMED,
+                prior_state_version=current.state_version,
+                next_state_version=version,
+                actor_id=owner,
+                occurred_at=lease_acquired_at,
+                lease_owner=owner,
+                lease_expires_at=lease_expires_at,
+                claim_count=count,
+                reason_code=None,
+            )
+            return self._applied(
+                connection,
+                QueueMutationKind.CLAIM_NEXT_ELIGIBLE,
+                current.command_id,
+                event,
+            )
+
+        return self._mutation(
+            QueueMutationKind.CLAIM_NEXT_ELIGIBLE,
+            "claim_next_eligible",
+            operation,
+        )
 
     @staticmethod
     def _terminal(command: WorkflowCommand) -> bool:

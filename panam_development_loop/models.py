@@ -1253,6 +1253,7 @@ _QUEUE_RESERVED_KEYS = frozenset(
     }
 )
 _SIGNED_64_MAX = 9_223_372_036_854_775_807
+_MAX_ELIGIBLE_DEFINITION_KEYS = 256
 
 
 class WorkflowCommandState(str, Enum):
@@ -1279,6 +1280,7 @@ class WorkflowCommandEventKind(str, Enum):
 class QueueMutationKind(str, Enum):
     ENQUEUE = "ENQUEUE"
     CLAIM_NEXT = "CLAIM_NEXT"
+    CLAIM_NEXT_ELIGIBLE = "CLAIM_NEXT_ELIGIBLE"
     RENEW_LEASE = "RENEW_LEASE"
     MARK_RUNNING = "MARK_RUNNING"
     REQUEST_CANCELLATION = "REQUEST_CANCELLATION"
@@ -1345,6 +1347,33 @@ def _queue_integer(value: object, field_name: str, minimum: int, maximum: int) -
     if value < minimum or value > maximum:
         raise ValueError(field_name)
     return value
+
+
+def _canonical_eligible_definition_keys(
+    value: object,
+) -> tuple[tuple[str, int], ...]:
+    field_name = "eligible_definition_keys"
+    if type(value) is not tuple:
+        raise TypeError(field_name)
+    if not value or len(value) > _MAX_ELIGIBLE_DEFINITION_KEYS:
+        raise ValueError(field_name)
+    validated: list[tuple[str, int]] = []
+    seen: set[tuple[str, int]] = set()
+    for item in value:
+        if type(item) is not tuple:
+            raise TypeError(field_name)
+        if len(item) != 2:
+            raise ValueError(field_name)
+        kind = _queue_text(item[0], "command_kind", _QUEUE_COMMAND_KIND_PATTERN)
+        version = _queue_integer(
+            item[1], "command_schema_version", 1, 2_147_483_647
+        )
+        key = (kind, version)
+        if key in seen:
+            raise ValueError(field_name)
+        seen.add(key)
+        validated.append(key)
+    return tuple(sorted(validated))
 
 
 def _parse_queue_timestamp(value: object, field_name: str) -> datetime:
@@ -1808,6 +1837,7 @@ class WorkflowCommandEvent:
 _EVENT_KINDS_BY_MUTATION = {
     QueueMutationKind.ENQUEUE: {WorkflowCommandEventKind.ENQUEUED},
     QueueMutationKind.CLAIM_NEXT: {WorkflowCommandEventKind.CLAIMED},
+    QueueMutationKind.CLAIM_NEXT_ELIGIBLE: {WorkflowCommandEventKind.CLAIMED},
     QueueMutationKind.RENEW_LEASE: {WorkflowCommandEventKind.LEASE_RENEWED},
     QueueMutationKind.MARK_RUNNING: {WorkflowCommandEventKind.STARTED},
     QueueMutationKind.REQUEST_CANCELLATION: {
@@ -1879,7 +1909,10 @@ class QueueResult:
                 self.event.occurred_at != self.command.started_at
             ):
                 raise ValueError("APPLIED start binding")
-            if kind is QueueMutationKind.CLAIM_NEXT and (
+            if kind in {
+                QueueMutationKind.CLAIM_NEXT,
+                QueueMutationKind.CLAIM_NEXT_ELIGIBLE,
+            } and (
                 self.event.occurred_at != self.command.lease_acquired_at
             ):
                 raise ValueError("APPLIED claim binding")
@@ -1938,13 +1971,17 @@ class QueueResult:
             valid = singular_empty and plural_empty and kind not in {
                 QueueMutationKind.ENQUEUE,
                 QueueMutationKind.CLAIM_NEXT,
+                QueueMutationKind.CLAIM_NEXT_ELIGIBLE,
             }
         elif code is QueueResultCode.LISTED:
             valid = kind is None and self.command is None and not self.events
         elif code is QueueResultCode.HISTORY_RETURNED:
             valid = kind is None and self.command is None and not self.commands and bool(self.events)
         elif code is QueueResultCode.NO_ELIGIBLE_COMMAND:
-            valid = kind is QueueMutationKind.CLAIM_NEXT and singular_empty and plural_empty
+            valid = kind in {
+                QueueMutationKind.CLAIM_NEXT,
+                QueueMutationKind.CLAIM_NEXT_ELIGIBLE,
+            } and singular_empty and plural_empty
         elif code in {QueueResultCode.EXISTING_IDENTICAL, QueueResultCode.IDEMPOTENCY_CONFLICT}:
             valid = kind is QueueMutationKind.ENQUEUE and self.command is not None and plural_empty
         elif code is QueueResultCode.CAS_CONFLICT:
@@ -1972,7 +2009,12 @@ class QueueResult:
         elif code is QueueResultCode.CANCELLATION_NOT_REQUESTED:
             valid = kind is QueueMutationKind.ACKNOWLEDGE_CANCELLATION and self.command is not None and plural_empty
         elif code is QueueResultCode.TERMINAL_OBSERVED:
-            valid = kind not in {None, QueueMutationKind.ENQUEUE, QueueMutationKind.CLAIM_NEXT} and self.command is not None and plural_empty
+            valid = kind not in {
+                None,
+                QueueMutationKind.ENQUEUE,
+                QueueMutationKind.CLAIM_NEXT,
+                QueueMutationKind.CLAIM_NEXT_ELIGIBLE,
+            } and self.command is not None and plural_empty
         elif code is QueueResultCode.TRANSIENT_CONTENTION:
             valid = kind is not None and singular_empty and plural_empty
         elif code is QueueResultCode.RECONCILIATION_REQUIRED:
