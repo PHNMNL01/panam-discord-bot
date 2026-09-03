@@ -23,6 +23,9 @@ from uuid import UUID
 from unittest.mock import Mock, patch
 
 import panam_development_loop.sqlite_repositories as sqlite_repository_module
+import panam_development_loop.models as models_module
+import panam_development_loop.worker as worker_module
+import panam_development_loop.worker_main as worker_main_module
 
 from panam_development_loop import (
     ApprovalBinding,
@@ -90,6 +93,32 @@ from panam_development_loop import (
     WorkflowCommandState,
     WorkflowNodeType,
     ValidatedCommandEnvelope,
+    DevelopmentWorker,
+    SqliteWorkerJournalRepository,
+    WorkerCheckpoint,
+    WorkerCheckpointDirective,
+    WorkerCommandHandler,
+    WorkerConfiguration,
+    WorkerFailureCode,
+    WorkerHandlerContext,
+    WorkerHandlerEntry,
+    WorkerHandlerRegistry,
+    WorkerHandlerResult,
+    WorkerHandlerStatus,
+    WorkerIterationResult,
+    WorkerIterationStatus,
+    WorkerJournalRepository,
+    WorkerJournalResult,
+    WorkerJournalResultCode,
+    WorkerOperationKind,
+    WorkerOperationReceipt,
+    WorkerOperationState,
+    WorkerReconciliationStatus,
+    WorkerSession,
+    WorkerSessionState,
+    WorkerStartupResult,
+    WorkerStartupStatus,
+    main as worker_main,
 )
 from panam_development_loop.command_queue import _format_queue_timestamp
 from panam_development_loop.models import (
@@ -105,7 +134,9 @@ from panam_development_loop.sqlite_migrations import (
     MigrationFailureCode,
     PRODUCTION_MIGRATIONS,
     apply_migrations,
+    initialize_database,
     validate_migration_registry,
+    _MIGRATION_FIVE_SQL,
 )
 from panam_development_loop.__main__ import main as foundation_query_main
 
@@ -1261,7 +1292,7 @@ class SqliteMigrationTest(unittest.TestCase):
         SqliteRunStore(path).initialize("first-at")
         connection = self._connection(path)
         try:
-            self.assertEqual([(1, "first-at"), (2, "first-at"), (3, "first-at"), (4, "first-at")], self._ledger_snapshot(connection))
+            self.assertEqual([(1, "first-at"), (2, "first-at"), (3, "first-at"), (4, "first-at"), (5, "first-at")], self._ledger_snapshot(connection))
             self.assertEqual(
                 [
                     "approvals",
@@ -1271,6 +1302,8 @@ class SqliteMigrationTest(unittest.TestCase):
                     "project_policies",
                     "schema_migrations",
                     "state_events",
+                    "worker_operations",
+                    "worker_sessions",
                     "workflow_command_events",
                     "workflow_commands",
                 ],
@@ -1324,7 +1357,7 @@ class SqliteMigrationTest(unittest.TestCase):
             for table_name, table_sql in before_schema.items():
                 self.assertEqual(table_sql, after_schema[table_name])
             self.assertEqual(
-                [(1, "legacy-applied-at"), (2, "new-at"), (3, "new-at"), (4, "new-at")],
+                [(1, "legacy-applied-at"), (2, "new-at"), (3, "new-at"), (4, "new-at"), (5, "new-at")],
                 self._ledger_snapshot(connection),
             )
             self.assertEqual(before_runs, [tuple(row) for row in connection.execute("SELECT * FROM development_runs")])
@@ -1446,7 +1479,7 @@ class SqliteMigrationTest(unittest.TestCase):
             malformed.commit()
             self.assertEqual(MigrationFailureCode.INVALID_APPLIED_HISTORY, self._assert_history_rejected_without_mutation(malformed).code)
             future.execute("CREATE TABLE schema_migrations (version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL)")
-            future.execute("INSERT INTO schema_migrations VALUES(5, 'future-at')")
+            future.execute("INSERT INTO schema_migrations VALUES(6, 'future-at')")
             future.commit()
             self.assertEqual(MigrationFailureCode.UNKNOWN_FUTURE_VERSION, self._assert_history_rejected_without_mutation(future).code)
         finally:
@@ -1757,7 +1790,7 @@ class SqliteRepositoryTest(unittest.TestCase):
         SqliteRunStore(future).initialize("at")
         connection = sqlite3.connect(future)
         try:
-            connection.execute("INSERT INTO schema_migrations VALUES(5, 'future')")
+            connection.execute("INSERT INTO schema_migrations VALUES(6, 'future')")
             connection.commit()
         finally:
             connection.close()
@@ -1856,7 +1889,7 @@ class SqliteMigrationTwoTest(unittest.TestCase):
             PRODUCTION_MIGRATIONS,
             require_production_version=True,
         )
-        self.assertEqual([1, 2, 3, 4], [migration.version for migration in validated])
+        self.assertEqual([1, 2, 3, 4, 5], [migration.version for migration in validated])
         self.assertIn("base_commit", PRODUCTION_MIGRATIONS[1].statements[2])
         for identifier in ("base_commit", "commit_hash", "rollback_reason"):
             with self.subTest(identifier=identifier):
@@ -1896,7 +1929,7 @@ class SqliteMigrationTwoTest(unittest.TestCase):
                 )
             ]
             self.assertEqual(
-                ["approvals", "development_runs", "milestone_contracts", "phases", "project_policies", "schema_migrations", "state_events", "workflow_command_events", "workflow_commands"],
+                ["approvals", "development_runs", "milestone_contracts", "phases", "project_policies", "schema_migrations", "state_events", "worker_operations", "worker_sessions", "workflow_command_events", "workflow_commands"],
                 tables,
             )
             foreign_keys = connection.execute("PRAGMA foreign_key_list(milestone_contracts)").fetchall()
@@ -2094,7 +2127,7 @@ class ProjectPolicyReadOnlyFoundationTest(unittest.TestCase):
         connection = sqlite3.connect(self.database_path)
         try:
             self.assertEqual(
-                [(1, "initialized-at"), (2, "initialized-at"), (3, "initialized-at"), (4, "initialized-at")],
+            [(1, "initialized-at"), (2, "initialized-at"), (3, "initialized-at"), (4, "initialized-at"), (5, "initialized-at")],
                 connection.execute(
                     "SELECT version, applied_at FROM schema_migrations ORDER BY version"
                 ).fetchall(),
@@ -2185,7 +2218,7 @@ class ProjectPolicyReadOnlyFoundationTest(unittest.TestCase):
             )
             self.assertEqual(0, connection.execute("SELECT COUNT(*) FROM project_policies").fetchone()[0])
             self.assertEqual(
-                [(1,), (2,), (3,), (4,)],
+            [(1,), (2,), (3,), (4,), (5,)],
                 [tuple(row) for row in connection.execute("SELECT version FROM schema_migrations ORDER BY version")],
             )
         finally:
@@ -2326,7 +2359,7 @@ class ProjectPolicyReadOnlyFoundationTest(unittest.TestCase):
         SqliteRunStore(future_path).initialize("at")
         connection = sqlite3.connect(future_path)
         try:
-            connection.execute("INSERT INTO schema_migrations VALUES(5, 'future-at')")
+            connection.execute("INSERT INTO schema_migrations VALUES(6, 'future-at')")
             connection.commit()
         finally:
             connection.close()
@@ -5040,8 +5073,20 @@ class Dl21OperationMatrixCompatibilityTest(unittest.TestCase):
             "FoundationQueryOutcome", "FoundationQueryResult", "FoundationQueryService",
             "exit_code_for", "render_error", "render_json", "render_text",
         }
-        self.assertEqual(p1 | expected, set(package.__all__))
-        self.assertEqual(79, len(package.__all__))
+        worker_exports = {
+            "WorkerSessionState", "WorkerOperationKind", "WorkerOperationState",
+            "WorkerReconciliationStatus", "WorkerJournalResultCode",
+            "WorkerStartupStatus", "WorkerIterationStatus", "WorkerHandlerStatus",
+            "WorkerCheckpointDirective", "WorkerFailureCode", "WorkerConfiguration",
+            "WorkerSession", "WorkerOperationReceipt", "WorkerJournalResult",
+            "WorkerStartupResult", "WorkerIterationResult", "WorkerHandlerContext",
+            "WorkerHandlerResult", "WorkerCheckpoint", "WorkerCommandHandler",
+            "WorkerHandlerEntry", "WorkerJournalRepository",
+            "SqliteWorkerJournalRepository", "WorkerHandlerRegistry",
+            "DevelopmentWorker", "main",
+        }
+        self.assertEqual(p1 | expected | worker_exports, set(package.__all__))
+        self.assertEqual(105, len(package.__all__))
         self.assertEqual(13, len(expected))
         for forbidden in ("Worker", "OperationJournal", "QueueQueryKind", "Executor"):
             self.assertNotIn(forbidden, package.__all__)
@@ -5451,9 +5496,9 @@ class SqliteMigrationFourTest(unittest.TestCase):
         connection = sqlite3.connect(self.path)
         connection.row_factory = sqlite3.Row
         try:
-            self.assertEqual([1, 2, 3, 4], [row[0] for row in connection.execute("SELECT version FROM schema_migrations ORDER BY version")])
+            self.assertEqual([1, 2, 3, 4, 5], [row[0] for row in connection.execute("SELECT version FROM schema_migrations ORDER BY version")])
             tables = {row[0] for row in connection.execute("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'")}
-            self.assertEqual({"workflow_commands", "workflow_command_events"}, tables - {"schema_migrations", "development_runs", "state_events", "phases", "milestone_contracts", "approvals", "project_policies"})
+            self.assertEqual({"workflow_commands", "workflow_command_events", "worker_sessions", "worker_operations"}, tables - {"schema_migrations", "development_runs", "state_events", "phases", "milestone_contracts", "approvals", "project_policies"})
             self.assertEqual(
                 ["workflow_commands_claim_order_idx", "workflow_commands_lease_expiry_idx", "workflow_commands_project_sequence_idx"],
                 sorted(row[0] for row in connection.execute("SELECT name FROM sqlite_master WHERE type='index' AND name LIKE 'workflow_commands_%_idx'")),
@@ -5569,7 +5614,7 @@ class SqliteMigrationFourTest(unittest.TestCase):
             for table in before:
                 expected = before[table]
                 if table == "schema_migrations":
-                    expected = expected + [(4, "v4-at")]
+                    expected = expected + [(4, "v4-at"), (5, "v4-at")]
                 self.assertEqual(expected, [tuple(row) for row in connection.execute(f"SELECT * FROM {table}")])
             self.assertEqual(0, connection.execute("SELECT count(*) FROM workflow_commands").fetchone()[0])
             self.assertEqual(0, connection.execute("SELECT count(*) FROM workflow_command_events").fetchone()[0])
@@ -7228,11 +7273,11 @@ class Dl21Ca001CompatibilityTest(unittest.TestCase):
         self.assertNotIn("TEST_COMMAND", statement)
         self.assertEqual(("TEST_COMMAND", 1), parameters)
 
-    def test_migration_version_remains_four(self) -> None:
-        self.assertEqual([1, 2, 3, 4], [migration.version for migration in PRODUCTION_MIGRATIONS])
+    def test_migration_version_advances_to_five(self) -> None:
+        self.assertEqual([1, 2, 3, 4, 5], [migration.version for migration in PRODUCTION_MIGRATIONS])
         connection = sqlite3.connect(self.path)
         try:
-            self.assertEqual([1, 2, 3, 4], [row[0] for row in connection.execute("SELECT version FROM schema_migrations ORDER BY version")])
+            self.assertEqual([1, 2, 3, 4, 5], [row[0] for row in connection.execute("SELECT version FROM schema_migrations ORDER BY version")])
         finally:
             connection.close()
 
@@ -7325,8 +7370,4839 @@ class Dl21Ca001CompatibilityTest(unittest.TestCase):
             self.assertEqual(expected_hints, get_type_hints(method))
         service_operations = tuple(name for name, value in DurableCommandQueueService.__dict__.items() if not name.startswith("_") and callable(value))
         repository_operations = tuple(name for name, value in WorkflowCommandRepository.__dict__.items() if not name.startswith("_") and callable(value))
-        self.assertEqual((13, 13, 10, 17, 6, 9, 79), (len(service_operations), len(repository_operations), len(QueueMutationKind), len(QueueResultCode), len(WorkflowCommandState), len(WorkflowCommandEventKind), len(package.__all__)))
+        self.assertEqual((13, 13, 10, 17, 6, 9, 105), (len(service_operations), len(repository_operations), len(QueueMutationKind), len(QueueResultCode), len(WorkflowCommandState), len(WorkflowCommandEventKind), len(package.__all__)))
         self.assertNotIn("MAX_ELIGIBLE_DEFINITION_KEYS", package.__all__)
+
+
+class Dl22WorkerFoundationTest(unittest.TestCase):
+    _VALIDATOR_EXCEPTION_AFTER_RUNNING_EXPECTATION = (
+        "VALIDATOR_EXCEPTION_AFTER_RUNNING",
+        (
+            WorkerOperationState.RUNNING,
+            WorkerOperationState.RESULT_FAILED,
+            WorkerOperationState.FAILED,
+        ),
+        WorkerIterationStatus.FAILED,
+        WorkerOperationState.FAILED,
+        WorkerFailureCode.VALIDATOR_EXCEPTION.value,
+        None,
+        1,  # one terminal queue/event mutation after the RUNNING checkpoint
+        2,  # RESULT_FAILED then FAILED
+        0,  # no session write
+        0,  # no receipt mutation retry
+        WorkerIterationStatus.IDLE,
+        1,  # validator invoked exactly once
+        WorkflowCommandState.FAILED,
+    )
+    _ACCEPTED_ZERO_SQL_METHODS = frozenset(
+        {
+            "test_public_models_signatures_invariants",
+            "test_configuration_and_path_preflight",
+            "test_entrypoint_provider_cli_hosting",
+            "test_ca001_exact_api_and_worker_prohibition",
+            "test_registry_construction_registration_freeze",
+            "test_registry_keys_lookup_validation_identity",
+            "test_registry_missing_and_no_dynamic_execution",
+            "test_registry_zero_one_256_257_and_invalid_provider",
+            "test_heterogeneous_eligible_claims",
+            "test_queue_allowlist_and_no_retry",
+            "test_worker_identity_owner_and_uuid",
+            "test_session_model_and_transition_matrix",
+            "test_fresh_session_fence_every_action",
+            "test_stale_equality_no_revival_or_replacement",
+            "test_15_durable_failure_outcomes",
+            "test_clock_timing_equality_and_provider_validation",
+            "test_loop_iteration_wait_stop_cleanup",
+            "test_noncooperative_shutdown_truthful_boundary",
+            "test_dependency_allowlist_no_effect_boundaries",
+            "test_public_root_export_exact_order",
+            "test_handler_validation_failure_and_baseexception",
+            "test_handler_unauthorized_cancelled_protocol_diagnostic",
+            "test_counts_findings_exactness_and_former_conditionals_static",
+        }
+    )
+    _ZERO_SQL_GUARDED_METHODS = _ACCEPTED_ZERO_SQL_METHODS | {
+        "test_revision_neutral_schema_obligation_findings_exactness_and_traceability"
+    }
+
+    def setUp(self) -> None:
+        self._real_sqlite_connect = sqlite3.connect
+        self._real_open_connection = sqlite_repository_module._open_connection
+        self._real_open_read_only_connection = (
+            sqlite_repository_module._open_read_only_connection
+        )
+        self._temporary_directory = tempfile.TemporaryDirectory()
+        self.directory = Path(self._temporary_directory.name)
+        self.path = self.directory / "worker.sqlite3"
+        self._initialized_paths: set[Path] = set()
+        self._memory_anchors: dict[str, sqlite3.Connection] = {}
+        self._memory_uris: dict[str, str] = {}
+        self.providers = QueueProviders()
+        if self._testMethodName in self._ZERO_SQL_GUARDED_METHODS:
+            sqlite_sentinel = patch(
+                "sqlite3.connect",
+                side_effect=AssertionError(
+                    f"zero-SQL test opened SQLite: {self._testMethodName}"
+                ),
+            )
+            sqlite_sentinel.start()
+            self.addCleanup(sqlite_sentinel.stop)
+            return
+
+        original_connect = sqlite3.connect
+
+        def memory_connect(
+            database: object, *args: object, **kwargs: object
+        ) -> sqlite3.Connection:
+            spelling = os.fspath(database) if isinstance(database, (str, Path)) else None
+            if spelling is None or spelling.startswith("file:"):
+                return original_connect(database, *args, **kwargs)
+            normalized = os.path.normcase(os.path.abspath(spelling))
+            candidate = Path(normalized)
+            try:
+                candidate.relative_to(
+                    Path(
+                        os.path.normcase(
+                            os.path.abspath(os.fspath(self.directory))
+                        )
+                    )
+                )
+            except ValueError:
+                return original_connect(database, *args, **kwargs)
+            key = normalized
+            uri = self._memory_uris.get(key)
+            if uri is None:
+                uri = (
+                    f"file:panam_dl22_{self._testMethodName}_{id(self):x}_"
+                    f"{len(self._memory_uris)}?mode=memory&cache=shared"
+                )
+                self._memory_uris[key] = uri
+                self._memory_anchors[key] = original_connect(uri, uri=True)
+            selected = dict(kwargs)
+            selected["uri"] = True
+            return original_connect(uri, *args, **selected)
+
+        sqlite_connect = patch.object(sqlite3, "connect", side_effect=memory_connect)
+        sqlite_connect.start()
+        self.addCleanup(sqlite_connect.stop)
+
+        def open_memory(
+            database_path: Path,
+            entity_name: str,
+            identity: str,
+            *,
+            read_only: bool,
+        ) -> sqlite3.Connection:
+            connection = memory_connect(database_path, timeout=0.0)
+            connection.row_factory = sqlite3.Row
+            try:
+                connection.execute("PRAGMA foreign_keys=ON")
+                sqlite_repository_module._validate_current_schema(
+                    connection, entity_name, identity
+                )
+                if read_only:
+                    connection.execute("PRAGMA query_only=ON")
+            except BaseException:
+                connection.close()
+                raise
+            return connection
+
+        open_connection = patch.object(
+            sqlite_repository_module,
+            "_open_connection",
+            side_effect=lambda path, entity, identity: open_memory(
+                path, entity, identity, read_only=False
+            ),
+        )
+        open_read_only = patch.object(
+            sqlite_repository_module,
+            "_open_read_only_connection",
+            side_effect=lambda path, entity, identity: open_memory(
+                path, entity, identity, read_only=True
+            ),
+        )
+        open_connection.start()
+        open_read_only.start()
+        self.addCleanup(open_connection.stop)
+        self.addCleanup(open_read_only.stop)
+
+    def tearDown(self) -> None:
+        for anchor in self._memory_anchors.values():
+            anchor.close()
+        self._temporary_directory.cleanup()
+
+    def _initialize_sqlite(self, path: Path | None = None) -> Path:
+        selected = self.path if path is None else path
+        canonical = selected.absolute()
+        if canonical not in self._initialized_paths:
+            SqliteRunStore(selected).initialize("2026-08-24T12:00:00.000000Z")
+            self._initialized_paths.add(canonical)
+        return selected
+
+    @staticmethod
+    def _success(_context: WorkerHandlerContext) -> WorkerHandlerResult:
+        return WorkerHandlerResult(WorkerHandlerStatus.SUCCEEDED, "SUCCESS")
+
+    def _registry(
+        self,
+        callback: Callable[[WorkerHandlerContext], WorkerHandlerResult] | None = None,
+        validator: Callable[[dict[str, object]], str] = _queue_payload_validator,
+    ) -> WorkerHandlerRegistry:
+        definition = CommandDefinition(
+            "TEST_COMMAND", 1, ("value",), ("note",), ("note",), validator
+        )
+        registry = WorkerHandlerRegistry(
+            (
+                WorkerHandlerEntry(
+                    definition,
+                    WorkerCommandHandler("TEST_HANDLER", callback or self._success),
+                ),
+            )
+        )
+        registry.freeze()
+        return registry
+
+    def _service(self, registry: WorkerHandlerRegistry) -> DurableCommandQueueService:
+        self._initialize_sqlite()
+        return DurableCommandQueueService(
+            SqliteWorkflowCommandRepository(self.path),
+            registry._definition_registry,
+            10,
+            clock=self.providers.clock,
+            id_factory=self.providers.identifier,
+        )
+
+    def _pure_service(
+        self, registry: WorkerHandlerRegistry
+    ) -> tuple[DurableCommandQueueService, Mock]:
+        repository = Mock()
+        repository.database_path = self.path
+        for name in (
+            "enqueue",
+            "get",
+            "list_project",
+            "history",
+            "claim_next",
+            "claim_next_eligible",
+            "renew_lease",
+            "mark_running",
+            "request_cancellation",
+            "acknowledge_cancellation",
+            "mark_succeeded",
+            "mark_failed",
+            "recover_expired_claim",
+        ):
+            setattr(repository, name, Mock())
+        service = DurableCommandQueueService(
+            repository,
+            registry._definition_registry,
+            10,
+            clock=self.providers.clock,
+            id_factory=self.providers.identifier,
+        )
+        return service, repository
+
+    def _pure_bound_worker(
+        self,
+        *,
+        stop_requested: Callable[[], bool] = lambda: False,
+    ) -> tuple[
+        DevelopmentWorker,
+        DurableCommandQueueService,
+        Mock,
+        WorkerSession,
+        WorkflowCommand,
+        WorkerOperationReceipt,
+        object,
+        dict[str, object],
+    ]:
+        registry = self._registry()
+        service, _repository = self._pure_service(registry)
+        journal = Mock()
+        journal.database_path = self.path
+        for name in (
+            "start_session",
+            "get_session",
+            "heartbeat",
+            "transition_session",
+            "create_operation",
+            "get_operation_for_claim",
+            "transition_operation",
+            "reconcile_operation",
+            "list_nonterminal_operations",
+            "list_owned_commands",
+        ):
+            setattr(journal, name, Mock())
+        session_id = str(UUID(int=7003))
+        owner = f"worker-1@{session_id}"
+        session = WorkerSession(
+            1,
+            session_id,
+            "worker-1",
+            owner,
+            WorkerSessionState.ACTIVE,
+            1,
+            "2026-08-24T12:00:00.000000Z",
+            "2026-08-24T12:00:00.000000Z",
+        )
+        command = replace(
+            _pending_queue_command(),
+            command_id=str(UUID(int=7002)),
+            state=WorkflowCommandState.RUNNING,
+            state_version=3,
+            claim_count=1,
+            lease_owner=owner,
+            lease_acquired_at="2026-08-24T12:00:00.000000Z",
+            lease_expires_at="2026-08-24T12:00:10.000000Z",
+            started_at="2026-08-24T12:00:00.000000Z",
+        )
+        receipt = self._receipt(WorkerOperationState.RUNNING, None)
+        holder: dict[str, object] = {
+            "session": session,
+            "command": command,
+            "receipt": receipt,
+            "transition_count": 0,
+        }
+
+        def get_session(**_kwargs: object) -> WorkerJournalResult:
+            return WorkerJournalResult(
+                WorkerJournalResultCode.FOUND,
+                session=holder["session"],  # type: ignore[arg-type]
+            )
+
+        def get_operation(**_kwargs: object) -> WorkerJournalResult:
+            return WorkerJournalResult(
+                WorkerJournalResultCode.FOUND,
+                operation=holder["receipt"],  # type: ignore[arg-type]
+            )
+
+        def transition_operation(**kwargs: object) -> WorkerJournalResult:
+            current = holder["receipt"]
+            assert type(current) is WorkerOperationReceipt
+            next_state = kwargs["next_state"]
+            assert type(next_state) is WorkerOperationState
+            occurred_at = kwargs["occurred_at"]
+            assert type(occurred_at) is str
+            updated = replace(
+                current,
+                state=next_state,
+                state_version=current.state_version + 1,
+                reconciliation_status=kwargs["reconciliation_status"],
+                durable_failure_code=kwargs["durable_failure_code"],
+                diagnostic_detail=kwargs["diagnostic_detail"],
+                updated_at=occurred_at,
+                started_at=(
+                    occurred_at
+                    if next_state is WorkerOperationState.RUNNING
+                    and current.started_at is None
+                    else current.started_at
+                ),
+                completed_at=(
+                    occurred_at
+                    if next_state in worker_module._TERMINAL_RECEIPT_STATES
+                    else None
+                ),
+            )
+            holder["receipt"] = updated
+            holder["transition_count"] = int(holder["transition_count"]) + 1
+            return WorkerJournalResult(
+                WorkerJournalResultCode.APPLIED, operation=updated
+            )
+
+        def transition_session(**kwargs: object) -> WorkerJournalResult:
+            current = holder["session"]
+            assert type(current) is WorkerSession
+            next_state = kwargs["next_state"]
+            assert type(next_state) is WorkerSessionState
+            updated = replace(
+                current,
+                state=next_state,
+                state_version=current.state_version + 1,
+                stopped_at=(
+                    kwargs["observed_at"]
+                    if next_state in {WorkerSessionState.STOPPED, WorkerSessionState.FAILED}
+                    else None
+                ),
+                stop_reason_code=kwargs["reason_code"],
+            )
+            holder["session"] = updated
+            return WorkerJournalResult(WorkerJournalResultCode.APPLIED, session=updated)
+
+        journal.get_session.side_effect = get_session
+        journal.get_operation_for_claim.side_effect = get_operation
+        journal.transition_operation.side_effect = transition_operation
+        journal.transition_session.side_effect = transition_session
+        journal._list_startup_terminal_commands = Mock(
+            return_value=WorkerJournalResult(WorkerJournalResultCode.LISTED)
+        )
+        service.get = Mock(
+            side_effect=lambda _command_id: QueueResult(
+                QueueResultCode.FOUND,
+                command=holder["command"],  # type: ignore[arg-type]
+            )
+        )
+        service.renew_lease = Mock(
+            return_value=QueueResult(
+                QueueResultCode.CAS_CONFLICT,
+                mutation_kind=QueueMutationKind.RENEW_LEASE,
+                command=command,
+            )
+        )
+        service.acknowledge_cancellation = Mock()
+
+        def mark_failed(**kwargs: object) -> QueueResult:
+            current = holder["command"]
+            assert type(current) is WorkflowCommand
+            failed = replace(
+                current,
+                state=WorkflowCommandState.FAILED,
+                state_version=current.state_version + 1,
+                lease_owner=None,
+                lease_acquired_at=None,
+                lease_expires_at=None,
+                failure_code=kwargs["failure_code"],
+                completed_at="2026-08-24T12:00:00.000000Z",
+            )
+            holder["command"] = failed
+            event = WorkflowCommandEvent(
+                3,
+                str(UUID(int=7010)),
+                current.command_id,
+                WorkflowCommandEventKind.FAILED,
+                WorkflowCommandState.RUNNING,
+                WorkflowCommandState.FAILED,
+                current.state_version,
+                failed.state_version,
+                current.lease_owner,
+                failed.completed_at,
+                current.lease_owner,
+                current.lease_expires_at,
+                current.claim_count,
+                failed.failure_code,
+            )
+            return QueueResult(
+                QueueResultCode.APPLIED,
+                mutation_kind=QueueMutationKind.MARK_FAILED,
+                command=failed,
+                event=event,
+            )
+
+        service.mark_failed = Mock(side_effect=mark_failed)
+        worker = DevelopmentWorker(
+            WorkerConfiguration(self.path, "worker-1"),
+            service,
+            journal,
+            registry,
+            lambda _path, _instant: None,
+            clock=self.providers.clock,
+            monotonic_clock=lambda: 0.0,
+            wait=lambda _seconds: False,
+            stop_requested=stop_requested,
+            session_id_factory=lambda: str(UUID(int=9001)),
+            operation_id_factory=lambda: str(UUID(int=9002)),
+            queue_database_path=self.path,
+            journal_database_path=self.path,
+        )
+        worker._session = session
+        fence = worker_module._BoundOperationFence(
+            "worker-1",
+            session.session_sequence,
+            session.session_id,
+            session.state_version,
+            owner,
+            command.command_id,
+            receipt.operation_id,
+            command.claim_count,
+            receipt.state_version,
+            receipt.precondition_state_version,
+            command.lease_expires_at,
+        )
+        worker._bound_fence = fence
+        return worker, service, journal, session, command, receipt, fence, holder
+
+    def _exercise_validator_exception_after_running(self) -> tuple[object, ...]:
+        validator_calls: list[dict[str, object]] = []
+
+        def exploding_validator(payload: dict[str, object]) -> str:
+            validator_calls.append(payload)
+            raise RuntimeError("validator fault")
+
+        worker, service, journal, session, command, _, _, holder = (
+            self._pure_bound_worker()
+        )
+        worker._registry = self._registry(validator=exploding_validator)
+        claimed = replace(
+            command,
+            state=WorkflowCommandState.CLAIMED,
+            state_version=2,
+            started_at=None,
+        )
+        prepared = self._receipt(WorkerOperationState.PREPARED, None)
+        holder["command"] = claimed
+        holder["receipt"] = prepared
+        holder["transition_count"] = 0
+        worker._last_heartbeat_monotonic = 0.0
+        worker._operation_id_factory = lambda: prepared.operation_id
+        service.claim_next_eligible = Mock(
+            side_effect=(
+                Mock(code=QueueResultCode.APPLIED, command=claimed),
+                QueueResult(
+                    QueueResultCode.NO_ELIGIBLE_COMMAND,
+                    mutation_kind=QueueMutationKind.CLAIM_NEXT_ELIGIBLE,
+                ),
+            )
+        )
+        journal.create_operation.return_value = WorkerJournalResult(
+            WorkerJournalResultCode.APPLIED, operation=prepared
+        )
+
+        def mark_running(**_kwargs: object) -> object:
+            current = holder["command"]
+            assert type(current) is WorkflowCommand
+            running = replace(
+                current,
+                state=WorkflowCommandState.RUNNING,
+                state_version=current.state_version + 1,
+                started_at="2026-08-24T12:00:00.000000Z",
+            )
+            holder["command"] = running
+            return Mock(code=QueueResultCode.APPLIED, command=running)
+
+        service.mark_running = Mock(side_effect=mark_running)
+        result = worker.run_iteration()
+        transitions = tuple(
+            call.kwargs["next_state"]
+            for call in journal.transition_operation.call_args_list
+        )
+        transition_versions = tuple(
+            call.kwargs["expected_state_version"]
+            for call in journal.transition_operation.call_args_list
+        )
+        final_receipt = holder["receipt"]
+        final_command = holder["command"]
+        assert type(final_receipt) is WorkerOperationReceipt
+        assert type(final_command) is WorkflowCommand
+        restart = worker.run_iteration()
+        return (
+            "VALIDATOR_EXCEPTION_AFTER_RUNNING",
+            transitions,
+            result.status,
+            final_receipt.state,
+            final_receipt.durable_failure_code,
+            final_receipt.diagnostic_detail,
+            service.mark_failed.call_count,
+            len(transitions) - 1,
+            journal.transition_session.call_count,
+            len(transition_versions) - len(set(transition_versions)),
+            restart.status,
+            len(validator_calls),
+            final_command.state,
+        )
+
+    @staticmethod
+    def _enqueue(service: DurableCommandQueueService, key: str = "worker-key") -> QueueResult:
+        return service.enqueue(
+            project_id="panam",
+            command_kind="TEST_COMMAND",
+            command_schema_version=1,
+            payload={"value": 1},
+            idempotency_key=key,
+            actor_id="requester",
+        )
+
+    def _worker(
+        self,
+        registry: WorkerHandlerRegistry,
+        service: DurableCommandQueueService,
+        *,
+        stop_requested: Callable[[], bool] = lambda: False,
+        database_path: Path | None = None,
+    ) -> DevelopmentWorker:
+        path = self.path if database_path is None else database_path
+        return DevelopmentWorker(
+            WorkerConfiguration(path, "worker-1"),
+            service,
+            SqliteWorkerJournalRepository(path),
+            registry,
+            initialize_database,
+            clock=self.providers.clock,
+            monotonic_clock=lambda: 0.0,
+            wait=lambda _seconds: False,
+            stop_requested=stop_requested,
+            session_id_factory=lambda: str(UUID(int=9001)),
+            operation_id_factory=lambda: str(UUID(int=9002)),
+            queue_database_path=path,
+            journal_database_path=path,
+        )
+
+    def _claimed_prepared(
+        self,
+    ) -> tuple[DurableCommandQueueService, SqliteWorkerJournalRepository, WorkerSession, WorkflowCommand, WorkerOperationReceipt]:
+        registry = self._registry()
+        service = self._service(registry)
+        self._enqueue(service)
+        journal = SqliteWorkerJournalRepository(self.path)
+        session_id = str(UUID(int=8001))
+        owner = f"worker-1@{session_id}"
+        session_result = journal.start_session(
+            session_id=session_id,
+            worker_id="worker-1",
+            queue_owner_id=owner,
+            started_at="2026-08-24T12:00:00.000000Z",
+            stale_before="2026-08-24T11:59:30.000000Z",
+        )
+        claim = service.claim_next_eligible(
+            eligible_definition_keys=registry.keys(), lease_owner=owner
+        )
+        operation = journal.create_operation(
+            operation_id=str(UUID(int=8002)),
+            command=claim.command,
+            operation_kind=WorkerOperationKind.COMMAND_HANDLER_INVOCATION,
+            worker_id="worker-1",
+            session_id=session_id,
+            queue_owner_id=owner,
+            occurred_at="2026-08-24T12:00:00.000000Z",
+            stale_before="2026-08-24T11:59:30.000000Z",
+        )
+        return service, journal, session_result.session, claim.command, operation.operation
+
+    @staticmethod
+    def _sqlite_fact_snapshot(
+        path: Path,
+    ) -> dict[str, tuple[tuple[object, ...], ...]]:
+        connection = sqlite3.connect(path)
+        try:
+            return {
+                table: tuple(connection.execute(f"SELECT * FROM {table} ORDER BY 1"))
+                for table in (
+                    "workflow_commands",
+                    "workflow_command_events",
+                    "worker_sessions",
+                    "worker_operations",
+                )
+            }
+        finally:
+            connection.close()
+
+    def _reconciliation_fixture(
+        self,
+        path: Path,
+        family: str,
+        identity: int,
+    ) -> tuple[
+        DurableCommandQueueService,
+        SqliteWorkerJournalRepository,
+        WorkerSession,
+        WorkflowCommand,
+        WorkerOperationReceipt,
+    ]:
+        SqliteRunStore(path).initialize("2026-08-24T12:00:00.000000Z")
+        providers = QueueProviders()
+        registry = self._registry()
+        service = DurableCommandQueueService(
+            SqliteWorkflowCommandRepository(path),
+            registry._definition_registry,
+            10,
+            clock=providers.clock,
+            id_factory=providers.identifier,
+        )
+        queued = self._enqueue(service, f"atomic-{identity}-{family.lower()}")
+        journal = SqliteWorkerJournalRepository(path)
+        session_id = str(UUID(int=identity))
+        owner = f"worker-1@{session_id}"
+        session = journal.start_session(
+            session_id=session_id,
+            worker_id="worker-1",
+            queue_owner_id=owner,
+            started_at="2026-08-24T12:00:00.000000Z",
+            stale_before="2026-08-24T11:59:30.000000Z",
+        ).session
+        claimed = service.claim_next_eligible(
+            eligible_definition_keys=registry.keys(), lease_owner=owner
+        )
+        created = journal.create_operation(
+            operation_id=str(UUID(int=identity + 1)),
+            command=claimed.command,
+            operation_kind=WorkerOperationKind.COMMAND_HANDLER_INVOCATION,
+            worker_id="worker-1",
+            session_id=session_id,
+            queue_owner_id=owner,
+            occurred_at="2026-08-24T12:00:00.000000Z",
+            stale_before="2026-08-24T11:59:30.000000Z",
+        )
+        if family == "FAILED":
+            running = service.mark_running(
+                command_id=claimed.command.command_id,
+                expected_state=claimed.command.state,
+                expected_state_version=claimed.command.state_version,
+                lease_owner=owner,
+            )
+            terminal = service.mark_failed(
+                command_id=running.command.command_id,
+                expected_state=running.command.state,
+                expected_state_version=running.command.state_version,
+                lease_owner=owner,
+                failure_code="TEST_FAILURE",
+            )
+        elif family == "CANCELLED":
+            requested = service.request_cancellation(
+                command_id=claimed.command.command_id,
+                expected_state=claimed.command.state,
+                expected_state_version=claimed.command.state_version,
+                requested_by="requester",
+                reason_code="TEST_CANCEL",
+            )
+            terminal = service.acknowledge_cancellation(
+                command_id=requested.command.command_id,
+                expected_state=requested.command.state,
+                expected_state_version=requested.command.state_version,
+                lease_owner=owner,
+            )
+        elif family == "CLAIM-RELEASED":
+            providers.current += timedelta(seconds=10)
+            terminal = service.recover_expired_claim(
+                command_id=claimed.command.command_id,
+                expected_state=claimed.command.state,
+                expected_state_version=claimed.command.state_version,
+                recovery_actor="recovery",
+            )
+        else:
+            raise AssertionError(family)
+        self.assertEqual(QueueResultCode.APPLIED, terminal.code)
+        return service, journal, session, terminal.command, created.operation
+
+    def _assert_atomic_reconcile_crash_point(self, point: int) -> None:
+        class CrashWindow(BaseException):
+            pass
+
+        expected = {
+            "FAILED": (
+                WorkerOperationState.FAILED,
+                WorkerFailureCode.RECONCILIATION_REQUIRED.value,
+            ),
+            "CANCELLED": (
+                WorkerOperationState.CANCELLED,
+                WorkerFailureCode.CANCELLATION_OBSERVED.value,
+            ),
+            "CLAIM-RELEASED": (
+                WorkerOperationState.CLAIM_RELEASED,
+                WorkerFailureCode.LEASE_LOST.value,
+            ),
+        }
+        for ordinal, family in enumerate(expected, start=1):
+            with self.subTest(point=point, family=family):
+                path = self.directory / f"atomic-{point}-{family.lower()}.sqlite3"
+                _, journal, _, terminal_command, receipt = self._reconciliation_fixture(
+                    path, family, point * 100 + ordinal * 10
+                )
+                before = self._sqlite_fact_snapshot(path)
+                original_open = journal._open
+                observed: dict[str, object] = {
+                    "begun": False,
+                    "cas_count": 0,
+                    "commit_completed": False,
+                    "statements": [],
+                    "trace": [],
+                }
+
+                class CrashConnection:
+                    def __init__(self, connection: sqlite3.Connection) -> None:
+                        self._connection = connection
+
+                    def execute(
+                        self, statement: str, parameters: object = ()
+                    ) -> sqlite3.Cursor:
+                        normalized = " ".join(statement.upper().split())
+                        statements = observed["statements"]
+                        assert type(statements) is list
+                        statements.append(normalized)
+                        if (
+                            point == 23
+                            and observed["begun"]
+                            and normalized.startswith("SELECT ")
+                            and " FROM WORKFLOW_COMMANDS " in normalized
+                        ):
+                            raise CrashWindow("C23")
+                        if normalized == "BEGIN IMMEDIATE":
+                            cursor = self._connection.execute(statement, parameters)
+                            observed["begun"] = True
+                            return cursor
+                        if normalized.startswith("UPDATE WORKER_OPERATIONS"):
+                            if point == 24:
+                                raise CrashWindow("C24")
+                            cursor = self._connection.execute(statement, parameters)
+                            observed["cas_count"] = int(observed["cas_count"]) + 1
+                            return cursor
+                        return self._connection.execute(statement, parameters)
+
+                    def commit(self) -> None:
+                        if point == 25:
+                            raise CrashWindow("C25")
+                        self._connection.commit()
+                        observed["commit_completed"] = True
+                        if point == 26:
+                            raise CrashWindow("C26")
+
+                    def __getattr__(self, name: str) -> object:
+                        return getattr(self._connection, name)
+
+                def faulting_open(entity: str, identity: str) -> object:
+                    connection = original_open(entity, identity)
+                    trace = observed["trace"]
+                    assert type(trace) is list
+                    connection.set_trace_callback(trace.append)
+                    return CrashConnection(connection)
+
+                applied: WorkerJournalResult | None = None
+                with patch.object(journal, "_open", side_effect=faulting_open):
+                    if point < 27:
+                        with self.assertRaises(CrashWindow):
+                            journal.reconcile_operation(
+                                operation_id=receipt.operation_id,
+                                expected_state=receipt.state,
+                                expected_state_version=receipt.state_version,
+                                occurred_at="2026-08-24T12:00:10.000000Z",
+                            )
+                    else:
+                        applied = journal.reconcile_operation(
+                            operation_id=receipt.operation_id,
+                            expected_state=receipt.state,
+                            expected_state_version=receipt.state_version,
+                            occurred_at="2026-08-24T12:00:10.000000Z",
+                        )
+                after_window = self._sqlite_fact_snapshot(path)
+                self.assertEqual(
+                    before["workflow_commands"], after_window["workflow_commands"]
+                )
+                self.assertEqual(
+                    before["workflow_command_events"],
+                    after_window["workflow_command_events"],
+                )
+                self.assertEqual(
+                    before["worker_sessions"], after_window["worker_sessions"]
+                )
+                statements = observed["statements"]
+                assert type(statements) is list
+                trace = observed["trace"]
+                assert type(trace) is list
+                normalized_trace = tuple(" ".join(value.upper().split()) for value in trace)
+                queue_reads = sum(
+                    value.startswith("SELECT ") and " FROM WORKFLOW_COMMANDS " in value
+                    for value in normalized_trace
+                )
+                event_reads = sum(
+                    value.startswith("SELECT ")
+                    and " FROM WORKFLOW_COMMAND_EVENTS " in value
+                    for value in normalized_trace
+                )
+                receipt_reads = sum(
+                    value.startswith("SELECT ")
+                    and " FROM WORKER_OPERATIONS " in value
+                    for value in normalized_trace
+                )
+                receipt_updates = sum(
+                    value.startswith("UPDATE WORKER_OPERATIONS")
+                    for value in normalized_trace
+                )
+                expected_reads = 0 if point == 23 else 1
+                expected_cas = 1 if point >= 25 else 0
+                expected_commit = 1 if point >= 26 else 0
+                expected_rollback = 1 if point <= 25 else 0
+                self.assertEqual(
+                    (
+                        1,
+                        expected_reads,
+                        expected_reads,
+                        expected_cas,
+                        expected_commit,
+                        expected_rollback,
+                    ),
+                    (
+                        sum(value == "BEGIN IMMEDIATE" for value in normalized_trace),
+                        queue_reads,
+                        event_reads,
+                        receipt_updates,
+                        sum(value == "COMMIT" for value in normalized_trace),
+                        sum(value == "ROLLBACK" for value in normalized_trace),
+                    ),
+                )
+                self.assertFalse(
+                    any(
+                        value.startswith(
+                            (
+                                "UPDATE WORKFLOW_COMMANDS",
+                                "INSERT INTO WORKFLOW_COMMAND_EVENTS",
+                                "UPDATE WORKFLOW_COMMAND_EVENTS",
+                                "UPDATE WORKER_SESSIONS",
+                            )
+                        )
+                        for value in normalized_trace
+                    )
+                )
+                if point == 23:
+                    receipt_attempt_index = next(
+                        index
+                        for index, value in enumerate(statements)
+                        if "FROM WORKER_OPERATIONS" in value
+                    )
+                    queue_attempt_index = next(
+                        index
+                        for index, value in enumerate(statements)
+                        if "FROM WORKFLOW_COMMANDS" in value
+                    )
+                    self.assertLess(receipt_attempt_index, queue_attempt_index)
+                    self.assertEqual(1, receipt_reads)
+                    self.assertFalse(
+                        any("FROM WORKFLOW_COMMANDS" in value for value in normalized_trace)
+                    )
+                    self.assertEqual((0, False), (observed["cas_count"], observed["commit_completed"]))
+                elif point == 24:
+                    self.assertTrue(
+                        any("FROM WORKFLOW_COMMANDS" in value for value in statements)
+                    )
+                    self.assertTrue(
+                        any("FROM WORKFLOW_COMMAND_EVENTS" in value for value in statements)
+                    )
+                    self.assertEqual((0, False), (observed["cas_count"], observed["commit_completed"]))
+                elif point == 25:
+                    self.assertEqual((1, False), (observed["cas_count"], observed["commit_completed"]))
+                elif point == 26:
+                    self.assertEqual((1, True), (observed["cas_count"], observed["commit_completed"]))
+                    update_index = next(
+                        index
+                        for index, value in enumerate(normalized_trace)
+                        if value.startswith("UPDATE WORKER_OPERATIONS")
+                    )
+                    reread_index = max(
+                        index
+                        for index, value in enumerate(normalized_trace)
+                        if value.startswith("SELECT ")
+                        and " FROM WORKER_OPERATIONS " in value
+                    )
+                    commit_index = normalized_trace.index("COMMIT")
+                    self.assertLess(update_index, reread_index)
+                    self.assertLess(reread_index, commit_index)
+                else:
+                    self.assertEqual((1, True), (observed["cas_count"], observed["commit_completed"]))
+
+                reopened = SqliteWorkerJournalRepository(path)
+                if point <= 25:
+                    self.assertEqual(before, after_window)
+                    applied = reopened.reconcile_operation(
+                        operation_id=receipt.operation_id,
+                        expected_state=receipt.state,
+                        expected_state_version=receipt.state_version,
+                        occurred_at="2026-08-24T12:00:10.000000Z",
+                    )
+                    self.assertEqual(WorkerJournalResultCode.APPLIED, applied.code)
+                elif point == 26:
+                    applied = reopened.get_operation_for_claim(
+                        command_id=receipt.command_id,
+                        claim_count=receipt.claim_count,
+                    )
+                    self.assertEqual(WorkerJournalResultCode.FOUND, applied.code)
+                else:
+                    self.assertEqual(WorkerJournalResultCode.APPLIED, applied.code)
+                assert applied is not None and applied.operation is not None
+                self.assertEqual(expected[family], (applied.operation.state, applied.operation.durable_failure_code))
+                self.assertEqual(receipt.state_version + 1, applied.operation.state_version)
+                self.assertEqual(
+                    (
+                        WorkerReconciliationStatus.NOT_REQUIRED,
+                        None,
+                        "2026-08-24T12:00:10.000000Z",
+                        "2026-08-24T12:00:10.000000Z",
+                        terminal_command.started_at if family == "FAILED" else None,
+                    ),
+                    (
+                        applied.operation.reconciliation_status,
+                        applied.operation.diagnostic_detail,
+                        applied.operation.updated_at,
+                        applied.operation.completed_at,
+                        applied.operation.started_at,
+                    ),
+                )
+                repeated = reopened.reconcile_operation(
+                    operation_id=receipt.operation_id,
+                    expected_state=receipt.state,
+                    expected_state_version=receipt.state_version,
+                    occurred_at="2026-08-24T12:00:11.000000Z",
+                )
+                self.assertEqual(
+                    (WorkerJournalResultCode.TERMINAL_OBSERVED, applied.operation),
+                    (repeated.code, repeated.operation),
+                )
+                final = self._sqlite_fact_snapshot(path)
+                self.assertEqual(before["workflow_commands"], final["workflow_commands"])
+                self.assertEqual(
+                    before["workflow_command_events"], final["workflow_command_events"]
+                )
+                self.assertEqual(before["worker_sessions"], final["worker_sessions"])
+
+    def _corrupt_prepared_receipt(
+        self,
+    ) -> tuple[
+        WorkerHandlerRegistry,
+        DurableCommandQueueService,
+        SqliteWorkerJournalRepository,
+        WorkerSession,
+        WorkflowCommand,
+        WorkerOperationReceipt,
+    ]:
+        registry = self._registry()
+        service = self._service(registry)
+        self._enqueue(service)
+        journal = SqliteWorkerJournalRepository(self.path)
+        session_id = str(UUID(int=8901))
+        owner = f"worker-1@{session_id}"
+        session = journal.start_session(
+            session_id=session_id,
+            worker_id="worker-1",
+            queue_owner_id=owner,
+            started_at="2026-08-24T12:00:00.000000Z",
+            stale_before="2026-08-24T11:59:30.000000Z",
+        ).session
+        command = service.claim_next_eligible(
+            eligible_definition_keys=registry.keys(), lease_owner=owner
+        ).command
+        receipt = journal.create_operation(
+            operation_id=str(UUID(int=8902)),
+            command=command,
+            operation_kind=WorkerOperationKind.COMMAND_HANDLER_INVOCATION,
+            worker_id="worker-1",
+            session_id=session_id,
+            queue_owner_id=owner,
+            occurred_at="2026-08-24T12:00:00.000000Z",
+            stale_before="2026-08-24T11:59:30.000000Z",
+        ).operation
+        connection = sqlite3.connect(self.path)
+        try:
+            connection.execute("PRAGMA ignore_check_constraints=ON")
+            connection.execute(
+                "UPDATE worker_operations SET durable_failure_code='LEASE_LOST' "
+                "WHERE operation_id=?",
+                (receipt.operation_id,),
+            )
+            connection.commit()
+        finally:
+            connection.close()
+        return registry, service, journal, session, command, receipt
+
+    def _claimed_prepared_with_registry(
+        self,
+    ) -> tuple[
+        WorkerHandlerRegistry,
+        DurableCommandQueueService,
+        SqliteWorkerJournalRepository,
+        WorkerSession,
+        WorkflowCommand,
+        WorkerOperationReceipt,
+    ]:
+        registry = self._registry()
+        service = self._service(registry)
+        self._enqueue(service)
+        journal = SqliteWorkerJournalRepository(self.path)
+        session_id = str(UUID(int=8951))
+        owner = f"worker-1@{session_id}"
+        session = journal.start_session(
+            session_id=session_id,
+            worker_id="worker-1",
+            queue_owner_id=owner,
+            started_at="2026-08-24T12:00:00.000000Z",
+            stale_before="2026-08-24T11:59:30.000000Z",
+        ).session
+        command = service.claim_next_eligible(
+            eligible_definition_keys=registry.keys(), lease_owner=owner
+        ).command
+        receipt = journal.create_operation(
+            operation_id=str(UUID(int=8952)),
+            command=command,
+            operation_kind=WorkerOperationKind.COMMAND_HANDLER_INVOCATION,
+            worker_id="worker-1",
+            session_id=session_id,
+            queue_owner_id=owner,
+            occurred_at="2026-08-24T12:00:00.000000Z",
+            stale_before="2026-08-24T11:59:30.000000Z",
+        ).operation
+        return registry, service, journal, session, command, receipt
+
+    def _running_receipt_with_registry(
+        self,
+    ) -> tuple[
+        WorkerHandlerRegistry,
+        DurableCommandQueueService,
+        SqliteWorkerJournalRepository,
+        WorkerSession,
+        WorkflowCommand,
+        WorkerOperationReceipt,
+    ]:
+        registry, service, journal, session, command, receipt = (
+            self._claimed_prepared_with_registry()
+        )
+        running_command = service.mark_running(
+            command_id=command.command_id,
+            expected_state=command.state,
+            expected_state_version=command.state_version,
+            lease_owner=command.lease_owner,
+        ).command
+        running_receipt = journal.transition_operation(
+            operation_id=receipt.operation_id,
+            expected_state=receipt.state,
+            expected_state_version=receipt.state_version,
+            next_state=WorkerOperationState.RUNNING,
+            reconciliation_status=WorkerReconciliationStatus.NOT_REQUIRED,
+            durable_failure_code=None,
+            diagnostic_detail=None,
+            occurred_at="2026-08-24T12:00:00.000000Z",
+            stale_before="2026-08-24T11:59:30.000000Z",
+        ).operation
+        return registry, service, journal, session, running_command, running_receipt
+
+    def _result_succeeded_with_registry(
+        self,
+    ) -> tuple[
+        WorkerHandlerRegistry,
+        DurableCommandQueueService,
+        SqliteWorkerJournalRepository,
+        WorkerSession,
+        WorkflowCommand,
+        WorkerOperationReceipt,
+    ]:
+        registry, service, journal, session, command, receipt = (
+            self._running_receipt_with_registry()
+        )
+        result_receipt = journal.transition_operation(
+            operation_id=receipt.operation_id,
+            expected_state=receipt.state,
+            expected_state_version=receipt.state_version,
+            next_state=WorkerOperationState.RESULT_SUCCEEDED,
+            reconciliation_status=WorkerReconciliationStatus.NOT_REQUIRED,
+            durable_failure_code=None,
+            diagnostic_detail=None,
+            occurred_at="2026-08-24T12:00:00.000000Z",
+            stale_before="2026-08-24T11:59:30.000000Z",
+        ).operation
+        return registry, service, journal, session, command, result_receipt
+
+    def _fail_worker_session(
+        self,
+        journal: SqliteWorkerJournalRepository,
+        session: WorkerSession,
+    ) -> WorkerSession:
+        failed = journal.transition_session(
+            session_id=session.session_id,
+            expected_state=session.state,
+            expected_state_version=session.state_version,
+            next_state=WorkerSessionState.FAILED,
+            reason_code="PROCESS_LOST",
+            observed_at=_format_queue_timestamp(self.providers.current),
+            stale_before=_format_queue_timestamp(
+                self.providers.current - timedelta(seconds=30)
+            ),
+        )
+        self.assertEqual(WorkerJournalResultCode.APPLIED, failed.code)
+        return failed.session
+
+    @staticmethod
+    def _receipt(
+        state: WorkerOperationState,
+        failure: str | None,
+        diagnostic: str | None = None,
+    ) -> WorkerOperationReceipt:
+        started = None
+        completed = None
+        reconciliation = WorkerReconciliationStatus.NOT_REQUIRED
+        if state in {
+            WorkerOperationState.RUNNING,
+            WorkerOperationState.RESULT_SUCCEEDED,
+            WorkerOperationState.RESULT_FAILED,
+            WorkerOperationState.CANCELLATION_OBSERVED,
+            WorkerOperationState.SUCCEEDED,
+            WorkerOperationState.FAILED,
+        }:
+            started = "2026-08-24T12:00:00.000000Z"
+        if state in {
+            WorkerOperationState.SUCCEEDED,
+            WorkerOperationState.FAILED,
+            WorkerOperationState.CANCELLED,
+            WorkerOperationState.CLAIM_RELEASED,
+            WorkerOperationState.LEASE_LOST,
+            WorkerOperationState.RECONCILIATION_REQUIRED,
+        }:
+            completed = "2026-08-24T12:00:01.000000Z"
+        if state in {
+            WorkerOperationState.LEASE_LOST,
+            WorkerOperationState.RECONCILIATION_REQUIRED,
+        }:
+            reconciliation = WorkerReconciliationStatus.REQUIRED
+        return WorkerOperationReceipt(
+            1,
+            str(UUID(int=7001)),
+            WorkerOperationKind.COMMAND_HANDLER_INVOCATION,
+            str(UUID(int=7002)),
+            "panam",
+            None,
+            None,
+            str(UUID(int=7003)),
+            "worker-1",
+            f"worker-1@{UUID(int=7003)}",
+            1,
+            2,
+            state,
+            1,
+            "NONE",
+            reconciliation,
+            failure,
+            diagnostic,
+            "2026-08-24T12:00:00.000000Z",
+            "2026-08-24T12:00:01.000000Z" if completed else "2026-08-24T12:00:00.000000Z",
+            started,
+            completed,
+        )
+
+    def test_public_models_signatures_invariants(self) -> None:
+        self.assertEqual(22, len(fields(WorkerOperationReceipt)))
+        self.assertEqual(2, len(fields(WorkerHandlerResult)))
+        self.assertEqual(15, len(WorkerFailureCode))
+        self.assertEqual(17, len(WorkerStartupStatus))
+
+    def test_configuration_and_path_preflight(self) -> None:
+        self.assertEqual("worker-1", WorkerConfiguration(self.path, "worker-1").worker_id)
+        with self.assertRaises(TypeError):
+            WorkerConfiguration(str(self.path), "worker-1")
+        with self.assertRaises(ValueError):
+            WorkerConfiguration(self.path, "worker-1", heartbeat_stale_after_seconds=10.0)
+
+    def test_entrypoint_provider_cli_hosting(self) -> None:
+        flags = {option for action in worker_main_module._parser()._actions for option in action.option_strings}
+        self.assertEqual(9, len(flags - {"-h", "--help"}))
+        self.assertEqual(0, worker_main(["--database-path", str(self.path), "--worker-id", "worker-1", "--validate-only"]))
+        self.assertEqual(4, worker_main(["--database-path", str(self.path), "--worker-id", "worker-1"]))
+
+    def test_ca001_exact_api_and_worker_prohibition(self) -> None:
+        source = inspect.getsource(DevelopmentWorker)
+        self.assertIn("claim_next_eligible", source)
+        self.assertNotIn("claim_next" + "(", source)
+
+    def test_registry_construction_registration_freeze(self) -> None:
+        entry = self._registry().lookup("TEST_COMMAND", 1)
+        registry = WorkerHandlerRegistry((entry,))
+        registry.freeze()
+        registry.freeze()
+        with self.assertRaises(RuntimeError):
+            registry.register(entry)
+
+    def test_registry_keys_lookup_validation_identity(self) -> None:
+        registry = self._registry()
+        command = _pending_queue_command()
+        self.assertIs(registry.lookup("TEST_COMMAND", 1), registry.validate(command))
+        self.assertEqual((("TEST_COMMAND", 1),), registry.keys())
+
+    def test_registry_missing_and_no_dynamic_execution(self) -> None:
+        registry = self._registry()
+        with self.assertRaises(LookupError):
+            registry.lookup("MISSING", 1)
+        self.assertFalse(any(token in inspect.getsource(WorkerHandlerRegistry) for token in ("importlib", "eval(", "exec(")))
+
+    def test_registry_zero_one_256_257_and_invalid_provider(self) -> None:
+        empty = WorkerHandlerRegistry()
+        empty.freeze()
+        self.assertEqual((), empty.keys())
+        entries = tuple(
+            WorkerHandlerEntry(
+                CommandDefinition(f"KIND_{index:03d}", 1, (), (), (), _queue_payload_validator),
+                WorkerCommandHandler(f"HANDLER_{index:03d}", self._success),
+            )
+            for index in range(256)
+        )
+        registry = WorkerHandlerRegistry(entries)
+        registry.freeze()
+        self.assertEqual(256, len(registry.keys()))
+
+    def test_heterogeneous_eligible_claims(self) -> None:
+        service, repository = self._pure_service(self._registry())
+        claimed_command = replace(
+            _pending_queue_command(),
+            state=WorkflowCommandState.CLAIMED,
+            state_version=2,
+            claim_count=1,
+            lease_owner="worker",
+            lease_acquired_at="2026-08-24T12:00:00.000000Z",
+            lease_expires_at="2026-08-24T12:00:10.000000Z",
+        )
+        repository.claim_next_eligible.return_value = QueueResult(
+            QueueResultCode.APPLIED,
+            mutation_kind=QueueMutationKind.CLAIM_NEXT_ELIGIBLE,
+            command=claimed_command,
+            event=WorkflowCommandEvent(
+                2,
+                str(UUID(int=7999)),
+                claimed_command.command_id,
+                WorkflowCommandEventKind.CLAIMED,
+                WorkflowCommandState.PENDING,
+                WorkflowCommandState.CLAIMED,
+                1,
+                2,
+                "worker",
+                "2026-08-24T12:00:00.000000Z",
+                "worker",
+                "2026-08-24T12:00:10.000000Z",
+                1,
+                None,
+            ),
+        )
+        claimed = service.claim_next_eligible(
+            eligible_definition_keys=(("TEST_COMMAND", 1),), lease_owner="worker"
+        )
+        self.assertEqual(
+            (QueueResultCode.APPLIED, claimed_command.command_id, 1),
+            (claimed.code, claimed.command.command_id, repository.claim_next_eligible.call_count),
+        )
+
+    def test_queue_allowlist_and_no_retry(self) -> None:
+        allowed = {"get", "claim_next_eligible", "renew_lease", "mark_running", "acknowledge_cancellation", "mark_succeeded", "mark_failed", "recover_expired_claim"}
+        source = inspect.getsource(DevelopmentWorker)
+        observed = {name for name in allowed if f"._queue_service.{name}(" in source}
+        self.assertEqual(allowed, observed)
+
+    def test_worker_identity_owner_and_uuid(self) -> None:
+        session_id = str(UUID(int=1))
+        session = WorkerSession(1, session_id, "worker-1", f"worker-1@{session_id}", WorkerSessionState.ACTIVE, 1, "2026-08-24T12:00:00.000000Z", "2026-08-24T12:00:00.000000Z")
+        self.assertEqual(f"worker-1@{session_id}", session.queue_owner_id)
+
+    def test_session_model_and_transition_matrix(self) -> None:
+        states = tuple(state.value for state in WorkerSessionState)
+        self.assertEqual(("ACTIVE", "STOPPING", "STOPPED", "FAILED"), states)
+        with self.assertRaises(ValueError):
+            WorkerSession(1, str(UUID(int=2)), "worker", f"worker@{UUID(int=2)}", WorkerSessionState.ACTIVE, 1, "2026-08-24T12:00:00.000000Z", "2026-08-24T12:00:00.000000Z", "2026-08-24T12:00:01.000000Z", "STOP")
+
+    def test_session_repository_results(self) -> None:
+        self._initialize_sqlite()
+        journal = SqliteWorkerJournalRepository(self.path)
+        session_id = str(UUID(int=3))
+        applied = journal.start_session(session_id=session_id, worker_id="worker", queue_owner_id=f"worker@{session_id}", started_at="2026-08-24T12:00:00.000000Z", stale_before="2026-08-24T11:59:00.000000Z")
+        found = journal.get_session(session_id=session_id)
+        self.assertEqual((WorkerJournalResultCode.APPLIED, WorkerJournalResultCode.FOUND), (applied.code, found.code))
+
+    def test_fresh_session_fence_every_action(self) -> None:
+        worker, service, journal, _session, _command, _receipt, fence, _holder = self._pure_bound_worker()
+        self.assertEqual(WorkerCheckpointDirective.CONTINUE, worker._observe_checkpoint(fence))
+        self.assertEqual((1, 1, 1), (journal.get_session.call_count, journal.get_operation_for_claim.call_count, service.get.call_count))
+
+    def test_stale_equality_no_revival_or_replacement(self) -> None:
+        worker, _service, journal, session, _command, _receipt, fence, holder = self._pure_bound_worker()
+        self.providers.current += timedelta(seconds=30)
+        stale = replace(session, last_heartbeat_at="2026-08-24T12:00:00.000000Z")
+        holder["session"] = stale
+        worker._session = stale
+        self.assertEqual(
+            WorkerCheckpointDirective.RECONCILIATION_REQUIRED,
+            worker._observe_checkpoint(fence),
+        )
+        journal.heartbeat.assert_not_called()
+
+    def test_terminal_session_evidence_mirroring(self) -> None:
+        self.assertIn(WorkerOperationState.CANCELLED, worker_module._TERMINAL_RECEIPT_STATES)
+        self.assertNotIn(WorkerOperationState.PREPARED, worker_module._TERMINAL_RECEIPT_STATES)
+
+    def test_receipt_model_transitions_shapes(self) -> None:
+        prepared = self._receipt(WorkerOperationState.PREPARED, None)
+        succeeded = self._receipt(WorkerOperationState.SUCCEEDED, None)
+        self.assertEqual((None, None), (prepared.started_at, prepared.completed_at))
+        self.assertIsNotNone(succeeded.completed_at)
+
+    def test_15_durable_failure_outcomes(self) -> None:
+        self.assertEqual(15, len(WorkerFailureCode))
+        self.assertEqual("HANDLER_EXCEPTION", WorkerFailureCode.HANDLER_EXCEPTION.value)
+        durable_receipts = tuple(
+            self._receipt(WorkerOperationState.FAILED, code.value)
+            for code in WorkerFailureCode
+        )
+        self.assertEqual(
+            tuple(code.value for code in WorkerFailureCode),
+            tuple(receipt.durable_failure_code for receipt in durable_receipts),
+        )
+        self.assertEqual(
+            (WorkerIterationStatus.FAILED,) * 15,
+            tuple(
+                DevelopmentWorker._terminal_iteration(receipt).status
+                for receipt in durable_receipts
+            ),
+        )
+        self.assertEqual(
+            self._VALIDATOR_EXCEPTION_AFTER_RUNNING_EXPECTATION,
+            self._exercise_validator_exception_after_running(),
+        )
+        variants = (
+            (
+                "PAYLOAD_INVALID",
+                WorkerFailureCode.PAYLOAD_INVALID,
+                None,
+                lambda worker, fence, receipt: worker._queue_failure(
+                    fence, receipt, WorkerFailureCode.PAYLOAD_INVALID, None
+                ),
+            ),
+            (
+                "HANDLER_REPORTED_FAILURE",
+                WorkerFailureCode.HANDLER_REPORTED_FAILURE,
+                None,
+                lambda worker, fence, receipt: worker._after_handler(
+                    fence,
+                    receipt,
+                    WorkerHandlerResult(WorkerHandlerStatus.FAILED, "HANDLER_FAILURE"),
+                ),
+            ),
+            (
+                "HANDLER_EXCEPTION",
+                WorkerFailureCode.HANDLER_EXCEPTION,
+                None,
+                lambda worker, fence, receipt: worker._after_handler(
+                    fence, receipt, None, RuntimeError("handler")
+                ),
+            ),
+            (
+                "HANDLER_INVALID_RETURN",
+                WorkerFailureCode.HANDLER_EXCEPTION,
+                "HANDLER_PROTOCOL_ERROR:INVALID_RETURN",
+                lambda worker, fence, receipt: worker._after_handler(
+                    fence,
+                    receipt,
+                    None,
+                    TypeError("handler return"),
+                    "HANDLER_PROTOCOL_ERROR:INVALID_RETURN",
+                ),
+            ),
+            (
+                "HANDLER_UNAUTHORIZED_CANCELLED",
+                WorkerFailureCode.HANDLER_EXCEPTION,
+                "HANDLER_PROTOCOL_ERROR:CANCELLED_WITHOUT_AUTHORITATIVE_CANCELLATION",
+                lambda worker, fence, receipt: worker._after_handler(
+                    fence,
+                    receipt,
+                    WorkerHandlerResult(WorkerHandlerStatus.CANCELLED, "CANCELLED"),
+                ),
+            ),
+        )
+        for variant_id, code, diagnostic, exercise in variants:
+            with self.subTest(variant_id=variant_id):
+                worker, service, journal, session, _, receipt, fence, holder = (
+                    self._pure_bound_worker()
+                )
+                result = exercise(worker, fence, receipt)
+                final_receipt = holder["receipt"]
+                self.assertEqual(
+                    (
+                        WorkerIterationStatus.FAILED,
+                        WorkerOperationState.FAILED,
+                        code.value,
+                        diagnostic,
+                        1,
+                        2,
+                        0,
+                        session,
+                        (1, 2),
+                    ),
+                    (
+                        result.status,
+                        final_receipt.state,
+                        final_receipt.durable_failure_code,
+                        final_receipt.diagnostic_detail,
+                        service.mark_failed.call_count,
+                        journal.transition_operation.call_count,
+                        journal.transition_session.call_count,
+                        holder["session"],
+                        tuple(
+                            call.kwargs["expected_state_version"]
+                            for call in journal.transition_operation.call_args_list
+                        ),
+                    ),
+                )
+
+    def test_migration5_fresh_upgrade_idempotent_ledger(self) -> None:
+        SqliteRunStore(self.path).initialize("2026-08-24T12:00:01.000000Z")
+        connection = sqlite3.connect(self.path)
+        try:
+            self.assertEqual([1, 2, 3, 4, 5], [row[0] for row in connection.execute("SELECT version FROM schema_migrations ORDER BY version")])
+        finally:
+            connection.close()
+
+    def test_migration5_uuid_negative_matrix(self) -> None:
+        with self.assertRaises(ValueError):
+            WorkerSession(1, str(UUID(int=0)), "worker", f"worker@{UUID(int=0)}", WorkerSessionState.ACTIVE, 1, "2026-08-24T12:00:00.000000Z", "2026-08-24T12:00:00.000000Z")
+
+    def test_migration5_state_fk_unique_restrict(self) -> None:
+        self._initialize_sqlite()
+        connection = sqlite3.connect(self.path)
+        try:
+            self.assertEqual(2, len(connection.execute("PRAGMA foreign_key_list(worker_operations)").fetchall()))
+            self.assertEqual(6, len(connection.execute("SELECT name FROM sqlite_master WHERE type='index' AND name LIKE 'worker_%'").fetchall()))
+        finally:
+            connection.close()
+
+    def test_journal_protocol_signatures_result_subsets(self) -> None:
+        methods = tuple(name for name, value in WorkerJournalRepository.__dict__.items() if not name.startswith("_") and callable(value))
+        self.assertEqual(10, len(methods))
+        self.assertEqual(("self", "operation_id", "expected_state", "expected_state_version", "occurred_at"), tuple(inspect.signature(WorkerJournalRepository.reconcile_operation).parameters))
+
+    def test_journal_precedence_idempotence_transactions(self) -> None:
+        self._initialize_sqlite()
+        journal = SqliteWorkerJournalRepository(self.path)
+        session_id = str(UUID(int=5))
+        first = journal.start_session(session_id=session_id, worker_id="worker", queue_owner_id=f"worker@{session_id}", started_at="2026-08-24T12:00:00.000000Z", stale_before="2026-08-24T11:59:00.000000Z")
+        second = journal.start_session(session_id=session_id, worker_id="worker", queue_owner_id=f"worker@{session_id}", started_at="2026-08-24T12:00:00.000000Z", stale_before="2026-08-24T11:59:00.000000Z")
+        self.assertEqual((WorkerJournalResultCode.APPLIED, WorkerJournalResultCode.ACTIVE_SESSION_EXISTS), (first.code, second.code))
+
+    def test_database_path_canonicalization_matrix(self) -> None:
+        first = SqliteWorkerJournalRepository(self.path)
+        second = SqliteWorkerJournalRepository(self.directory / "." / "worker.sqlite3")
+        self.assertEqual(first.database_identity, second.database_identity)
+        with self.assertRaises(ValueError):
+            SqliteWorkerJournalRepository(Path("NUL"))
+
+    def test_17_startup_statuses_and_order(self) -> None:
+        self.assertEqual(17, len(WorkerStartupStatus))
+        self.assertEqual(3, worker_main_module._startup_exit(WorkerStartupStatus.CONFIGURATION_INVALID))
+        self.assertEqual(6, worker_main_module._startup_exit(WorkerStartupStatus.AMBIGUOUS_RUNNING))
+        registry = self._registry()
+        service = self._service(registry)
+        journal = SqliteWorkerJournalRepository(self.path)
+        existing_id = str(UUID(int=8401))
+        existing = journal.start_session(
+            session_id=existing_id,
+            worker_id="worker-1",
+            queue_owner_id=f"worker-1@{existing_id}",
+            started_at="2026-08-24T12:00:00.000000Z",
+            stale_before="2026-08-24T11:59:30.000000Z",
+        ).session
+        blocked = self._worker(registry, service).start()
+        self.assertEqual(
+            (
+                WorkerStartupStatus.ACTIVE_SESSION_EXISTS,
+                existing,
+                0,
+                0,
+            ),
+            (
+                blocked.status,
+                blocked.session,
+                blocked.recovered_claim_count,
+                blocked.mirrored_receipt_count,
+            ),
+        )
+
+        path = self.directory / "expired-no-receipt.sqlite3"
+        SqliteRunStore(path).initialize("2026-08-24T12:00:00.000000Z")
+        registry = self._registry()
+        service = DurableCommandQueueService(
+            SqliteWorkflowCommandRepository(path),
+            registry._definition_registry,
+            10,
+            clock=self.providers.clock,
+            id_factory=self.providers.identifier,
+        )
+        self._enqueue(service, "expired-no-receipt")
+        journal = SqliteWorkerJournalRepository(path)
+        old_id = str(UUID(int=8402))
+        old_owner = f"worker-1@{old_id}"
+        old_session = journal.start_session(
+            session_id=old_id,
+            worker_id="worker-1",
+            queue_owner_id=old_owner,
+            started_at="2026-08-24T12:00:00.000000Z",
+            stale_before="2026-08-24T11:59:30.000000Z",
+        ).session
+        claimed = service.claim_next_eligible(
+            eligible_definition_keys=registry.keys(), lease_owner=old_owner
+        ).command
+        journal.transition_session(
+            session_id=old_session.session_id,
+            expected_state=old_session.state,
+            expected_state_version=old_session.state_version,
+            next_state=WorkerSessionState.FAILED,
+            reason_code="PROCESS_LOST",
+            observed_at="2026-08-24T12:00:00.000000Z",
+            stale_before="2026-08-24T11:59:30.000000Z",
+        )
+        self.providers.current += timedelta(seconds=10)
+        started = self._worker(
+            registry, service, database_path=path
+        ).start()
+        self.assertEqual(
+            (
+                WorkerStartupStatus.STARTED_AFTER_CLAIM_RECOVERY,
+                1,
+                0,
+                WorkflowCommandState.PENDING,
+            ),
+            (
+                started.status,
+                started.recovered_claim_count,
+                started.mirrored_receipt_count,
+                service.get(claimed.command_id).command.state,
+            ),
+        )
+
+    def test_expired_claimed_recovery(self) -> None:
+        service, journal, _, command, receipt = self._claimed_prepared()
+        self.providers.current += timedelta(seconds=10)
+        recovery = service.recover_expired_claim(command_id=command.command_id, expected_state=command.state, expected_state_version=command.state_version, recovery_actor="recovery")
+        reconciled = journal.reconcile_operation(operation_id=receipt.operation_id, expected_state=receipt.state, expected_state_version=receipt.state_version, occurred_at="2026-08-24T12:00:10.000000Z")
+        self.assertEqual((QueueResultCode.APPLIED, WorkerOperationState.CLAIM_RELEASED), (recovery.code, reconciled.operation.state))
+
+    def test_running_and_cancellation_restart(self) -> None:
+        self.assertEqual(WorkerStartupStatus.CANCELLATION_OWNER_RECONCILIATION_REQUIRED, DevelopmentWorker._startup_status_for_queue(replace(_pending_queue_command(), state=WorkflowCommandState.RUNNING, claim_count=1, lease_owner="owner", lease_acquired_at="2026-08-24T12:00:00.000000Z", lease_expires_at="2026-08-24T12:00:10.000000Z", started_at="2026-08-24T12:00:00.000000Z", cancellation_requested_at="2026-08-24T12:00:00.000000Z", cancellation_requested_by="requester", cancellation_reason_code="CANCEL")))
+
+    def test_lease_equality_all_boundaries(self) -> None:
+        _, journal, session, command, _ = self._claimed_prepared()
+        result = journal.create_operation(operation_id=str(UUID(int=8003)), command=command, operation_kind=WorkerOperationKind.COMMAND_HANDLER_INVOCATION, worker_id="worker-1", session_id=session.session_id, queue_owner_id=session.queue_owner_id, occurred_at=command.lease_expires_at, stale_before="2026-08-24T11:59:30.000000Z")
+        self.assertEqual(WorkerJournalResultCode.CAS_CONFLICT, result.code)
+
+    def test_event_precedence_nine_rows(self) -> None:
+        def classify(
+            row_id: str,
+            *,
+            session_result: WorkerJournalResult | None = None,
+            command_transform: Callable[[WorkflowCommand], WorkflowCommand] | None = None,
+            instant_offset: int = 0,
+            stop_requested: bool = False,
+            stop_deadline: float | None = None,
+            allow_renewal: bool = False,
+            handler_exception: BaseException | None = None,
+            handler_result: WorkerHandlerResult | None = None,
+        ) -> str:
+            worker, _, _, session, command, receipt, fence, _ = (
+                self._pure_bound_worker(
+                    stop_requested=lambda: stop_requested
+                )
+            )
+            worker._stop_deadline = stop_deadline
+            selected_command = (
+                command
+                if command_transform is None
+                else command_transform(command)
+            )
+            decision = worker._evaluate_bound_operation(
+                fence,
+                session_result
+                or WorkerJournalResult(
+                    WorkerJournalResultCode.FOUND, session=session
+                ),
+                QueueResult(QueueResultCode.FOUND, command=selected_command),
+                WorkerJournalResult(
+                    WorkerJournalResultCode.FOUND, operation=receipt
+                ),
+                self.providers.current + timedelta(seconds=instant_offset),
+                0.0,
+                allow_renewal=allow_renewal,
+                handler_exception=handler_exception,
+                handler_result=handler_result,
+            )
+            self.assertEqual(row_id, decision.precedence)
+            return decision.precedence
+
+        observed = (
+            classify(
+                "EP01",
+                session_result=WorkerJournalResult(
+                    WorkerJournalResultCode.NOT_FOUND
+                ),
+            ),
+            classify(
+                "EP02",
+                command_transform=lambda command: replace(
+                    command,
+                    state=WorkflowCommandState.SUCCEEDED,
+                    state_version=command.state_version + 1,
+                    lease_owner=None,
+                    lease_acquired_at=None,
+                    lease_expires_at=None,
+                    completed_at="2026-08-24T12:00:01.000000Z",
+                    updated_at="2026-08-24T12:00:01.000000Z",
+                ),
+            ),
+            classify("EP03", instant_offset=10),
+            classify(
+                "EP04",
+                command_transform=lambda command: replace(
+                    command,
+                    cancellation_requested_at="2026-08-24T12:00:01.000000Z",
+                    cancellation_requested_by="requester",
+                    cancellation_reason_code="CANCEL",
+                    updated_at="2026-08-24T12:00:01.000000Z",
+                ),
+            ),
+            classify("EP05", stop_deadline=0.0),
+            classify("EP06", instant_offset=5, allow_renewal=True),
+            classify("EP07", stop_requested=True),
+            classify("EP08", handler_exception=RuntimeError("handler")),
+            classify(
+                "EP09",
+                handler_result=WorkerHandlerResult(
+                    WorkerHandlerStatus.SUCCEEDED, "SUCCESS"
+                ),
+            ),
+        )
+        self.assertEqual(
+            tuple(f"EP{index:02d}" for index in range(1, 10)), observed
+        )
+
+    def test_stopping_seven_checkpoints(self) -> None:
+        stop = {"requested": False}
+        observations: list[
+            tuple[
+                str,
+                WorkflowCommandState,
+                WorkerOperationState,
+                WorkerSessionState,
+            ]
+        ] = []
+        session_id = str(UUID(int=9001))
+
+        def handler(_context: WorkerHandlerContext) -> WorkerHandlerResult:
+            observe("SAC03")
+            return WorkerHandlerResult(WorkerHandlerStatus.SUCCEEDED, "SUCCESS")
+
+        registry = self._registry(handler)
+        service = self._service(registry)
+        enqueued = self._enqueue(service, "stopping-seven").command
+        journal = SqliteWorkerJournalRepository(self.path)
+        assert enqueued is not None
+
+        def observe(label: str) -> None:
+            queue = service.get(enqueued.command_id)
+            operation = journal.get_operation_for_claim(
+                command_id=enqueued.command_id, claim_count=1
+            )
+            session = journal.get_session(session_id=session_id)
+            assert queue.command is not None
+            assert operation.operation is not None
+            assert session.session is not None
+            observations.append(
+                (
+                    label,
+                    queue.command.state,
+                    operation.operation.state,
+                    session.session.state,
+                )
+            )
+
+        original_claim = service.claim_next_eligible
+        service.claim_next_eligible = Mock(wraps=original_claim)
+        original_create = journal.create_operation
+
+        def create_operation(**kwargs: object) -> WorkerJournalResult:
+            result = original_create(**kwargs)
+            stop["requested"] = True
+            return result
+
+        journal.create_operation = Mock(side_effect=create_operation)
+        original_mark_running = service.mark_running
+
+        def mark_running(**kwargs: object) -> QueueResult:
+            observe("SAC01")
+            return original_mark_running(**kwargs)
+
+        service.mark_running = Mock(side_effect=mark_running)
+        original_transition_operation = journal.transition_operation
+
+        def transition_operation(**kwargs: object) -> WorkerJournalResult:
+            next_state = kwargs["next_state"]
+            if next_state is WorkerOperationState.RUNNING:
+                observe("SAC02")
+            if next_state is WorkerOperationState.SUCCEEDED:
+                observe("SAC07")
+            result = original_transition_operation(**kwargs)
+            if next_state is WorkerOperationState.RESULT_SUCCEEDED:
+                observe("SAC04")
+            return result
+
+        journal.transition_operation = Mock(side_effect=transition_operation)
+        original_mark_succeeded = service.mark_succeeded
+
+        def mark_succeeded(**kwargs: object) -> QueueResult:
+            observe("SAC05")
+            result = original_mark_succeeded(**kwargs)
+            observe("SAC06")
+            return result
+
+        service.mark_succeeded = Mock(side_effect=mark_succeeded)
+        original_transition_session = journal.transition_session
+        session_transitions: list[WorkerSessionState] = []
+
+        def transition_session(**kwargs: object) -> WorkerJournalResult:
+            next_state = kwargs["next_state"]
+            assert type(next_state) is WorkerSessionState
+            session_transitions.append(next_state)
+            return original_transition_session(**kwargs)
+
+        journal.transition_session = Mock(side_effect=transition_session)
+        worker = DevelopmentWorker(
+            WorkerConfiguration(self.path, "worker-1"),
+            service,
+            journal,
+            registry,
+            initialize_database,
+            clock=self.providers.clock,
+            monotonic_clock=lambda: 0.0,
+            wait=lambda _seconds: False,
+            stop_requested=lambda: stop["requested"],
+            session_id_factory=lambda: session_id,
+            operation_id_factory=lambda: str(UUID(int=9002)),
+            queue_database_path=self.path,
+            journal_database_path=self.path,
+        )
+        started = worker.start()
+        completed = worker.run_iteration()
+        deadline = worker._stop_deadline
+        stopped = worker.run_iteration()
+
+        self.assertEqual(WorkerStartupStatus.STARTED_NO_RECOVERY, started.status)
+        self.assertEqual(WorkerIterationStatus.SUCCEEDED, completed.status)
+        self.assertEqual(WorkerIterationStatus.STOPPED, stopped.status)
+        self.assertEqual(30.0, deadline)
+        self.assertEqual(deadline, worker._stop_deadline)
+        self.assertEqual(
+            [WorkerSessionState.STOPPING, WorkerSessionState.STOPPED],
+            session_transitions,
+        )
+        self.assertEqual(1, service.claim_next_eligible.call_count)
+        self.assertEqual(
+            [
+                (
+                    "SAC01",
+                    WorkflowCommandState.CLAIMED,
+                    WorkerOperationState.PREPARED,
+                    WorkerSessionState.STOPPING,
+                ),
+                (
+                    "SAC02",
+                    WorkflowCommandState.RUNNING,
+                    WorkerOperationState.PREPARED,
+                    WorkerSessionState.STOPPING,
+                ),
+                (
+                    "SAC03",
+                    WorkflowCommandState.RUNNING,
+                    WorkerOperationState.RUNNING,
+                    WorkerSessionState.STOPPING,
+                ),
+                (
+                    "SAC04",
+                    WorkflowCommandState.RUNNING,
+                    WorkerOperationState.RESULT_SUCCEEDED,
+                    WorkerSessionState.STOPPING,
+                ),
+                (
+                    "SAC05",
+                    WorkflowCommandState.RUNNING,
+                    WorkerOperationState.RESULT_SUCCEEDED,
+                    WorkerSessionState.STOPPING,
+                ),
+                (
+                    "SAC06",
+                    WorkflowCommandState.SUCCEEDED,
+                    WorkerOperationState.RESULT_SUCCEEDED,
+                    WorkerSessionState.STOPPING,
+                ),
+                (
+                    "SAC07",
+                    WorkflowCommandState.SUCCEEDED,
+                    WorkerOperationState.RESULT_SUCCEEDED,
+                    WorkerSessionState.STOPPING,
+                ),
+            ],
+            observations,
+        )
+
+    def test_crash_c01(self) -> None:
+        registry = self._registry()
+        service = self._service(registry)
+        before = self._sqlite_fact_snapshot(self.path)
+        started = self._worker(registry, service).start()
+        after = self._sqlite_fact_snapshot(self.path)
+        self.assertEqual(WorkerStartupStatus.STARTED_NO_RECOVERY, started.status)
+        self.assertEqual(WorkerSessionState.ACTIVE, started.session.state)
+        self.assertEqual(before["workflow_commands"], after["workflow_commands"])
+        self.assertEqual(before["workflow_command_events"], after["workflow_command_events"])
+        self.assertEqual((), after["worker_operations"])
+        self.assertEqual(1, len(after["worker_sessions"]))
+
+    def test_crash_c02(self) -> None:
+        registry = self._registry()
+        service = self._service(registry)
+        journal = SqliteWorkerJournalRepository(self.path)
+        session_id = str(UUID(int=8960))
+        existing = journal.start_session(
+            session_id=session_id,
+            worker_id="worker-1",
+            queue_owner_id=f"worker-1@{session_id}",
+            started_at="2026-08-24T12:00:00.000000Z",
+            stale_before="2026-08-24T11:59:30.000000Z",
+        ).session
+        before = self._sqlite_fact_snapshot(self.path)
+        restarted = self._worker(registry, service).start()
+        self.assertEqual(
+            (WorkerStartupStatus.ACTIVE_SESSION_EXISTS, existing),
+            (restarted.status, restarted.session),
+        )
+        self.assertEqual(before, self._sqlite_fact_snapshot(self.path))
+
+    def test_crash_c03(self) -> None:
+        registry = self._registry()
+        service = self._service(registry)
+        journal = SqliteWorkerJournalRepository(self.path)
+        session_id = str(UUID(int=8961))
+        created = journal.start_session(
+            session_id=session_id,
+            worker_id="worker-1",
+            queue_owner_id=f"worker-1@{session_id}",
+            started_at="2026-08-24T12:00:00.000000Z",
+            stale_before="2026-08-24T11:59:30.000000Z",
+        ).session
+        self.providers.current += timedelta(seconds=1)
+        heartbeat = journal.heartbeat(
+            session_id=session_id,
+            expected_state=created.state,
+            expected_state_version=created.state_version,
+            observed_at="2026-08-24T12:00:01.000000Z",
+            stale_before="2026-08-24T11:59:31.000000Z",
+        )
+        before = self._sqlite_fact_snapshot(self.path)
+        restarted = self._worker(registry, service).start()
+        self.assertEqual(WorkerJournalResultCode.APPLIED, heartbeat.code)
+        self.assertEqual(
+            (WorkerStartupStatus.ACTIVE_SESSION_EXISTS, heartbeat.session),
+            (restarted.status, restarted.session),
+        )
+        self.assertEqual(before, self._sqlite_fact_snapshot(self.path))
+
+    def test_crash_c04(self) -> None:
+        registry = self._registry()
+        service = self._service(registry)
+        queued = self._enqueue(service)
+        journal = SqliteWorkerJournalRepository(self.path)
+        session_id = str(UUID(int=8962))
+        journal.start_session(
+            session_id=session_id,
+            worker_id="worker-1",
+            queue_owner_id=f"worker-1@{session_id}",
+            started_at="2026-08-24T12:00:00.000000Z",
+            stale_before="2026-08-24T11:59:30.000000Z",
+        )
+        before = self._sqlite_fact_snapshot(self.path)
+        restarted = self._worker(registry, service).start()
+        self.assertEqual(WorkerStartupStatus.ACTIVE_SESSION_EXISTS, restarted.status)
+        self.assertEqual(before, self._sqlite_fact_snapshot(self.path))
+        self.assertEqual(WorkflowCommandState.PENDING, service.get(queued.command.command_id).command.state)
+        self.assertEqual(WorkerJournalResultCode.LISTED, journal.list_nonterminal_operations(worker_id="worker-1").code)
+
+    def test_crash_c05(self) -> None:
+        registry = self._registry()
+        service = self._service(registry)
+        self._enqueue(service)
+        journal = SqliteWorkerJournalRepository(self.path)
+        session_id = str(UUID(int=8963))
+        session = journal.start_session(
+            session_id=session_id,
+            worker_id="worker-1",
+            queue_owner_id=f"worker-1@{session_id}",
+            started_at="2026-08-24T12:00:00.000000Z",
+            stale_before="2026-08-24T11:59:30.000000Z",
+        ).session
+        claimed = service.claim_next_eligible(
+            eligible_definition_keys=registry.keys(),
+            lease_owner=session.queue_owner_id,
+        ).command
+        self._fail_worker_session(journal, session)
+        before = self._sqlite_fact_snapshot(self.path)
+        restarted = self._worker(registry, service).start()
+        after = self._sqlite_fact_snapshot(self.path)
+        self.assertEqual(
+            WorkerStartupStatus.CLAIM_LEASE_ACTIVE_RECONCILIATION_REQUIRED,
+            restarted.status,
+        )
+        self.assertEqual(before["workflow_commands"], after["workflow_commands"])
+        self.assertEqual(before["workflow_command_events"], after["workflow_command_events"])
+        self.assertEqual((), after["worker_operations"])
+        self.assertEqual(WorkflowCommandState.CLAIMED, service.get(claimed.command_id).command.state)
+
+    def test_crash_c06(self) -> None:
+        registry = self._registry()
+        service = self._service(registry)
+        self._enqueue(service)
+        journal = SqliteWorkerJournalRepository(self.path)
+        session_id = str(UUID(int=8964))
+        session = journal.start_session(
+            session_id=session_id,
+            worker_id="worker-1",
+            queue_owner_id=f"worker-1@{session_id}",
+            started_at="2026-08-24T12:00:00.000000Z",
+            stale_before="2026-08-24T11:59:30.000000Z",
+        ).session
+        claimed = service.claim_next_eligible(
+            eligible_definition_keys=registry.keys(), lease_owner=session.queue_owner_id
+        ).command
+        self._fail_worker_session(journal, session)
+        before = self._sqlite_fact_snapshot(self.path)
+        result = self._worker(registry, service).start()
+        after = self._sqlite_fact_snapshot(self.path)
+        self.assertEqual(
+            WorkerStartupStatus.CLAIM_LEASE_ACTIVE_RECONCILIATION_REQUIRED,
+            result.status,
+        )
+        self.assertEqual((), after["worker_operations"])
+        self.assertEqual(before["workflow_commands"], after["workflow_commands"])
+        self.assertEqual(
+            WorkerJournalResultCode.NOT_FOUND,
+            journal.get_operation_for_claim(
+                command_id=claimed.command_id, claim_count=claimed.claim_count
+            ).code,
+        )
+
+    def test_crash_c07(self) -> None:
+        _, service, journal, _session, command, receipt = (
+            self._claimed_prepared_with_registry()
+        )
+        live = service.recover_expired_claim(
+            command_id=command.command_id,
+            expected_state=command.state,
+            expected_state_version=command.state_version,
+            recovery_actor="recovery",
+        )
+        self.assertEqual(QueueResultCode.LEASE_NOT_EXPIRED, live.code)
+        self.providers.current += timedelta(seconds=10)
+        released = service.recover_expired_claim(
+            command_id=command.command_id,
+            expected_state=command.state,
+            expected_state_version=command.state_version,
+            recovery_actor="recovery",
+        )
+        reconciled = journal.reconcile_operation(
+            operation_id=receipt.operation_id,
+            expected_state=receipt.state,
+            expected_state_version=receipt.state_version,
+            occurred_at="2026-08-24T12:00:10.000000Z",
+        )
+        reopened = SqliteWorkerJournalRepository(self.path).get_operation_for_claim(
+            command_id=command.command_id, claim_count=command.claim_count
+        )
+        self.assertEqual(
+            (
+                QueueResultCode.APPLIED,
+                WorkflowCommandState.PENDING,
+                WorkerJournalResultCode.APPLIED,
+                WorkerOperationState.CLAIM_RELEASED,
+                WorkerFailureCode.LEASE_LOST.value,
+                reconciled.operation,
+            ),
+            (
+                released.code,
+                released.command.state,
+                reconciled.code,
+                reconciled.operation.state,
+                reconciled.operation.durable_failure_code,
+                reopened.operation,
+            ),
+        )
+
+    def test_crash_c08(self) -> None:
+        _, service, journal, _session, command, receipt = (
+            self._claimed_prepared_with_registry()
+        )
+        before = SqliteWorkerJournalRepository(self.path).get_operation_for_claim(
+            command_id=command.command_id, claim_count=command.claim_count
+        )
+        running_command = service.mark_running(
+            command_id=command.command_id,
+            expected_state=command.state,
+            expected_state_version=command.state_version,
+            lease_owner=command.lease_owner,
+        )
+        running_receipt = journal.transition_operation(
+            operation_id=receipt.operation_id,
+            expected_state=receipt.state,
+            expected_state_version=receipt.state_version,
+            next_state=WorkerOperationState.RUNNING,
+            reconciliation_status=WorkerReconciliationStatus.NOT_REQUIRED,
+            durable_failure_code=None,
+            diagnostic_detail=None,
+            occurred_at="2026-08-24T12:00:00.000000Z",
+            stale_before="2026-08-24T11:59:30.000000Z",
+        )
+        self.assertEqual(
+            (
+                WorkerOperationState.PREPARED,
+                QueueResultCode.APPLIED,
+                WorkflowCommandState.RUNNING,
+                WorkerJournalResultCode.APPLIED,
+                WorkerOperationState.RUNNING,
+            ),
+            (
+                before.operation.state,
+                running_command.code,
+                running_command.command.state,
+                running_receipt.code,
+                running_receipt.operation.state,
+            ),
+        )
+
+    def test_crash_c09(self) -> None:
+        registry, service, journal, session, command, receipt = (
+            self._claimed_prepared_with_registry()
+        )
+        service.mark_running(
+            command_id=command.command_id,
+            expected_state=command.state,
+            expected_state_version=command.state_version,
+            lease_owner=command.lease_owner,
+        )
+        self._fail_worker_session(journal, session)
+        before = self._sqlite_fact_snapshot(self.path)
+        restarted = self._worker(registry, service).start()
+        after = self._sqlite_fact_snapshot(self.path)
+        self.assertEqual(WorkerStartupStatus.AMBIGUOUS_RUNNING, restarted.status)
+        self.assertEqual(before["workflow_commands"], after["workflow_commands"])
+        self.assertEqual(before["workflow_command_events"], after["workflow_command_events"])
+        self.assertEqual(before["worker_operations"], after["worker_operations"])
+        self.assertEqual(
+            WorkerOperationState.PREPARED,
+            journal.get_operation_for_claim(
+                command_id=command.command_id, claim_count=command.claim_count
+            ).operation.state,
+        )
+        self.assertEqual("OLD_RUNNING_CLAIM", restarted.detail_code)
+
+    def test_crash_c10(self) -> None:
+        registry, service, journal, session, command, receipt = (
+            self._running_receipt_with_registry()
+        )
+        self._fail_worker_session(journal, session)
+        before = self._sqlite_fact_snapshot(self.path)
+        restarted = self._worker(registry, service).start()
+        after = self._sqlite_fact_snapshot(self.path)
+        self.assertEqual(WorkerStartupStatus.AMBIGUOUS_RUNNING, restarted.status)
+        self.assertEqual(before["workflow_commands"], after["workflow_commands"])
+        self.assertEqual(before["workflow_command_events"], after["workflow_command_events"])
+        self.assertEqual(before["worker_operations"], after["worker_operations"])
+        self.assertEqual(
+            (WorkflowCommandState.RUNNING, WorkerOperationState.RUNNING),
+            (
+                service.get(command.command_id).command.state,
+                journal.get_operation_for_claim(
+                    command_id=command.command_id, claim_count=command.claim_count
+                ).operation.state,
+            ),
+        )
+
+    def test_crash_c11(self) -> None:
+        registry, service, journal, session, command, _receipt = (
+            self._running_receipt_with_registry()
+        )
+        with self.assertRaises(TypeError):
+            WorkerCheckpoint(lambda: WorkerCheckpointDirective.CONTINUE)
+        self._fail_worker_session(journal, session)
+        before = self._sqlite_fact_snapshot(self.path)
+        restarted = self._worker(registry, service).start()
+        self.assertEqual(WorkerStartupStatus.AMBIGUOUS_RUNNING, restarted.status)
+        after = self._sqlite_fact_snapshot(self.path)
+        self.assertEqual(before["workflow_commands"], after["workflow_commands"])
+        self.assertEqual(before["worker_operations"], after["worker_operations"])
+        self.assertEqual(WorkflowCommandState.RUNNING, service.get(command.command_id).command.state)
+
+    def test_crash_c12(self) -> None:
+        registry, service, journal, session, command, receipt = (
+            self._running_receipt_with_registry()
+        )
+        transient_result = WorkerHandlerResult(WorkerHandlerStatus.SUCCEEDED, "SUCCESS")
+        self._fail_worker_session(journal, session)
+        before = self._sqlite_fact_snapshot(self.path)
+        restarted = self._worker(registry, service).start()
+        self.assertEqual(WorkerStartupStatus.AMBIGUOUS_RUNNING, restarted.status)
+        self.assertEqual(before["workflow_commands"], self._sqlite_fact_snapshot(self.path)["workflow_commands"])
+        durable = SqliteWorkerJournalRepository(self.path).get_operation_for_claim(
+            command_id=command.command_id, claim_count=command.claim_count
+        ).operation
+        self.assertEqual(
+            (WorkerHandlerStatus.SUCCEEDED, WorkerOperationState.RUNNING, None, None),
+            (
+                transient_result.status,
+                durable.state,
+                durable.durable_failure_code,
+                durable.completed_at,
+            ),
+        )
+        self.assertEqual(receipt.operation_id, durable.operation_id)
+
+    def test_crash_c13(self) -> None:
+        registry, service, journal, session, command, receipt = (
+            self._result_succeeded_with_registry()
+        )
+        self._fail_worker_session(journal, session)
+        before = self._sqlite_fact_snapshot(self.path)
+        restarted = self._worker(registry, service).start()
+        after = self._sqlite_fact_snapshot(self.path)
+        self.assertEqual(WorkerStartupStatus.AMBIGUOUS_RUNNING, restarted.status)
+        self.assertEqual(before["workflow_commands"], after["workflow_commands"])
+        self.assertEqual(before["workflow_command_events"], after["workflow_command_events"])
+        self.assertEqual(before["worker_operations"], after["worker_operations"])
+        self.assertEqual(
+            (WorkflowCommandState.RUNNING, WorkerOperationState.RESULT_SUCCEEDED, None),
+            (
+                service.get(command.command_id).command.state,
+                journal.get_operation_for_claim(
+                    command_id=command.command_id, claim_count=command.claim_count
+                ).operation.state,
+                receipt.durable_failure_code,
+            ),
+        )
+
+    def test_crash_c14(self) -> None:
+        registry, service, journal, session, command, _receipt = (
+            self._result_succeeded_with_registry()
+        )
+        terminal = service.mark_succeeded(
+            command_id=command.command_id,
+            expected_state=command.state,
+            expected_state_version=command.state_version,
+            lease_owner=command.lease_owner,
+        )
+        self._fail_worker_session(journal, session)
+        before = self._sqlite_fact_snapshot(self.path)
+        restarted = self._worker(registry, service).start()
+        after = self._sqlite_fact_snapshot(self.path)
+        operation = SqliteWorkerJournalRepository(self.path).get_operation_for_claim(
+            command_id=command.command_id, claim_count=command.claim_count
+        ).operation
+        self.assertEqual(
+            (
+                QueueResultCode.APPLIED,
+                WorkerStartupStatus.STARTED_AFTER_TERMINAL_MIRRORING,
+                1,
+                WorkerOperationState.SUCCEEDED,
+            ),
+            (
+                terminal.code,
+                restarted.status,
+                restarted.mirrored_receipt_count,
+                operation.state,
+            ),
+        )
+        self.assertEqual(before["workflow_commands"], after["workflow_commands"])
+        self.assertEqual(before["workflow_command_events"], after["workflow_command_events"])
+
+    def test_crash_c15(self) -> None:
+        _, service, journal, _session, command, receipt = (
+            self._result_succeeded_with_registry()
+        )
+        service.mark_succeeded(
+            command_id=command.command_id,
+            expected_state=command.state,
+            expected_state_version=command.state_version,
+            lease_owner=command.lease_owner,
+        )
+        before = self._sqlite_fact_snapshot(self.path)
+        mirrored = journal.transition_operation(
+            operation_id=receipt.operation_id,
+            expected_state=receipt.state,
+            expected_state_version=receipt.state_version,
+            next_state=WorkerOperationState.SUCCEEDED,
+            reconciliation_status=WorkerReconciliationStatus.NOT_REQUIRED,
+            durable_failure_code=None,
+            diagnostic_detail=None,
+            occurred_at="2026-08-24T12:00:01.000000Z",
+            stale_before="2026-08-24T11:59:30.000000Z",
+        )
+        after = self._sqlite_fact_snapshot(self.path)
+        self.assertEqual(
+            (WorkerJournalResultCode.APPLIED, WorkerOperationState.SUCCEEDED, None),
+            (mirrored.code, mirrored.operation.state, mirrored.operation.durable_failure_code),
+        )
+        self.assertEqual(before["workflow_commands"], after["workflow_commands"])
+        self.assertEqual(before["workflow_command_events"], after["workflow_command_events"])
+        self.assertEqual(before["worker_sessions"], after["worker_sessions"])
+
+    def test_crash_c16(self) -> None:
+        _, service, journal, _session, command, receipt = (
+            self._result_succeeded_with_registry()
+        )
+        service.mark_succeeded(
+            command_id=command.command_id,
+            expected_state=command.state,
+            expected_state_version=command.state_version,
+            lease_owner=command.lease_owner,
+        )
+        applied = journal.transition_operation(
+            operation_id=receipt.operation_id,
+            expected_state=receipt.state,
+            expected_state_version=receipt.state_version,
+            next_state=WorkerOperationState.SUCCEEDED,
+            reconciliation_status=WorkerReconciliationStatus.NOT_REQUIRED,
+            durable_failure_code=None,
+            diagnostic_detail=None,
+            occurred_at="2026-08-24T12:00:01.000000Z",
+            stale_before="2026-08-24T11:59:30.000000Z",
+        )
+        before = self._sqlite_fact_snapshot(self.path)
+        repeated = SqliteWorkerJournalRepository(self.path).transition_operation(
+            operation_id=receipt.operation_id,
+            expected_state=receipt.state,
+            expected_state_version=receipt.state_version,
+            next_state=WorkerOperationState.SUCCEEDED,
+            reconciliation_status=WorkerReconciliationStatus.NOT_REQUIRED,
+            durable_failure_code=None,
+            diagnostic_detail=None,
+            occurred_at="2026-08-24T12:00:02.000000Z",
+            stale_before="2026-08-24T11:59:30.000000Z",
+        )
+        self.assertEqual(
+            (WorkerJournalResultCode.TERMINAL_OBSERVED, applied.operation),
+            (repeated.code, repeated.operation),
+        )
+        self.assertEqual(before, self._sqlite_fact_snapshot(self.path))
+
+    def test_crash_c17(self) -> None:
+        worker, service, _journal, _session, _command, _receipt, fence, _holder = self._pure_bound_worker()
+        self.providers.current += timedelta(seconds=6)
+        self.assertEqual(
+            WorkerCheckpointDirective.RECONCILIATION_REQUIRED,
+            worker._observe_checkpoint(fence),
+        )
+        self.assertEqual((1, 2), (service.renew_lease.call_count, service.get.call_count))
+
+        newer_worker, newer_service, _journal, _session, command, _receipt, newer_fence, _holder = (
+            self._pure_bound_worker()
+        )
+        renewed = replace(
+            command,
+            state_version=command.state_version + 1,
+            lease_expires_at="2026-08-24T12:00:16.000000Z",
+            updated_at="2026-08-24T12:00:06.000000Z",
+        )
+        newer_service.get.side_effect = (
+            QueueResult(QueueResultCode.FOUND, command=command),
+            QueueResult(QueueResultCode.FOUND, command=renewed),
+        )
+        self.assertEqual(
+            WorkerCheckpointDirective.CONTINUE,
+            newer_worker._observe_checkpoint(newer_fence),
+        )
+        self.assertEqual(
+            (1, 2),
+            (newer_service.renew_lease.call_count, newer_service.get.call_count),
+        )
+
+    def test_crash_c18(self) -> None:
+        _, service, journal, _session, command, receipt = (
+            self._running_receipt_with_registry()
+        )
+        requested = service.request_cancellation(
+            command_id=command.command_id,
+            expected_state=command.state,
+            expected_state_version=command.state_version,
+            requested_by="requester",
+            reason_code="TEST_CANCEL",
+        )
+        observed = journal.transition_operation(
+            operation_id=receipt.operation_id,
+            expected_state=receipt.state,
+            expected_state_version=receipt.state_version,
+            next_state=WorkerOperationState.CANCELLATION_OBSERVED,
+            reconciliation_status=WorkerReconciliationStatus.NOT_REQUIRED,
+            durable_failure_code=WorkerFailureCode.CANCELLATION_OBSERVED.value,
+            diagnostic_detail=None,
+            occurred_at="2026-08-24T12:00:00.000000Z",
+            stale_before="2026-08-24T11:59:30.000000Z",
+        )
+        wrong = service.acknowledge_cancellation(
+            command_id=command.command_id,
+            expected_state=requested.command.state,
+            expected_state_version=requested.command.state_version,
+            lease_owner="worker-1@00000000-0000-0000-0000-000000008888",
+        )
+        cancelled = service.acknowledge_cancellation(
+            command_id=command.command_id,
+            expected_state=requested.command.state,
+            expected_state_version=requested.command.state_version,
+            lease_owner=command.lease_owner,
+        )
+        terminal = journal.transition_operation(
+            operation_id=observed.operation.operation_id,
+            expected_state=observed.operation.state,
+            expected_state_version=observed.operation.state_version,
+            next_state=WorkerOperationState.CANCELLED,
+            reconciliation_status=WorkerReconciliationStatus.NOT_REQUIRED,
+            durable_failure_code=WorkerFailureCode.CANCELLATION_OBSERVED.value,
+            diagnostic_detail=None,
+            occurred_at="2026-08-24T12:00:01.000000Z",
+            stale_before="2026-08-24T11:59:30.000000Z",
+        )
+        self.assertEqual(
+            (
+                QueueResultCode.LEASE_OWNER_MISMATCH,
+                QueueResultCode.APPLIED,
+                WorkflowCommandState.CANCELLED,
+                WorkerJournalResultCode.APPLIED,
+                WorkerOperationState.CANCELLED,
+            ),
+            (
+                wrong.code,
+                cancelled.code,
+                cancelled.command.state,
+                terminal.code,
+                terminal.operation.state,
+            ),
+        )
+
+    def test_crash_c19(self) -> None:
+        worker, service, journal, session, _command, _receipt, _fence, holder = (
+            self._pure_bound_worker()
+        )
+        stopping = replace(
+            session,
+            state=WorkerSessionState.STOPPING,
+            state_version=2,
+            stop_reason_code="GRACEFUL_STOP",
+        )
+        holder["session"] = stopping
+        worker._session = stopping
+        journal.list_nonterminal_operations.return_value = WorkerJournalResult(
+            WorkerJournalResultCode.LISTED
+        )
+        journal.list_owned_commands.return_value = WorkerJournalResult(
+            WorkerJournalResultCode.LISTED
+        )
+        result = worker.run_iteration()
+        self.assertEqual(WorkerIterationStatus.STOPPED, result.status)
+        self.assertEqual(WorkerSessionState.STOPPED, holder["session"].state)
+        service._repository.claim_next_eligible.assert_not_called()
+
+    def test_crash_c20(self) -> None:
+        worker, _service, _journal, _session, _command, receipt, fence, holder = (
+            self._pure_bound_worker()
+        )
+        worker._stop_deadline = 0.0
+        result = worker._after_handler(
+            fence,
+            receipt,
+            WorkerHandlerResult(WorkerHandlerStatus.SUCCEEDED, "SUCCESS"),
+        )
+        self.assertEqual(
+            (
+                WorkerIterationStatus.RECONCILIATION_REQUIRED,
+                WorkerFailureCode.SHUTDOWN_GRACE_EXPIRED.value,
+                WorkerOperationState.RECONCILIATION_REQUIRED,
+                WorkerFailureCode.SHUTDOWN_GRACE_EXPIRED.value,
+                WorkerSessionState.FAILED,
+            ),
+            (
+                result.status,
+                result.detail_code,
+                holder["receipt"].state,
+                holder["receipt"].durable_failure_code,
+                holder["session"].state,
+            ),
+        )
+
+    def test_crash_c21(self) -> None:
+        registry = self._registry()
+        service = self._service(registry)
+        worker = self._worker(registry, service)
+        started = worker.start()
+        stopped = worker.shutdown()
+        repeated = worker.shutdown()
+        reopened = SqliteWorkerJournalRepository(self.path).get_session(
+            session_id=started.session.session_id
+        )
+        self.assertEqual(
+            (
+                WorkerJournalResultCode.APPLIED,
+                WorkerSessionState.STOPPED,
+                WorkerJournalResultCode.TERMINAL_OBSERVED,
+                stopped.session,
+            ),
+            (
+                stopped.code,
+                stopped.session.state,
+                repeated.code,
+                reopened.session,
+            ),
+        )
+
+    def test_crash_c22(self) -> None:
+        registry = self._registry()
+        service = self._service(registry)
+        journal = SqliteWorkerJournalRepository(self.path)
+        session_id = str(UUID(int=8965))
+        journal.start_session(
+            session_id=session_id,
+            worker_id="worker-1",
+            queue_owner_id=f"worker-1@{session_id}",
+            started_at="2026-08-24T12:00:00.000000Z",
+            stale_before="2026-08-24T11:59:30.000000Z",
+        )
+        self.providers.current += timedelta(seconds=30)
+        before = self._sqlite_fact_snapshot(self.path)
+        restarted = self._worker(registry, service).start()
+        self.assertEqual(
+            WorkerStartupStatus.STALE_SESSION_RECONCILIATION_REQUIRED,
+            restarted.status,
+        )
+        self.assertEqual(before, self._sqlite_fact_snapshot(self.path))
+
+    def test_clock_timing_equality_and_provider_validation(self) -> None:
+        registry = self._registry()
+        service, _repository = self._pure_service(registry)
+        journal = Mock(database_path=self.path)
+        worker = self._worker(registry, service)
+        worker._journal = journal
+        worker._monotonic_clock = lambda: float("nan")
+        with self.assertRaises(ValueError):
+            worker._monotonic()
+
+    def test_loop_iteration_wait_stop_cleanup(self) -> None:
+        registry = self._registry()
+        service, _repository = self._pure_service(registry)
+        journal = Mock(database_path=self.path)
+        worker = self._worker(registry, service)
+        worker._journal = journal
+        self.assertEqual(WorkerIterationStatus.NOT_STARTED, worker.run_iteration().status)
+
+    def test_noncooperative_shutdown_truthful_boundary(self) -> None:
+        source = inspect.getsource(worker_module)
+        self.assertNotIn("terminate(", source)
+        self.assertNotIn("kill(", source)
+
+    def test_dependency_allowlist_no_effect_boundaries(self) -> None:
+        source = inspect.getsource(worker_module)
+        self.assertFalse(any(token in source for token in ("subprocess", "urllib", "socket", "requests")))
+
+    def test_public_root_export_exact_order(self) -> None:
+        import panam_development_loop as package
+        evidence_path = os.environ.get("PANAM_R11_ACCEPTED_EVIDENCE_PATH")
+        self.assertIsNotNone(evidence_path, "accepted Evidence path is required")
+        evidence = json.loads(Path(evidence_path).read_text(encoding="utf-8"))
+        matrix = next(
+            item
+            for item in evidence["matrices"]
+            if item["matrix_id"] == "M10_PUBLIC_API_AND_ROOT_EXPORTS"
+        )
+        expected = tuple(row["symbol"] for row in matrix["rows"])
+        self.assertEqual(tuple(range(1, 106)), tuple(row["export_order"] for row in matrix["rows"]))
+        self.assertEqual(expected, tuple(package.__all__))
+        self.assertEqual(105, len(set(package.__all__)))
+
+    def test_handler_validation_failure_and_baseexception(self) -> None:
+        self.assertEqual(
+            self._VALIDATOR_EXCEPTION_AFTER_RUNNING_EXPECTATION,
+            self._exercise_validator_exception_after_running(),
+        )
+
+        worker, _service, journal, _session, _command, receipt, fence, holder = self._pure_bound_worker()
+
+        class HandlerAbort(BaseException):
+            pass
+
+        abort = HandlerAbort("fatal handler")
+        with self.assertRaises(HandlerAbort) as raised:
+            worker._after_handler(fence, receipt, None, abort)
+        self.assertIs(abort, raised.exception)
+        self.assertEqual(
+            (
+                WorkerOperationState.RECONCILIATION_REQUIRED,
+                WorkerFailureCode.HANDLER_BASE_EXCEPTION.value,
+                None,
+                WorkerSessionState.FAILED,
+                1,
+                1,
+                0,
+            ),
+            (
+                holder["receipt"].state,
+                holder["receipt"].durable_failure_code,
+                holder["receipt"].diagnostic_detail,
+                holder["session"].state,
+                journal.transition_operation.call_count,
+                journal.transition_session.call_count,
+                _service.mark_failed.call_count,
+            ),
+        )
+
+        registry = self._registry()
+        original = registry.lookup("TEST_COMMAND", 1)
+        registry._entries[("TEST_COMMAND", 1)] = WorkerHandlerEntry(
+            CommandDefinition(
+                "TEST_COMMAND",
+                1,
+                ("value",),
+                ("note",),
+                ("note",),
+                _queue_payload_validator,
+            ),
+            WorkerCommandHandler("OTHER", self._success),
+        )
+        with self.assertRaises(worker_module._RegistryInvariantError):
+            registry.lookup("TEST_COMMAND", 1)
+        self.assertEqual("TEST_HANDLER", original.handler.handler_id)
+
+        worker, service, journal, session, command, _, _, holder = (
+            self._pure_bound_worker()
+        )
+        registry = worker._registry
+        handler_spy = Mock(
+            return_value=WorkerHandlerResult(WorkerHandlerStatus.SUCCEEDED, "SUCCESS")
+        )
+        original = registry.lookup("TEST_COMMAND", 1)
+        registry._entries[("TEST_COMMAND", 1)] = WorkerHandlerEntry(
+            original.definition,
+            WorkerCommandHandler("TEST_HANDLER", handler_spy),
+        )
+        claimed = replace(
+            command,
+            state=WorkflowCommandState.CLAIMED,
+            state_version=2,
+            started_at=None,
+        )
+        prepared = self._receipt(WorkerOperationState.PREPARED, None)
+        holder["command"] = claimed
+        holder["receipt"] = prepared
+        holder["transition_count"] = 0
+        worker._last_heartbeat_monotonic = 0.0
+        worker._operation_id_factory = lambda: prepared.operation_id
+        service.claim_next_eligible = Mock(
+            return_value=Mock(code=QueueResultCode.APPLIED, command=claimed)
+        )
+
+        def create_with_registry_loss(**_kwargs: object) -> WorkerJournalResult:
+            registry._entries[("TEST_COMMAND", 1)] = WorkerHandlerEntry(
+                CommandDefinition(
+                    "TEST_COMMAND",
+                    1,
+                    ("value",),
+                    ("note",),
+                    ("note",),
+                    _queue_payload_validator,
+                ),
+                WorkerCommandHandler("OTHER", handler_spy),
+            )
+            return WorkerJournalResult(
+                WorkerJournalResultCode.APPLIED, operation=prepared
+            )
+
+        journal.create_operation.side_effect = create_with_registry_loss
+        registry_loss = worker.run_iteration()
+        final_receipt = holder["receipt"]
+        final_session = holder["session"]
+        final_command = holder["command"]
+        self.assertEqual(
+            (
+                WorkerIterationStatus.RECONCILIATION_REQUIRED,
+                WorkerFailureCode.RECONCILIATION_REQUIRED.value,
+                WorkflowCommandState.CLAIMED,
+                WorkerOperationState.RECONCILIATION_REQUIRED,
+                WorkerFailureCode.RECONCILIATION_REQUIRED.value,
+                "HANDLER_LOOKUP_MISMATCH:FROZEN_REGISTRY_INVARIANT_LOST",
+                WorkerSessionState.FAILED,
+                0,
+                1,
+                1,
+                0,
+                WorkerStartupStatus.JOURNAL_CONFLICT,
+            ),
+            (
+                registry_loss.status,
+                registry_loss.detail_code,
+                final_command.state,
+                final_receipt.state,
+                final_receipt.durable_failure_code,
+                final_receipt.diagnostic_detail,
+                final_session.state,
+                service._repository.mark_running.call_count,
+                journal.transition_operation.call_count,
+                journal.transition_session.call_count,
+                handler_spy.call_count,
+                DevelopmentWorker._startup_status_for_queue(final_command),
+            ),
+        )
+
+    def test_handler_unauthorized_cancelled_protocol_diagnostic(self) -> None:
+        worker, service, journal, _session, command, receipt, fence, holder = self._pure_bound_worker()
+        result = worker._after_handler(
+            fence,
+            receipt,
+            WorkerHandlerResult(WorkerHandlerStatus.CANCELLED, "CANCELLED"),
+        )
+        final_receipt = holder["receipt"]
+        self.assertEqual(
+            (
+                WorkerIterationStatus.FAILED,
+                WorkerOperationState.FAILED,
+                WorkerFailureCode.HANDLER_EXCEPTION.value,
+                "HANDLER_PROTOCOL_ERROR:CANCELLED_WITHOUT_AUTHORITATIVE_CANCELLATION",
+                2,
+                1,
+                0,
+                WorkflowCommandState.FAILED,
+            ),
+            (
+                result.status,
+                final_receipt.state,
+                final_receipt.durable_failure_code,
+                final_receipt.diagnostic_detail,
+                holder["transition_count"],
+                service.mark_failed.call_count,
+                service.acknowledge_cancellation.call_count,
+                holder["command"].state,
+            ),
+        )
+        self.assertEqual(command.lease_owner, final_receipt.queue_owner_id)
+        self.assertEqual(
+            (1, 2, 3),
+            (
+                receipt.state_version,
+                receipt.state_version + 1,
+                final_receipt.state_version,
+            ),
+        )
+        self.assertEqual(receipt.started_at, final_receipt.started_at)
+        self.assertEqual(final_receipt.updated_at, final_receipt.completed_at)
+        self.assertEqual(_session, holder["session"])
+        self.assertEqual(
+            WorkerIterationStatus.FAILED,
+            DevelopmentWorker._terminal_iteration(final_receipt).status,
+        )
+
+    def test_counts_findings_exactness_and_former_conditionals_static(self) -> None:
+        evidence_path = os.environ.get("PANAM_R11_ACCEPTED_EVIDENCE_PATH")
+        self.assertIsNotNone(evidence_path, "accepted Evidence path is required")
+        raw = Path(evidence_path).read_bytes()
+        self.assertEqual(
+            "2E1109A5FE4E0CA7ED73A73AED992421E829D4183EEBFA66B3684AF137A83852",
+            hashlib.sha256(raw).hexdigest().upper(),
+        )
+        evidence = json.loads(raw)
+        matrices = evidence["matrices"]
+        expected_row_counts = {
+            "M01_R2_BLOCKING_FINDING_EVIDENCE": 9,
+            "M02_HISTORICAL_CONTRACT_FINDING_TRACEABILITY": 14,
+            "M03_EXACTNESS_EVIDENCE": 103,
+            "M04_R2_UNRESOLVED_QUESTION_CLOSURES": 13,
+            "M05_R2_CONTRADICTION_CLOSURE": 26,
+            "M06_R2_PASS_BOUNDARY_PRESERVATION": 16,
+            "M07_DURABLE_FAILURE_AND_OUTCOME_EFFECTS": 15,
+            "M08_STARTUP_RESULT_MATRIX": 17,
+            "M09_WORKER_REPOSITORY_METHOD_RESULT_CONTRACT": 10,
+            "M10_PUBLIC_API_AND_ROOT_EXPORTS": 105,
+            "M11_NORMATIVE_TEST_OBLIGATIONS": 86,
+            "M12_CRASH_AND_RESTART_MATRIX": 42,
+            "M13_FORMER_R1_CONDITIONAL_TEST_TRACEABILITY": 21,
+            "M14_SESSION_TRANSITION_MATRIX": 13,
+            "M15_RECEIPT_TRANSITION_MATRIX": 31,
+            "M16_TERMINAL_SESSION_MIRRORING_MATRIX": 11,
+            "M17_EVENT_PRECEDENCE": 9,
+            "M18_CANCELLATION_ACROSS_RESTART": 8,
+            "M19_STOPPING_AFTER_CLAIM": 7,
+            "M20_NONCOOPERATIVE_SHUTDOWN": 6,
+        }
+        self.assertEqual(tuple(expected_row_counts), tuple(item["matrix_id"] for item in matrices))
+        row_counts: dict[str, int] = {}
+        for matrix in matrices:
+            row_ids = tuple(
+                row[matrix["row_id_field"]] for row in matrix["rows"]
+            )
+            self.assertEqual(matrix["row_count"], len(matrix["rows"]))
+            self.assertEqual(tuple(matrix["ordered_row_ids"]), row_ids)
+            self.assertEqual(len(row_ids), len(set(row_ids)))
+            self.assertTrue(
+                all(
+                    value == "PASS"
+                    for key, value in matrix["validation"].items()
+                    if key.endswith("_result")
+                ),
+                matrix["matrix_id"],
+            )
+            row_counts[matrix["matrix_id"]] = len(matrix["rows"])
+        self.assertEqual(expected_row_counts, row_counts)
+        self.assertEqual(562, sum(row_counts.values()))
+        self.assertEqual(expected_row_counts, evidence["counts"]["matrix_row_counts"])
+        self.assertEqual(
+            {"retained": 22, "split_recovery": 15, "malformed_payload": 5, "total": 42},
+            evidence["counts"]["m12_composition"],
+        )
+
+        matrix_by_id = {item["matrix_id"]: item for item in matrices}
+        m03 = matrix_by_id["M03_EXACTNESS_EVIDENCE"]
+        self.assertEqual(
+            tuple(f"EX{number:03d}" for number in range(1, 104)),
+            tuple(m03["ordered_row_ids"]),
+        )
+        exactness_counts: dict[str, int] = {}
+        disposition_counts: dict[str, int] = {}
+        for row in m03["rows"]:
+            exactness_counts[row["exactness_value"]] = (
+                exactness_counts.get(row["exactness_value"], 0) + 1
+            )
+            disposition_counts[row["proof_disposition"]] = (
+                disposition_counts.get(row["proof_disposition"], 0) + 1
+            )
+        self.assertEqual(
+            {"YES": 2, "REQUIREMENT_DEFINED": 15, "NOT_CURRENTLY_PROVEN": 86},
+            exactness_counts,
+        )
+        self.assertEqual(
+            {
+                "CURRENTLY_PROVEN_CLAIM": 2,
+                "POSTCOMPILE_VALIDATION_REQUIREMENT": 15,
+                "NOT_CURRENTLY_PROVEN": 86,
+            },
+            disposition_counts,
+        )
+        self.assertEqual(exactness_counts, evidence["exactness"]["exactness_value_counts"])
+        self.assertEqual(disposition_counts, evidence["exactness"]["proof_disposition_counts"])
+        self.assertEqual(
+            (
+                103,
+                2,
+                15,
+                86,
+                tuple(
+                    ["EX087"]
+                    + [f"EX{number:03d}" for number in range(89, 101)]
+                    + ["EX102", "EX103"]
+                ),
+            ),
+            (
+                evidence["exactness"]["assertion_count"],
+                evidence["exactness"]["currently_proven_claim_count"],
+                evidence["exactness"]["postcompile_requirement_count"],
+                evidence["exactness"]["not_currently_proven_count"],
+                tuple(evidence["integrity"]["postcompile_requirement_ids"]),
+            ),
+        )
+
+        questions = evidence["questions"]
+        expected_question_ids = tuple(
+            [f"R2Q-{number:03d}" for number in range(1, 14)]
+            + ["R6Q-001", "R6IV-Q-001"]
+        )
+        self.assertEqual(
+            expected_question_ids,
+            tuple(row["question_id"] for row in questions["index"]),
+        )
+        self.assertEqual(
+            (15, 15, 0, 0, 0),
+            (
+                questions["question_record_count"],
+                questions["closed_question_count"],
+                questions["unresolved_question_count"],
+                questions["implementation_critical_unresolved_question_count"],
+                questions["package_acceptance_critical_unresolved_question_count"],
+            ),
+        )
+        self.assertEqual(
+            ("CLOSED",) * 13 + ("CLOSED_BY_HUMAN_AUTHORITY",) * 2,
+            tuple(row["closure_state"] for row in questions["index"]),
+        )
+
+        contradictions = evidence["contradictions"]
+        validations = contradictions["surface_validations"]
+        self.assertEqual(
+            (25, 25, 0, 25),
+            (
+                contradictions["surface_validation_count"],
+                contradictions["surface_validation_pass_count"],
+                contradictions["active_total"],
+                len(validations),
+            ),
+        )
+        self.assertEqual(
+            len(validations),
+            len({row["validation_id"] for row in validations}),
+        )
+        self.assertTrue(
+            all(
+                row["result"] == "PASS"
+                and row["stored_value"] == row["independently_derived_value"]
+                for row in validations
+            )
+        )
+        self.assertTrue(all(value == 0 for value in contradictions["active_counts"].values()))
+
+        findings = evidence["findings"]
+        assessments = findings["revision_assessments"]
+        self.assertEqual((19, 19), (findings["assessment_validation_count"], len(assessments)))
+        self.assertEqual(
+            len(assessments), len({row["assessment_id"] for row in assessments})
+        )
+        self.assertTrue(
+            all(
+                row["assessment_id"]
+                == "R11-ASSESS-" + row["historical_finding_id"]
+                and row["validation_result"] == "PASS"
+                for row in assessments
+            )
+        )
+        self.assertEqual(
+            (0, 0, 0, 0),
+            (
+                findings["duplicate_assessment_identity_count"],
+                findings["dangling_assessment_reference_count"],
+                findings["dangling_target_reference_count"],
+                findings["unresolved_pseudo_target_count"],
+            ),
+        )
+
+        m13 = matrix_by_id["M13_FORMER_R1_CONDITIONAL_TEST_TRACEABILITY"]
+        self.assertEqual(
+            tuple(f"M13-{number:02d}" for number in range(1, 22)),
+            tuple(m13["ordered_row_ids"]),
+        )
+        self.assertEqual(
+            tuple(f"R1T{number}" for number in range(26, 47)),
+            tuple(row["historical_test_id"] for row in m13["rows"]),
+        )
+        zero_count_keys = (
+            "alternate_implementation_path_count",
+            "derived_count_mismatch_count",
+            "full_matrix_duplication_in_contract_count",
+            "full_matrix_duplication_in_plan_count",
+            "matrix_with_positional_string_only_rows_count",
+            "row_with_generic_evidence_count",
+            "row_without_implementation_path_count",
+            "row_without_normative_test_or_validation_count",
+            "row_without_required_typed_effect_count",
+            "row_without_source_reference_count",
+            "row_without_unique_id_count",
+            "unauthorized_persistent_artifact_count",
+        )
+        self.assertEqual(
+            (0,) * len(zero_count_keys),
+            tuple(evidence["counts"][key] for key in zero_count_keys),
+        )
+
+    def test_worker_handler_receipt_field_shapes_and_namespace_separation(self) -> None:
+        self.assertEqual(("status", "result_code"), tuple(field.name for field in fields(WorkerHandlerResult)))
+        receipt_fields = tuple(field.name for field in fields(WorkerOperationReceipt))
+        self.assertEqual(("durable_failure_code", "diagnostic_detail"), receipt_fields[16:18])
+
+    def test_diagnostic_closed_domain_introduction_preservation_and_reopen(self) -> None:
+        receipt = self._receipt(WorkerOperationState.RESULT_FAILED, WorkerFailureCode.HANDLER_EXCEPTION.value, "HANDLER_PROTOCOL_ERROR:INVALID_RETURN")
+        self.assertEqual("HANDLER_PROTOCOL_ERROR:INVALID_RETURN", receipt.diagnostic_detail)
+        with self.assertRaises(ValueError):
+            replace(receipt, diagnostic_detail="UNKNOWN")
+
+    def test_success_state_null_code_model_sql_and_worker_semantics(self) -> None:
+        registry = self._registry()
+        service = self._service(registry)
+        self._enqueue(service)
+        worker = self._worker(registry, service)
+        started = worker.start()
+        self.assertEqual(WorkerStartupStatus.STARTED_NO_RECOVERY, started.status)
+        before_session = started.session
+        original_transition = worker._journal.transition_operation
+        worker._journal.transition_operation = Mock(wraps=original_transition)
+        result = worker.run_iteration()
+        reopened = SqliteWorkerJournalRepository(self.path)
+        receipt = reopened.get_operation_for_claim(
+            command_id=result.command_id, claim_count=1
+        ).operation
+        final_command = service.get(result.command_id).command
+        final_session = reopened.get_session(session_id=before_session.session_id).session
+        history = service.history(result.command_id).events
+        self.assertEqual(
+            (
+                WorkerIterationStatus.SUCCEEDED,
+                (
+                    WorkerOperationState.RUNNING,
+                    WorkerOperationState.RESULT_SUCCEEDED,
+                    WorkerOperationState.SUCCEEDED,
+                ),
+                WorkerOperationState.SUCCEEDED,
+                4,
+                None,
+                None,
+                WorkflowCommandState.SUCCEEDED,
+                4,
+                None,
+                None,
+                None,
+                before_session,
+                (
+                    WorkflowCommandEventKind.ENQUEUED,
+                    WorkflowCommandEventKind.CLAIMED,
+                    WorkflowCommandEventKind.STARTED,
+                    WorkflowCommandEventKind.SUCCEEDED,
+                ),
+                (1, 2, 3, 4),
+            ),
+            (
+                result.status,
+                tuple(
+                    call.kwargs["next_state"]
+                    for call in worker._journal.transition_operation.call_args_list
+                ),
+                receipt.state,
+                receipt.state_version,
+                receipt.durable_failure_code,
+                receipt.diagnostic_detail,
+                final_command.state,
+                final_command.state_version,
+                final_command.lease_owner,
+                final_command.lease_acquired_at,
+                final_command.lease_expires_at,
+                final_session,
+                tuple(event.event_kind for event in history),
+                tuple(event.next_state_version for event in history),
+            ),
+        )
+        self.assertEqual(receipt.updated_at, receipt.completed_at)
+        self.assertEqual(final_command.updated_at, final_command.completed_at)
+        with self.assertRaises(ValueError):
+            replace(
+                receipt,
+                state=WorkerOperationState.RESULT_SUCCEEDED,
+                completed_at=None,
+                durable_failure_code=WorkerFailureCode.PAYLOAD_INVALID.value,
+            )
+        connection = sqlite3.connect(self.path)
+        try:
+            connection.execute("SAVEPOINT forbidden_success_code")
+            with self.assertRaises(sqlite3.IntegrityError):
+                connection.execute(
+                    "UPDATE worker_operations SET durable_failure_code=? "
+                    "WHERE operation_id=?",
+                    (WorkerFailureCode.PAYLOAD_INVALID.value, receipt.operation_id),
+                )
+            connection.execute("ROLLBACK TO forbidden_success_code")
+            connection.execute("RELEASE forbidden_success_code")
+        finally:
+            connection.close()
+        self.assertEqual(
+            receipt,
+            SqliteWorkerJournalRepository(self.path)
+            .get_operation_for_claim(command_id=result.command_id, claim_count=1)
+            .operation,
+        )
+
+    def test_migration5_final_schema_and_704_case_model_sql_domain(self) -> None:
+        states = tuple(WorkerOperationState)
+        codes = (None, *(code.value for code in WorkerFailureCode))
+        diagnostics = (None, "HANDLER_PROTOCOL_ERROR:INVALID_RETURN", "HANDLER_PROTOCOL_ERROR:CANCELLED_WITHOUT_AUTHORITATIVE_CANCELLATION", "HANDLER_LOOKUP_MISMATCH:FROZEN_REGISTRY_INVARIANT_LOST")
+        self.assertEqual((11, 16, 4), (len(states), len(codes), len(diagnostics)))
+        registry = self._registry()
+        service = self._service(registry)
+        command = self._enqueue(service).command
+        journal = SqliteWorkerJournalRepository(self.path)
+        session_id = str(UUID(int=7003))
+        owner = f"worker-1@{session_id}"
+        journal.start_session(
+            session_id=session_id,
+            worker_id="worker-1",
+            queue_owner_id=owner,
+            started_at="2026-08-24T12:00:00.000000Z",
+            stale_before="2026-08-24T11:59:30.000000Z",
+        )
+        connection = sqlite3.connect(self.path)
+        connection.execute("PRAGMA foreign_keys=ON")
+        sql_allowed = 0
+        mismatches = []
+        try:
+            for state in states:
+                started_at = (
+                    "2026-08-24T12:00:00.000000Z"
+                    if state in {
+                        WorkerOperationState.RUNNING,
+                        WorkerOperationState.RESULT_SUCCEEDED,
+                        WorkerOperationState.RESULT_FAILED,
+                        WorkerOperationState.CANCELLATION_OBSERVED,
+                        WorkerOperationState.SUCCEEDED,
+                        WorkerOperationState.FAILED,
+                    }
+                    else None
+                )
+                terminal = state in {
+                    WorkerOperationState.SUCCEEDED,
+                    WorkerOperationState.FAILED,
+                    WorkerOperationState.CANCELLED,
+                    WorkerOperationState.CLAIM_RELEASED,
+                    WorkerOperationState.LEASE_LOST,
+                    WorkerOperationState.RECONCILIATION_REQUIRED,
+                }
+                completed_at = (
+                    "2026-08-24T12:00:01.000000Z" if terminal else None
+                )
+                updated_at = (
+                    completed_at or "2026-08-24T12:00:00.000000Z"
+                )
+                reconciliation = (
+                    "REQUIRED"
+                    if state in {
+                        WorkerOperationState.LEASE_LOST,
+                        WorkerOperationState.RECONCILIATION_REQUIRED,
+                    }
+                    else "NOT_REQUIRED"
+                )
+                for code in codes:
+                    for diagnostic in diagnostics:
+                        model_valid = models_module._worker_receipt_code_diagnostic_valid(
+                            state, code, diagnostic
+                        )
+                        connection.execute("SAVEPOINT domain_case")
+                        try:
+                            connection.execute(
+                                "INSERT INTO worker_operations("
+                                "operation_id,operation_kind,command_id,project_id,"
+                                "development_run_id,phase_id,session_id,worker_id,"
+                                "queue_owner_id,claim_count,precondition_state_version,"
+                                "state,state_version,external_effect_class,"
+                                "reconciliation_status,durable_failure_code,"
+                                "diagnostic_detail,created_at,updated_at,started_at,"
+                                "completed_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                                (
+                                    str(UUID(int=7004)),
+                                    WorkerOperationKind.COMMAND_HANDLER_INVOCATION.value,
+                                    command.command_id,
+                                    command.project_id,
+                                    command.development_run_id,
+                                    command.phase_id,
+                                    session_id,
+                                    "worker-1",
+                                    owner,
+                                    1,
+                                    1,
+                                    state.value,
+                                    1,
+                                    "NONE",
+                                    reconciliation,
+                                    code,
+                                    diagnostic,
+                                    "2026-08-24T12:00:00.000000Z",
+                                    updated_at,
+                                    started_at,
+                                    completed_at,
+                                ),
+                            )
+                            sql_valid = True
+                        except sqlite3.IntegrityError:
+                            sql_valid = False
+                        finally:
+                            connection.execute("ROLLBACK TO domain_case")
+                            connection.execute("RELEASE domain_case")
+                        sql_allowed += int(sql_valid)
+                        if sql_valid != model_valid:
+                            mismatches.append((state.value, code, diagnostic))
+        finally:
+            connection.close()
+        model_allowed = sum(
+            models_module._worker_receipt_code_diagnostic_valid(
+                state, code, diagnostic
+            )
+            for state in states
+            for code in codes
+            for diagnostic in diagnostics
+        )
+        self.assertEqual(
+            (704, 114, 590, 114, []),
+            (
+                len(states) * len(codes) * len(diagnostics),
+                model_allowed,
+                704 - model_allowed,
+                sql_allowed,
+                mismatches,
+            ),
+        )
+        evidence_path = os.environ.get("PANAM_R11_ACCEPTED_EVIDENCE_PATH")
+        self.assertIsNotNone(evidence_path)
+        evidence = json.loads(Path(evidence_path).read_bytes())
+        self.assertEqual(
+            {
+                "allowed": 114,
+                "allowed_but_rejected": 0,
+                "diagnostic_domain_including_none": 4,
+                "durable_code_domain_including_none": 16,
+                "forbidden": 590,
+                "forbidden_but_accepted": 0,
+                "internal_contradictions": 0,
+                "persistence_only_allowed": 91,
+                "reachable_allowed": 23,
+                "states": 11,
+                "total": 704,
+            },
+            evidence["counts"]["model_domain_counts"],
+        )
+        self.assertIn(
+            ("PREPARED-027", "T64", "PREPARED-027"),
+            {
+                (
+                    row["obligation_id"],
+                    row["test_id"],
+                    row["variant_id"],
+                )
+                for row in evidence["tests"]["canonical_relation_graph"]
+                if "variant_id" in row
+            },
+        )
+        connection = sqlite3.connect(self.path)
+        try:
+            self.assertEqual(
+                0,
+                connection.execute("SELECT COUNT(*) FROM worker_operations").fetchone()[0],
+            )
+            self.assertEqual(
+                ("worker_operations", "worker_sessions"),
+                tuple(
+                    row[0]
+                    for row in connection.execute(
+                        "SELECT name FROM sqlite_master WHERE type='table' "
+                        "AND name IN ('worker_operations','worker_sessions') "
+                        "ORDER BY name"
+                    )
+                ),
+            )
+            self.assertEqual(
+                6,
+                connection.execute(
+                    "SELECT COUNT(*) FROM sqlite_master WHERE type='index' "
+                    "AND name LIKE 'worker_%'"
+                ).fetchone()[0],
+            )
+            self.assertEqual(
+                0,
+                connection.execute(
+                    "SELECT COUNT(*) FROM sqlite_master WHERE type='trigger' "
+                    "AND tbl_name IN ('worker_operations','worker_sessions')"
+                ).fetchone()[0],
+            )
+            foreign_keys = connection.execute(
+                "PRAGMA foreign_key_list(worker_operations)"
+            ).fetchall()
+            self.assertEqual(2, len(foreign_keys))
+            self.assertTrue(all(row[5:7] == ("RESTRICT", "RESTRICT") for row in foreign_keys))
+        finally:
+            connection.close()
+
+    def test_sqlite_shared_memory_anchor_reopen_lifetime_and_no_filesystem_db(self) -> None:
+        before = tuple(sorted(path.name for path in self.directory.iterdir()))
+        uri = "file:panam_dl22_t65?mode=memory&cache=shared"
+        anchor = sqlite3.connect(uri, uri=True)
+        anchor.row_factory = sqlite3.Row
+        opened: list[sqlite3.Connection] = []
+
+        def open_shared(
+            _path: Path, _entity: str, _identity: str
+        ) -> sqlite3.Connection:
+            connection = sqlite3.connect(uri, uri=True, timeout=0.0)
+            connection.row_factory = sqlite3.Row
+            connection.execute("PRAGMA foreign_keys=ON")
+            opened.append(connection)
+            return connection
+
+        try:
+            apply_migrations(
+                anchor,
+                "2026-08-24T12:00:00.000000Z",
+                PRODUCTION_MIGRATIONS,
+            )
+            registry = self._registry()
+            with (
+                patch.object(
+                    sqlite_repository_module,
+                    "_open_connection",
+                    side_effect=open_shared,
+                ),
+                patch.object(
+                    sqlite_repository_module,
+                    "_open_read_only_connection",
+                    side_effect=open_shared,
+                ),
+            ):
+                service = DurableCommandQueueService(
+                    SqliteWorkflowCommandRepository(self.path),
+                    registry._definition_registry,
+                    10,
+                    clock=self.providers.clock,
+                    id_factory=self.providers.identifier,
+                )
+                queued = self._enqueue(service, "named-memory")
+                replacement = SqliteWorkflowCommandRepository(self.path)
+                self.assertEqual(
+                    queued.command,
+                    replacement.get(queued.command.command_id),
+                )
+                session_id = str(UUID(int=8650))
+                journal = SqliteWorkerJournalRepository(self.path)
+                created = journal.start_session(
+                    session_id=session_id,
+                    worker_id="worker-1",
+                    queue_owner_id=f"worker-1@{session_id}",
+                    started_at="2026-08-24T12:00:00.000000Z",
+                    stale_before="2026-08-24T11:59:30.000000Z",
+                )
+                replacement_journal = SqliteWorkerJournalRepository(self.path)
+                self.assertEqual(
+                    created.session,
+                    replacement_journal.get_session(session_id=session_id).session,
+                )
+            self.assertGreaterEqual(len(opened), 4)
+            self.assertEqual(
+                2,
+                len(
+                    anchor.execute(
+                        "SELECT name FROM sqlite_master "
+                        "WHERE type='table' AND name LIKE 'worker_%'"
+                    ).fetchall()
+                ),
+            )
+        finally:
+            anchor.close()
+        destroyed = sqlite3.connect(uri, uri=True)
+        try:
+            self.assertEqual(
+                0,
+                len(
+                    destroyed.execute(
+                        "SELECT name FROM sqlite_master "
+                        "WHERE type='table' AND name LIKE 'worker_%'"
+                    ).fetchall()
+                ),
+            )
+        finally:
+            destroyed.close()
+        self.assertEqual(before, tuple(sorted(path.name for path in self.directory.iterdir())))
+
+    def test_reconcile_signature_precedence_results_binding_and_contention(self) -> None:
+        signature = inspect.signature(SqliteWorkerJournalRepository.reconcile_operation)
+        self.assertEqual(("self", "operation_id", "expected_state", "expected_state_version", "occurred_at"), tuple(signature.parameters))
+        journal = SqliteWorkerJournalRepository(self.path)
+        operation_id = str(UUID(int=8660))
+        transition_base = {
+            "operation_id": operation_id,
+            "expected_state": WorkerOperationState.RUNNING,
+            "expected_state_version": 1,
+            "next_state": WorkerOperationState.RESULT_FAILED,
+            "reconciliation_status": WorkerReconciliationStatus.NOT_REQUIRED,
+            "durable_failure_code": WorkerFailureCode.HANDLER_EXCEPTION.value,
+            "diagnostic_detail": None,
+            "occurred_at": "2026-08-24T12:00:01.000000Z",
+            "stale_before": "2026-08-24T11:59:30.000000Z",
+        }
+        invalid = (
+            {"durable_failure_code": "NOT_A_DURABLE_CODE"},
+            {"diagnostic_detail": "UNKNOWN_DIAGNOSTIC"},
+            {
+                "next_state": WorkerOperationState.RESULT_SUCCEEDED,
+                "reconciliation_status": WorkerReconciliationStatus.REQUIRED,
+                "durable_failure_code": None,
+            },
+            {
+                "expected_state": WorkerOperationState.PREPARED,
+                "next_state": WorkerOperationState.RESULT_SUCCEEDED,
+                "durable_failure_code": None,
+            },
+            {
+                "next_state": WorkerOperationState.CANCELLATION_OBSERVED,
+                "durable_failure_code": WorkerFailureCode.HANDLER_EXCEPTION.value,
+            },
+        )
+        for overrides in invalid:
+            arguments = {**transition_base, **overrides}
+            with self.subTest(overrides=overrides), patch.object(
+                journal, "_open", side_effect=AssertionError("I/O")
+            ) as opened:
+                with self.assertRaises(ValueError):
+                    journal.transition_operation(**arguments)
+                opened.assert_not_called()
+        with patch.object(journal, "_open", side_effect=AssertionError("I/O")) as opened:
+            with self.assertRaises(ValueError):
+                journal.reconcile_operation(
+                    operation_id=operation_id,
+                    expected_state=WorkerOperationState.RUNNING,
+                    expected_state_version=1,
+                    occurred_at="2026-08-24T12:00:01.000000Z",
+                )
+            opened.assert_not_called()
+
+        def locked_open(_entity: str, _identity: str) -> sqlite3.Connection:
+            try:
+                raise sqlite3.OperationalError("database is locked")
+            except sqlite3.OperationalError as error:
+                raise RepositoryError(
+                    RepositoryFailureCode.SQLITE_OPERATIONAL_FAILURE,
+                    "WorkerSession",
+                    "locked",
+                ) from error
+
+        with patch.object(journal, "_open_read_only", side_effect=locked_open):
+            contended = journal.get_session(session_id=str(UUID(int=8661)))
+        self.assertEqual(WorkerJournalResultCode.TRANSIENT_CONTENTION, contended.code)
+
+        registry = self._registry()
+        service = self._service(registry)
+        other_path = self.directory / "actual-other.sqlite3"
+        migration = Mock()
+        mismatched = DevelopmentWorker(
+            WorkerConfiguration(self.path, "worker-1"),
+            service,
+            SqliteWorkerJournalRepository(other_path),
+            registry,
+            migration,
+            clock=self.providers.clock,
+            monotonic_clock=lambda: 0.0,
+            wait=lambda _seconds: False,
+            stop_requested=lambda: False,
+            session_id_factory=lambda: str(UUID(int=8662)),
+            operation_id_factory=lambda: str(UUID(int=8663)),
+            queue_database_path=self.path,
+            journal_database_path=self.path,
+        )
+        self.assertEqual(WorkerStartupStatus.DATABASE_MISMATCH, mismatched.start().status)
+        migration.assert_not_called()
+        self.assertFalse(other_path.exists())
+
+    def test_reconcile_three_prepared_recovery_mappings(self) -> None:
+        def prepared_case(
+            suffix: str, identity: int
+        ) -> tuple[
+            WorkerHandlerRegistry,
+            QueueProviders,
+            DurableCommandQueueService,
+            SqliteWorkerJournalRepository,
+            WorkerSession,
+            WorkflowCommand,
+            WorkerOperationReceipt,
+        ]:
+            path = self.directory / f"{suffix}.sqlite3"
+            SqliteRunStore(path).initialize("2026-08-24T12:00:00.000000Z")
+            providers = QueueProviders()
+            registry = self._registry()
+            service = DurableCommandQueueService(
+                SqliteWorkflowCommandRepository(path),
+                registry._definition_registry,
+                10,
+                clock=providers.clock,
+                id_factory=providers.identifier,
+            )
+            command = self._enqueue(service, suffix).command
+            journal = SqliteWorkerJournalRepository(path)
+            session_id = str(UUID(int=identity))
+            owner = f"worker-1@{session_id}"
+            session = journal.start_session(
+                session_id=session_id,
+                worker_id="worker-1",
+                queue_owner_id=owner,
+                started_at="2026-08-24T12:00:00.000000Z",
+                stale_before="2026-08-24T11:59:30.000000Z",
+            ).session
+            claimed = service.claim_next_eligible(
+                eligible_definition_keys=registry.keys(), lease_owner=owner
+            ).command
+            receipt = journal.create_operation(
+                operation_id=str(UUID(int=identity + 100)),
+                command=claimed,
+                operation_kind=WorkerOperationKind.COMMAND_HANDLER_INVOCATION,
+                worker_id="worker-1",
+                session_id=session_id,
+                queue_owner_id=owner,
+                occurred_at="2026-08-24T12:00:00.000000Z",
+                stale_before="2026-08-24T11:59:30.000000Z",
+            ).operation
+            return registry, providers, service, journal, session, claimed, receipt
+
+        _, _, service, journal, session, command, receipt = prepared_case(
+            "failed", 8101
+        )
+        started = service.mark_running(
+            command_id=command.command_id,
+            expected_state=command.state,
+            expected_state_version=command.state_version,
+            lease_owner=command.lease_owner,
+        )
+        failed = service.mark_failed(
+            command_id=command.command_id,
+            expected_state=started.command.state,
+            expected_state_version=started.command.state_version,
+            lease_owner=started.command.lease_owner,
+            failure_code="TEST_FAILURE",
+        )
+        before_session = journal.get_session(session_id=session.session_id).session
+        result = journal.reconcile_operation(
+            operation_id=receipt.operation_id,
+            expected_state=receipt.state,
+            expected_state_version=receipt.state_version,
+            occurred_at="2026-08-24T12:00:01.000000Z",
+        )
+        self.assertEqual(
+            (
+                WorkflowCommandState.FAILED,
+                WorkerOperationState.FAILED,
+                WorkerFailureCode.RECONCILIATION_REQUIRED.value,
+                None,
+                receipt.created_at,
+                started.command.started_at,
+                "2026-08-24T12:00:01.000000Z",
+                "2026-08-24T12:00:01.000000Z",
+                before_session,
+            ),
+            (
+                failed.command.state,
+                result.operation.state,
+                result.operation.durable_failure_code,
+                result.operation.diagnostic_detail,
+                result.operation.created_at,
+                result.operation.started_at,
+                result.operation.updated_at,
+                result.operation.completed_at,
+                journal.get_session(session_id=session.session_id).session,
+            ),
+        )
+        repeated = journal.reconcile_operation(
+            operation_id=receipt.operation_id,
+            expected_state=receipt.state,
+            expected_state_version=receipt.state_version,
+            occurred_at="2026-08-24T12:00:10.000000Z",
+        )
+        self.assertEqual(
+            (
+                WorkerJournalResultCode.TERMINAL_OBSERVED,
+                result.operation,
+            ),
+            (repeated.code, repeated.operation),
+        )
+
+        _, _, service, journal, _, command, receipt = prepared_case(
+            "bad-started", 8403
+        )
+        started = service.mark_running(
+            command_id=command.command_id,
+            expected_state=command.state,
+            expected_state_version=command.state_version,
+            lease_owner=command.lease_owner,
+        )
+        service.mark_failed(
+            command_id=command.command_id,
+            expected_state=started.command.state,
+            expected_state_version=started.command.state_version,
+            lease_owner=started.command.lease_owner,
+            failure_code="TEST_FAILURE",
+        )
+        connection = sqlite3.connect(journal.database_path)
+        try:
+            connection.execute(
+                "UPDATE workflow_command_events SET occurred_at=? "
+                "WHERE command_id=? AND event_kind='STARTED'",
+                ("2026-08-24T12:00:00.500000Z", command.command_id),
+            )
+            connection.commit()
+        finally:
+            connection.close()
+        with self.assertRaises(RepositoryError) as raised:
+            journal.reconcile_operation(
+                operation_id=receipt.operation_id,
+                expected_state=receipt.state,
+                expected_state_version=receipt.state_version,
+                occurred_at="2026-08-24T12:00:01.000000Z",
+            )
+        self.assertEqual(
+            RepositoryFailureCode.MALFORMED_PERSISTED_PAYLOAD,
+            raised.exception.code,
+        )
+        self.assertEqual(
+            WorkerOperationState.PREPARED,
+            journal.get_operation_for_claim(
+                command_id=command.command_id, claim_count=command.claim_count
+            ).operation.state,
+        )
+
+        _, _, service, journal, session, command, receipt = prepared_case(
+            "cancelled", 8201
+        )
+        requested = service.request_cancellation(
+            command_id=command.command_id,
+            expected_state=command.state,
+            expected_state_version=command.state_version,
+            requested_by="requester",
+            reason_code="TEST_CANCEL",
+        )
+        cancelled = service.acknowledge_cancellation(
+            command_id=command.command_id,
+            expected_state=requested.command.state,
+            expected_state_version=requested.command.state_version,
+            lease_owner=requested.command.lease_owner,
+        )
+        before_session = journal.get_session(session_id=session.session_id).session
+        result = journal.reconcile_operation(
+            operation_id=receipt.operation_id,
+            expected_state=receipt.state,
+            expected_state_version=receipt.state_version,
+            occurred_at="2026-08-24T12:00:01.000000Z",
+        )
+        self.assertEqual(
+            (
+                WorkflowCommandState.CANCELLED,
+                WorkerOperationState.CANCELLED,
+                WorkerFailureCode.CANCELLATION_OBSERVED.value,
+                None,
+                None,
+                before_session,
+            ),
+            (
+                cancelled.command.state,
+                result.operation.state,
+                result.operation.durable_failure_code,
+                result.operation.diagnostic_detail,
+                result.operation.started_at,
+                journal.get_session(session_id=session.session_id).session,
+            ),
+        )
+
+        _, providers, service, journal, session, command, receipt = prepared_case(
+            "claim-released", 8301
+        )
+        providers.current += timedelta(seconds=10)
+        released = service.recover_expired_claim(
+            command_id=command.command_id,
+            expected_state=command.state,
+            expected_state_version=command.state_version,
+            recovery_actor="recovery",
+        )
+        before_session = journal.get_session(session_id=session.session_id).session
+        result = journal.reconcile_operation(
+            operation_id=receipt.operation_id,
+            expected_state=receipt.state,
+            expected_state_version=receipt.state_version,
+            occurred_at="2026-08-24T12:00:10.000000Z",
+        )
+        self.assertEqual(
+            (
+                WorkflowCommandState.PENDING,
+                WorkerOperationState.CLAIM_RELEASED,
+                WorkerFailureCode.LEASE_LOST.value,
+                None,
+                None,
+                before_session,
+            ),
+            (
+                released.command.state,
+                result.operation.state,
+                result.operation.durable_failure_code,
+                result.operation.diagnostic_detail,
+                result.operation.started_at,
+                journal.get_session(session_id=session.session_id).session,
+            ),
+        )
+
+        invalid_started_cases = (
+            ("missing", "DELETE"),
+            ("ambiguous", "AMBIGUOUS"),
+            ("contradictory", "CONTRADICTORY"),
+            ("owner", "OWNER"),
+            ("claim", "CLAIM"),
+            ("timestamp", "TIMESTAMP"),
+        )
+        for offset, (label, mutation) in enumerate(invalid_started_cases):
+            with self.subTest(invalid_started=label):
+                case_registry, _, case_service, case_journal, case_session, case_command, case_receipt = (
+                    prepared_case(f"invalid-started-{label}", 8350 + offset * 10)
+                )
+                running = case_service.mark_running(
+                    command_id=case_command.command_id,
+                    expected_state=case_command.state,
+                    expected_state_version=case_command.state_version,
+                    lease_owner=case_command.lease_owner,
+                )
+                case_service.mark_failed(
+                    command_id=case_command.command_id,
+                    expected_state=running.command.state,
+                    expected_state_version=running.command.state_version,
+                    lease_owner=running.command.lease_owner,
+                    failure_code="TEST_FAILURE",
+                )
+                connection = sqlite3.connect(case_journal.database_path)
+                try:
+                    connection.execute("PRAGMA ignore_check_constraints=ON")
+                    if mutation == "DELETE":
+                        connection.execute(
+                            "DELETE FROM workflow_command_events WHERE command_id=? "
+                            "AND event_kind='STARTED'",
+                            (case_command.command_id,),
+                        )
+                    elif mutation == "AMBIGUOUS":
+                        connection.execute(
+                            "UPDATE workflow_command_events SET event_kind='STARTED' "
+                            "WHERE command_id=? AND event_kind='CLAIMED'",
+                            (case_command.command_id,),
+                        )
+                    elif mutation == "CONTRADICTORY":
+                        connection.execute(
+                            "UPDATE workflow_command_events SET reason_code='OTHER' "
+                            "WHERE command_id=? AND event_kind='STARTED'",
+                            (case_command.command_id,),
+                        )
+                    elif mutation == "OWNER":
+                        connection.execute(
+                            "UPDATE workflow_command_events SET actor_id='other' "
+                            "WHERE command_id=? AND event_kind='STARTED'",
+                            (case_command.command_id,),
+                        )
+                    elif mutation == "CLAIM":
+                        connection.execute(
+                            "UPDATE workflow_command_events SET claim_count=2 "
+                            "WHERE command_id=? AND event_kind='STARTED'",
+                            (case_command.command_id,),
+                        )
+                    else:
+                        connection.execute(
+                            "UPDATE workflow_command_events SET occurred_at=? "
+                            "WHERE command_id=? AND event_kind='STARTED'",
+                            (
+                                "2026-08-24T12:00:00.500000Z",
+                                case_command.command_id,
+                            ),
+                        )
+                    connection.execute("PRAGMA ignore_check_constraints=OFF")
+                    self.assertEqual(
+                        0,
+                        connection.execute(
+                            "PRAGMA ignore_check_constraints"
+                        ).fetchone()[0],
+                    )
+                    connection.commit()
+                finally:
+                    connection.close()
+                self._fail_worker_session(case_journal, case_session)
+                before = self._sqlite_fact_snapshot(case_journal.database_path)
+                trace: list[str] = []
+                original_open = case_journal._open
+
+                def traced_open(entity: str, identity: str) -> sqlite3.Connection:
+                    opened = original_open(entity, identity)
+                    opened.set_trace_callback(trace.append)
+                    return opened
+
+                with (
+                    patch.object(case_journal, "_open", side_effect=traced_open),
+                    self.assertRaises(RepositoryError) as raised,
+                ):
+                    case_journal.reconcile_operation(
+                        operation_id=case_receipt.operation_id,
+                        expected_state=case_receipt.state,
+                        expected_state_version=case_receipt.state_version,
+                        occurred_at="2026-08-24T12:00:01.000000Z",
+                    )
+                self.assertEqual(
+                    RepositoryFailureCode.MALFORMED_PERSISTED_PAYLOAD,
+                    raised.exception.code,
+                )
+                normalized = tuple(value.strip().upper() for value in trace)
+                self.assertEqual(1, sum(value == "BEGIN IMMEDIATE" for value in normalized))
+                self.assertEqual(1, sum(value == "ROLLBACK" for value in normalized))
+                self.assertFalse(any(value.startswith("UPDATE ") for value in normalized))
+                self.assertEqual(before, self._sqlite_fact_snapshot(case_journal.database_path))
+                self.assertEqual(
+                    WorkerStartupStatus.PERSISTENCE_FAILURE,
+                    self._worker(
+                        case_registry,
+                        case_service,
+                        database_path=case_journal.database_path,
+                    ).start().status,
+                )
+                self.assertEqual(before, self._sqlite_fact_snapshot(case_journal.database_path))
+
+    def test_reconcile_atomic_read_only_queue_observation_and_single_receipt_cas(self) -> None:
+        service, journal, _session, command, receipt = self._claimed_prepared()
+        started = service.mark_running(
+            command_id=command.command_id,
+            expected_state=command.state,
+            expected_state_version=command.state_version,
+            lease_owner=command.lease_owner,
+        )
+        failed = service.mark_failed(
+            command_id=command.command_id,
+            expected_state=started.command.state,
+            expected_state_version=started.command.state_version,
+            lease_owner=started.command.lease_owner,
+            failure_code="TEST_FAILURE",
+        )
+
+        def raw_snapshot() -> tuple[tuple[tuple[object, ...], ...], ...]:
+            connection = sqlite3.connect(self.path)
+            try:
+                return tuple(
+                    tuple(connection.execute(f"SELECT * FROM {table} ORDER BY 1"))
+                    for table in (
+                        "workflow_commands",
+                        "workflow_command_events",
+                        "worker_sessions",
+                        "worker_operations",
+                    )
+                )
+            finally:
+                connection.close()
+
+        before = raw_snapshot()
+        trace: list[str] = []
+        executed: list[str] = []
+        original_open = journal._open
+
+        class ObservedConnection:
+            def __init__(self, connection: sqlite3.Connection) -> None:
+                self._connection = connection
+
+            def execute(
+                self, statement: str, parameters: object = ()
+            ) -> sqlite3.Cursor:
+                executed.append(statement)
+                return self._connection.execute(statement, parameters)
+
+            def __getattr__(self, name: str) -> object:
+                return getattr(self._connection, name)
+
+        def force_receipt_cas_loss(entity: str, identity: str) -> object:
+            connection = original_open(entity, identity)
+            connection.execute(
+                "CREATE TEMP TRIGGER force_receipt_cas_loss "
+                "BEFORE UPDATE ON worker_operations "
+                "BEGIN SELECT RAISE(IGNORE); END"
+            )
+            connection.set_trace_callback(trace.append)
+            return ObservedConnection(connection)
+
+        with patch.object(journal, "_open", side_effect=force_receipt_cas_loss):
+            lost = journal.reconcile_operation(
+                operation_id=receipt.operation_id,
+                expected_state=receipt.state,
+                expected_state_version=receipt.state_version,
+                occurred_at="2026-08-24T12:00:01.000000Z",
+            )
+
+        normalized_trace = tuple(statement.strip().upper() for statement in trace)
+        self.assertEqual(WorkerJournalResultCode.CAS_CONFLICT, lost.code)
+        self.assertEqual(before, raw_snapshot())
+        self.assertEqual(1, sum(statement == "BEGIN IMMEDIATE" for statement in normalized_trace))
+        self.assertEqual(
+            1,
+            sum(
+                statement.lstrip().upper().startswith("UPDATE WORKER_OPERATIONS")
+                for statement in executed
+            ),
+        )
+        self.assertFalse(
+            any(
+                statement.lstrip().upper().startswith(
+                    (
+                        "UPDATE WORKFLOW_COMMANDS",
+                        "UPDATE WORKFLOW_COMMAND_EVENTS",
+                        "UPDATE WORKER_SESSIONS",
+                    )
+                )
+                for statement in executed
+            )
+        )
+        self.assertEqual(1, sum(statement == "ROLLBACK" for statement in normalized_trace))
+        self.assertEqual(0, sum(statement == "COMMIT" for statement in normalized_trace))
+        self.assertFalse(
+            any(
+                statement.startswith(
+                    (
+                        "UPDATE WORKFLOW_COMMANDS",
+                        "UPDATE WORKFLOW_COMMAND_EVENTS",
+                        "UPDATE WORKER_SESSIONS",
+                    )
+                )
+                for statement in normalized_trace
+            )
+        )
+
+        applied = SqliteWorkerJournalRepository(self.path).reconcile_operation(
+            operation_id=receipt.operation_id,
+            expected_state=receipt.state,
+            expected_state_version=receipt.state_version,
+            occurred_at="2026-08-24T12:00:01.000000Z",
+        )
+        reopened = SqliteWorkerJournalRepository(self.path).reconcile_operation(
+            operation_id=receipt.operation_id,
+            expected_state=receipt.state,
+            expected_state_version=receipt.state_version,
+            occurred_at="2026-08-24T12:00:02.000000Z",
+        )
+        self.assertEqual(
+            (
+                WorkflowCommandState.FAILED,
+                WorkerJournalResultCode.APPLIED,
+                WorkerOperationState.FAILED,
+                WorkerJournalResultCode.TERMINAL_OBSERVED,
+                applied.operation,
+            ),
+            (
+                failed.command.state,
+                applied.code,
+                applied.operation.state,
+                reopened.code,
+                reopened.operation,
+            ),
+        )
+
+    def test_reconcile_claim_generation_and_queue_history_negative_matrix(self) -> None:
+        service, journal, _, command, receipt = self._claimed_prepared()
+        with patch.object(journal, "_open", side_effect=AssertionError("I/O")) as opened:
+            with self.assertRaises(ValueError):
+                journal.reconcile_operation(operation_id=receipt.operation_id, expected_state=WorkerOperationState.RUNNING, expected_state_version=receipt.state_version, occurred_at="2026-08-24T12:00:01.000000Z")
+        opened.assert_not_called()
+        self.providers.current += timedelta(seconds=10)
+        released = service.recover_expired_claim(
+            command_id=command.command_id,
+            expected_state=command.state,
+            expected_state_version=command.state_version,
+            recovery_actor="recovery",
+        )
+        superseding = service.claim_next_eligible(
+            eligible_definition_keys=(("TEST_COMMAND", 1),),
+            lease_owner=command.lease_owner,
+        )
+        result = journal.reconcile_operation(
+            operation_id=receipt.operation_id,
+            expected_state=receipt.state,
+            expected_state_version=receipt.state_version,
+            occurred_at="2026-08-24T12:00:10.000000Z",
+        )
+        self.assertEqual(
+            (
+                QueueResultCode.APPLIED,
+                2,
+                WorkerJournalResultCode.CAS_CONFLICT,
+                WorkerOperationState.PREPARED,
+            ),
+            (
+                released.code,
+                superseding.command.claim_count,
+                result.code,
+                journal.get_operation_for_claim(
+                    command_id=command.command_id, claim_count=1
+                ).operation.state,
+            ),
+        )
+
+    def test_reconcile_superseding_claim_five_scenario_race(self) -> None:
+        def claimant_owner(identity: int) -> str:
+            return f"worker-2@{UUID(int=identity)}"
+
+        with (
+            patch.object(sqlite3, "connect", self._real_sqlite_connect),
+            patch.object(
+                sqlite_repository_module,
+                "_open_connection",
+                self._real_open_connection,
+            ),
+            patch.object(
+                sqlite_repository_module,
+                "_open_read_only_connection",
+                self._real_open_read_only_connection,
+            ),
+        ):
+            for ordinal, checkpoint in enumerate(
+                ("BEGIN", "QUEUE_READ", "RECEIPT_CAS"), start=1
+            ):
+                with self.subTest(variant=f"RACE_{chr(64 + ordinal)}"):
+                    path = self.directory / f"race-{checkpoint.lower()}.sqlite3"
+                    service, journal, _session, _command, receipt = (
+                        self._reconciliation_fixture(
+                            path, "CLAIM-RELEASED", 8600 + ordinal * 10
+                        )
+                    )
+                    self.assertEqual(
+                        service._repository.database_identity,
+                        journal.database_identity,
+                    )
+                    before = self._sqlite_fact_snapshot(path)
+                    first_barrier = threading.Barrier(2)
+                    second_barrier = threading.Barrier(2)
+                    trace: list[str] = []
+                    thread_result: dict[str, object] = {}
+                    original_open = journal._open
+
+                    class PausingConnection:
+                        def __init__(self, connection: sqlite3.Connection) -> None:
+                            self._connection = connection
+                            self._paused = False
+
+                        def execute(
+                            self, statement: str, parameters: object = ()
+                        ) -> sqlite3.Cursor:
+                            cursor = self._connection.execute(statement, parameters)
+                            normalized = " ".join(statement.upper().split())
+                            matched = (
+                                checkpoint == "BEGIN"
+                                and normalized == "BEGIN IMMEDIATE"
+                            ) or (
+                                checkpoint == "QUEUE_READ"
+                                and normalized.startswith("SELECT ")
+                                and " FROM WORKFLOW_COMMANDS " in normalized
+                            ) or (
+                                checkpoint == "RECEIPT_CAS"
+                                and normalized.startswith("UPDATE WORKER_OPERATIONS")
+                            )
+                            if matched and not self._paused:
+                                self._paused = True
+                                first_barrier.wait(timeout=5)
+                                second_barrier.wait(timeout=5)
+                            return cursor
+
+                        def __getattr__(self, name: str) -> object:
+                            return getattr(self._connection, name)
+
+                    def pausing_open(entity: str, identity: str) -> object:
+                        connection = original_open(entity, identity)
+                        connection.set_trace_callback(trace.append)
+                        return PausingConnection(connection)
+
+                    def reconcile() -> None:
+                        try:
+                            with patch.object(
+                                journal, "_open", side_effect=pausing_open
+                            ):
+                                thread_result["result"] = journal.reconcile_operation(
+                                    operation_id=receipt.operation_id,
+                                    expected_state=receipt.state,
+                                    expected_state_version=receipt.state_version,
+                                    occurred_at="2026-08-24T12:00:10.000000Z",
+                                )
+                        except BaseException as error:
+                            thread_result["error"] = error
+
+                    thread = threading.Thread(target=reconcile)
+                    thread.start()
+                    first_barrier.wait(timeout=5)
+                    contender = service.claim_next_eligible(
+                        eligible_definition_keys=(("TEST_COMMAND", 1),),
+                        lease_owner=claimant_owner(8700 + ordinal),
+                    )
+                    second_barrier.wait(timeout=5)
+                    thread.join(timeout=5)
+                    self.assertFalse(thread.is_alive())
+                    self.assertNotIn("error", thread_result)
+                    result = thread_result["result"]
+                    self.assertEqual(
+                        (
+                            WorkerJournalResultCode.APPLIED,
+                            WorkerOperationState.CLAIM_RELEASED,
+                            WorkerFailureCode.LEASE_LOST.value,
+                            QueueResultCode.TRANSIENT_CONTENTION,
+                        ),
+                        (
+                            result.code,
+                            result.operation.state,
+                            result.operation.durable_failure_code,
+                            contender.code,
+                        ),
+                    )
+                    after = self._sqlite_fact_snapshot(path)
+                    self.assertEqual(
+                        (
+                            before["workflow_commands"],
+                            before["workflow_command_events"],
+                            before["worker_sessions"],
+                        ),
+                        (
+                            after["workflow_commands"],
+                            after["workflow_command_events"],
+                            after["worker_sessions"],
+                        ),
+                    )
+                    normalized_trace = tuple(
+                        " ".join(statement.upper().split()) for statement in trace
+                    )
+                    self.assertEqual(
+                        (1, 1, 1, 0),
+                        (
+                            sum(value == "BEGIN IMMEDIATE" for value in normalized_trace),
+                            sum(
+                                value.startswith("UPDATE WORKER_OPERATIONS")
+                                for value in normalized_trace
+                            ),
+                            sum(value == "COMMIT" for value in normalized_trace),
+                            sum(value == "ROLLBACK" for value in normalized_trace),
+                        ),
+                    )
+                    self.assertFalse(
+                        any(
+                            value.startswith(
+                                (
+                                    "UPDATE WORKFLOW_COMMANDS",
+                                    "INSERT INTO WORKFLOW_COMMAND_EVENTS",
+                                    "UPDATE WORKER_SESSIONS",
+                                )
+                            )
+                            for value in normalized_trace
+                        )
+                    )
+                    reopened = SqliteWorkerJournalRepository(path)
+                    persisted = reopened.get_operation_for_claim(
+                        command_id=receipt.command_id,
+                        claim_count=receipt.claim_count,
+                    )
+                    self.assertEqual(result.operation, persisted.operation)
+
+            path = self.directory / "race-before-begin.sqlite3"
+            service, journal, session, _command, receipt = self._reconciliation_fixture(
+                path, "CLAIM-RELEASED", 8640
+            )
+            before = self._sqlite_fact_snapshot(path)
+            superseding = service.claim_next_eligible(
+                eligible_definition_keys=(("TEST_COMMAND", 1),),
+                lease_owner=claimant_owner(8740),
+            )
+            lost = journal.reconcile_operation(
+                operation_id=receipt.operation_id,
+                expected_state=receipt.state,
+                expected_state_version=receipt.state_version,
+                occurred_at="2026-08-24T12:00:10.000000Z",
+            )
+            after = self._sqlite_fact_snapshot(path)
+            self.assertEqual(
+                (
+                    QueueResultCode.APPLIED,
+                    2,
+                    WorkerJournalResultCode.CAS_CONFLICT,
+                    WorkerOperationState.PREPARED,
+                    1,
+                    1,
+                    before["worker_sessions"],
+                    WorkerStartupStatus.JOURNAL_CONFLICT,
+                ),
+                (
+                    superseding.code,
+                    superseding.command.claim_count,
+                    lost.code,
+                    journal.get_operation_for_claim(
+                        command_id=receipt.command_id, claim_count=1
+                    ).operation.state,
+                    len(after["workflow_commands"]),
+                    len(after["workflow_command_events"])
+                    - len(before["workflow_command_events"]),
+                    after["worker_sessions"],
+                    DevelopmentWorker._startup_status_for_queue(
+                        superseding.command
+                    ),
+                ),
+            )
+
+            path = self.directory / "race-after-commit.sqlite3"
+            service, journal, _session, _command, receipt = (
+                self._reconciliation_fixture(path, "CLAIM-RELEASED", 8650)
+            )
+            applied = journal.reconcile_operation(
+                operation_id=receipt.operation_id,
+                expected_state=receipt.state,
+                expected_state_version=receipt.state_version,
+                occurred_at="2026-08-24T12:00:10.000000Z",
+            )
+            claimant = service.claim_next_eligible(
+                eligible_definition_keys=(("TEST_COMMAND", 1),),
+                lease_owner=claimant_owner(8750),
+            )
+            repeated = SqliteWorkerJournalRepository(path).reconcile_operation(
+                operation_id=receipt.operation_id,
+                expected_state=receipt.state,
+                expected_state_version=receipt.state_version,
+                occurred_at="2026-08-24T12:00:11.000000Z",
+            )
+            self.assertEqual(
+                (
+                    WorkerJournalResultCode.APPLIED,
+                    WorkerOperationState.CLAIM_RELEASED,
+                    QueueResultCode.APPLIED,
+                    2,
+                    WorkerJournalResultCode.TERMINAL_OBSERVED,
+                    applied.operation,
+                ),
+                (
+                    applied.code,
+                    applied.operation.state,
+                    claimant.code,
+                    claimant.command.claim_count,
+                    repeated.code,
+                    repeated.operation,
+                ),
+            )
+
+    def test_reconcile_malformed_receipt_history_startup_and_cli_mapping(self) -> None:
+        registry = self._registry()
+        service = self._service(registry)
+        self._enqueue(service, "malformed-startup")
+        journal = SqliteWorkerJournalRepository(self.path)
+        session_id = str(UUID(int=8501))
+        owner = f"worker-1@{session_id}"
+        session = journal.start_session(
+            session_id=session_id,
+            worker_id="worker-1",
+            queue_owner_id=owner,
+            started_at="2026-08-24T12:00:00.000000Z",
+            stale_before="2026-08-24T11:59:30.000000Z",
+        ).session
+        command = service.claim_next_eligible(
+            eligible_definition_keys=registry.keys(), lease_owner=owner
+        ).command
+        journal.create_operation(
+            operation_id=str(UUID(int=8502)),
+            command=command,
+            operation_kind=WorkerOperationKind.COMMAND_HANDLER_INVOCATION,
+            worker_id="worker-1",
+            session_id=session_id,
+            queue_owner_id=owner,
+            occurred_at="2026-08-24T12:00:00.000000Z",
+            stale_before="2026-08-24T11:59:30.000000Z",
+        )
+        connection = sqlite3.connect(self.path)
+        try:
+            connection.execute("PRAGMA ignore_check_constraints=ON")
+            connection.execute(
+                "UPDATE worker_operations SET durable_failure_code='LEASE_LOST' "
+                "WHERE command_id=? AND claim_count=1",
+                (command.command_id,),
+            )
+            connection.commit()
+        finally:
+            connection.close()
+        with self.assertRaises(RepositoryError) as raised:
+            journal.get_operation_for_claim(
+                command_id=command.command_id, claim_count=1
+            )
+        self.assertEqual(
+            RepositoryFailureCode.MALFORMED_PERSISTED_PAYLOAD,
+            raised.exception.code,
+        )
+        before = self._sqlite_fact_snapshot(self.path)
+        self.assertEqual(
+            WorkerStartupStatus.PERSISTENCE_FAILURE,
+            self._worker(registry, service).start().status,
+        )
+        after_start = self._sqlite_fact_snapshot(self.path)
+        self.assertEqual(
+            7,
+            worker_main(
+                [
+                    "--database-path",
+                    str(self.path),
+                    "--worker-id",
+                    "worker-1",
+                ],
+                registry_provider=lambda: registry,
+            ),
+        )
+        self.assertEqual(before, after_start)
+        self.assertEqual(before, self._sqlite_fact_snapshot(self.path))
+
+        def receipt_case(
+            label: str, identity: int
+        ) -> tuple[
+            Path,
+            WorkerHandlerRegistry,
+            DurableCommandQueueService,
+            SqliteWorkerJournalRepository,
+            WorkerSession,
+            WorkflowCommand,
+            WorkerOperationReceipt,
+        ]:
+            path = self.directory / f"t71-{label}.sqlite3"
+            SqliteRunStore(path).initialize("2026-08-24T12:00:00.000000Z")
+            registry = self._registry()
+            service = DurableCommandQueueService(
+                SqliteWorkflowCommandRepository(path),
+                registry._definition_registry,
+                10,
+                clock=self.providers.clock,
+                id_factory=self.providers.identifier,
+            )
+            self._enqueue(service, f"t71-{label}")
+            journal = SqliteWorkerJournalRepository(path)
+            session_id = str(UUID(int=identity))
+            owner = f"worker-1@{session_id}"
+            session = journal.start_session(
+                session_id=session_id,
+                worker_id="worker-1",
+                queue_owner_id=owner,
+                started_at="2026-08-24T12:00:00.000000Z",
+                stale_before="2026-08-24T11:59:30.000000Z",
+            ).session
+            command = service.claim_next_eligible(
+                eligible_definition_keys=registry.keys(), lease_owner=owner
+            ).command
+            receipt = journal.create_operation(
+                operation_id=str(UUID(int=identity + 1)),
+                command=command,
+                operation_kind=WorkerOperationKind.COMMAND_HANDLER_INVOCATION,
+                worker_id="worker-1",
+                session_id=session_id,
+                queue_owner_id=owner,
+                occurred_at="2026-08-24T12:00:00.000000Z",
+                stale_before="2026-08-24T11:59:30.000000Z",
+            ).operation
+            return path, registry, service, journal, session, command, receipt
+
+        observed_variants = ["CODE"]
+        for offset, variant in enumerate(("VALID", "DIAG", "BOTH", "TERMINAL")):
+            with self.subTest(t71_variant=variant):
+                path, case_registry, case_service, case_journal, _, command, receipt = (
+                    receipt_case(variant.lower(), 8760 + offset * 10)
+                )
+                if variant == "VALID":
+                    found = case_journal.get_operation_for_claim(
+                        command_id=command.command_id, claim_count=1
+                    )
+                    self.assertEqual(
+                        (
+                            WorkerJournalResultCode.FOUND,
+                            WorkerOperationState.PREPARED,
+                            None,
+                            None,
+                        ),
+                        (
+                            found.code,
+                            found.operation.state,
+                            found.operation.durable_failure_code,
+                            found.operation.diagnostic_detail,
+                        ),
+                    )
+                    observed_variants.append(variant)
+                    continue
+                connection = sqlite3.connect(path)
+                try:
+                    connection.execute("PRAGMA ignore_check_constraints=ON")
+                    if variant == "DIAG":
+                        connection.execute(
+                            "UPDATE worker_operations SET diagnostic_detail=? "
+                            "WHERE operation_id=?",
+                            (
+                                "HANDLER_PROTOCOL_ERROR:INVALID_RETURN",
+                                receipt.operation_id,
+                            ),
+                        )
+                    elif variant == "BOTH":
+                        connection.execute(
+                            "UPDATE worker_operations SET durable_failure_code=?, "
+                            "diagnostic_detail=? WHERE operation_id=?",
+                            (
+                                WorkerFailureCode.HANDLER_EXCEPTION.value,
+                                "HANDLER_PROTOCOL_ERROR:INVALID_RETURN",
+                                receipt.operation_id,
+                            ),
+                        )
+                    else:
+                        connection.execute(
+                            "UPDATE worker_operations SET state='FAILED', "
+                            "completed_at=updated_at WHERE operation_id=?",
+                            (receipt.operation_id,),
+                        )
+                    connection.execute("PRAGMA ignore_check_constraints=OFF")
+                    self.assertEqual(
+                        0,
+                        connection.execute(
+                            "PRAGMA ignore_check_constraints"
+                        ).fetchone()[0],
+                    )
+                    connection.commit()
+                finally:
+                    connection.close()
+                before_case = self._sqlite_fact_snapshot(path)
+                with self.assertRaises(RepositoryError) as raised:
+                    case_journal.get_operation_for_claim(
+                        command_id=command.command_id, claim_count=1
+                    )
+                self.assertEqual(
+                    RepositoryFailureCode.MALFORMED_PERSISTED_PAYLOAD,
+                    raised.exception.code,
+                )
+                self.assertEqual(
+                    WorkerStartupStatus.PERSISTENCE_FAILURE,
+                    self._worker(
+                        case_registry, case_service, database_path=path
+                    ).start().status,
+                )
+                self.assertEqual(
+                    7,
+                    worker_main(
+                        ["--database-path", str(path), "--worker-id", "worker-1"],
+                        registry_provider=lambda: case_registry,
+                    ),
+                )
+                self.assertEqual(before_case, self._sqlite_fact_snapshot(path))
+                observed_variants.append(variant)
+
+        path, history_registry, history_service, history_journal, history_session, command, receipt = (
+            receipt_case("history", 8810)
+        )
+        running = history_service.mark_running(
+            command_id=command.command_id,
+            expected_state=command.state,
+            expected_state_version=command.state_version,
+            lease_owner=command.lease_owner,
+        )
+        history_service.mark_failed(
+            command_id=command.command_id,
+            expected_state=running.command.state,
+            expected_state_version=running.command.state_version,
+            lease_owner=running.command.lease_owner,
+            failure_code="TEST_FAILURE",
+        )
+        connection = sqlite3.connect(path)
+        try:
+            connection.execute("PRAGMA ignore_check_constraints=ON")
+            connection.execute(
+                "UPDATE workflow_command_events SET reason_code='OTHER' "
+                "WHERE command_id=? AND event_kind='STARTED'",
+                (command.command_id,),
+            )
+            connection.execute("PRAGMA ignore_check_constraints=OFF")
+            self.assertEqual(
+                0,
+                connection.execute("PRAGMA ignore_check_constraints").fetchone()[0],
+            )
+            connection.commit()
+        finally:
+            connection.close()
+        self._fail_worker_session(history_journal, history_session)
+        before_history = self._sqlite_fact_snapshot(path)
+        with self.assertRaises(RepositoryError) as raised:
+            history_journal.reconcile_operation(
+                operation_id=receipt.operation_id,
+                expected_state=receipt.state,
+                expected_state_version=receipt.state_version,
+                occurred_at="2026-08-24T12:00:01.000000Z",
+            )
+        self.assertEqual(
+            RepositoryFailureCode.MALFORMED_PERSISTED_PAYLOAD,
+            raised.exception.code,
+        )
+        self.assertEqual(
+            WorkerStartupStatus.PERSISTENCE_FAILURE,
+            self._worker(
+                history_registry, history_service, database_path=path
+            ).start().status,
+        )
+        self.assertEqual(
+            7,
+            worker_main(
+                ["--database-path", str(path), "--worker-id", "worker-1"],
+                registry_provider=lambda: history_registry,
+            ),
+        )
+        self.assertEqual(before_history, self._sqlite_fact_snapshot(path))
+        observed_variants.append("HISTORY")
+        self.assertEqual(
+            ("CODE", "VALID", "DIAG", "BOTH", "TERMINAL", "HISTORY"),
+            tuple(observed_variants),
+        )
+
+    def test_revision_neutral_schema_obligation_findings_exactness_and_traceability(self) -> None:
+        evidence_path = os.environ.get("PANAM_R11_ACCEPTED_EVIDENCE_PATH")
+        self.assertIsNotNone(evidence_path, "accepted Evidence path is required")
+        raw = Path(evidence_path).read_bytes()
+        self.assertEqual(
+            "2E1109A5FE4E0CA7ED73A73AED992421E829D4183EEBFA66B3684AF137A83852",
+            hashlib.sha256(raw).hexdigest().upper(),
+        )
+        evidence = json.loads(raw)
+        self.assertEqual(
+            {
+                "candidate_evidence_identity_state": "FINAL_IDENTITY_NOT_YET_AVAILABLE",
+                "creator_verification_state_ref": "/authority_state",
+                "currentness_basis": "TYPED_CURRENT_PACKAGE_CONTEXT",
+                "evidence_schema": "panam.dl2.2.r11.evidence.v1",
+                "generation_phase": "CANDIDATE_CONSTRUCTION_PREWRITE",
+                "independent_verification_state_ref": "/integrity/independent_verification_state",
+                "package_revision": "011",
+                "package_role": "PROPOSED_NOT_ACCEPTED_CANDIDATE",
+            },
+            evidence["current_package_context"],
+        )
+        self.assertEqual(
+            ("PASS", "PASS", 0, 0),
+            (
+                evidence["integrity"]["current_package_context_validation"]["result"],
+                evidence["integrity"]["currentness_validation"]["result"],
+                evidence["integrity"]["currentness_validation"]["active_current_stale_count"],
+                evidence["integrity"]["currentness_validation"]["unknown_active_revision_binding_count"],
+            ),
+        )
+        tests = evidence["tests"]
+        matrices = {item["matrix_id"]: item for item in evidence["matrices"]}
+        m11_rows = matrices["M11_NORMATIVE_TEST_OBLIGATIONS"]["rows"]
+        m12_rows = matrices["M12_CRASH_AND_RESTART_MATRIX"]["rows"]
+
+        expected_test_ids = tuple(f"T{number:02d}" for number in range(1, 87))
+        self.assertEqual(expected_test_ids, tuple(tests["ordered_test_ids"]))
+        self.assertEqual(expected_test_ids, tuple(row["row_id"] for row in m11_rows))
+        self.assertEqual(expected_test_ids, tuple(row["test_id"] for row in tests["test_index"]))
+        self.assertEqual(
+            expected_test_ids,
+            tuple(row["m11_row_id"] for row in tests["test_index"]),
+        )
+        self.assertEqual(86, len({row["test_id"] for row in tests["test_index"]}))
+        accepted_aliases = {
+            "test_revision005_schema_obligation_counts_findings_exactness_and_traceability":
+                "test_revision_neutral_schema_obligation_findings_exactness_and_traceability"
+        }
+        for row in tests["test_index"][:82]:
+            resolved_name = accepted_aliases.get(row["name"], row["name"])
+            self.assertTrue(callable(getattr(type(self), resolved_name, None)), row["test_id"])
+        self.assertEqual(
+            ("T72",),
+            tuple(
+                row["test_id"]
+                for row in tests["test_index"]
+                if row["name"] in accepted_aliases
+            ),
+        )
+
+        registry_ids = {
+            item["obligation_id"] for item in tests["schema_obligation_registry"]
+        }
+        m11_ids = {
+            obligation
+            for row in m11_rows
+            for obligation in row["schema_obligation_ids"]
+        }
+        schema_relations = {
+            (obligation, row["row_id"])
+            for row in m11_rows
+            for obligation in row["schema_obligation_ids"]
+        }
+        graph_schema_relations = {
+            (row["obligation_id"], row["test_id"])
+            for row in tests["canonical_relation_graph"]
+            if "crash_row_id" not in row
+        }
+        crash_relations = {
+            (row["row_id"], test_id)
+            for row in m12_rows
+            for test_id in row["test_mapping"]
+        }
+        graph_crash_relations = {
+            (row["crash_row_id"], row["test_id"])
+            for row in tests["canonical_relation_graph"]
+            if "crash_row_id" in row
+        }
+        self.assertEqual((61, 61, 61), (tests["schema_obligation_count"], len(registry_ids), len(m11_ids)))
+        self.assertEqual(registry_ids, m11_ids)
+        self.assertEqual((76, schema_relations), (tests["schema_relation_count"], graph_schema_relations))
+        self.assertEqual((42, crash_relations), (tests["crash_relation_count"], graph_crash_relations))
+        self.assertEqual(42, evidence["crash_cases"]["canonical_relation_count"])
+
+        expected_m12_ids = tuple(
+            [f"C{number:02d}" for number in range(1, 23)]
+            + [
+                f"C{number}-{family}"
+                for number in range(23, 28)
+                for family in ("FAILED", "CANCELLED", "CLAIM-RELEASED")
+            ]
+            + [f"C{number}" for number in range(28, 33)]
+        )
+        self.assertEqual(expected_m12_ids, tuple(matrices["M12_CRASH_AND_RESTART_MATRIX"]["ordered_row_ids"]))
+        windows = evidence["crash_cases"]["schema_window_registry"]
+        expected_windows = tuple(
+            [
+                (
+                    f"AR-{family}-{number:02d}",
+                    f"C{number + 22}-{family}",
+                    family,
+                    f"T{number + 72}",
+                )
+                for number in range(1, 6)
+                for family in ("FAILED", "CANCELLED", "CLAIM-RELEASED")
+            ]
+            + [
+                (
+                    f"MP-{number:02d}",
+                    f"C{number + 27}",
+                    "MALFORMED_PERSISTED_PAYLOAD",
+                    f"T{number + 77}",
+                )
+                for number in range(1, 6)
+            ]
+        )
+        actual_windows = tuple(
+            (
+                row["schema_window_id"],
+                row["m12_row_id"],
+                row["mapping_family"],
+                row["test_id"],
+            )
+            for row in windows
+        )
+        self.assertEqual(expected_windows, actual_windows)
+        self.assertEqual(
+            (20, 20, 0),
+            (
+                evidence["crash_cases"]["schema_window_count"],
+                len({row["schema_window_id"] for row in windows}),
+                evidence["crash_cases"]["unmapped_schema_window_count"],
+            ),
+        )
+        self.assertTrue(
+            all(
+                row["m12_row_id"] in expected_m12_ids
+                and row["test_id"] in expected_test_ids
+                for row in windows
+            )
+        )
+
+        m13 = matrices["M13_FORMER_R1_CONDITIONAL_TEST_TRACEABILITY"]
+        self.assertEqual(
+            tuple(f"M13-{number:02d}" for number in range(1, 22)),
+            tuple(m13["ordered_row_ids"]),
+        )
+        self.assertEqual(
+            tuple(f"R1T{number}" for number in range(26, 47)),
+            tuple(row["historical_test_id"] for row in m13["rows"]),
+        )
+        self.assertEqual(
+            tuple(
+                [f"R2Q-{number:03d}" for number in range(1, 14)]
+                + ["R6Q-001", "R6IV-Q-001"]
+            ),
+            tuple(row["question_id"] for row in evidence["questions"]["index"]),
+        )
+        validations = evidence["contradictions"]["surface_validations"]
+        self.assertEqual((25, 25), (len(validations), len({row["validation_id"] for row in validations})))
+        self.assertTrue(
+            all(
+                row["result"] == "PASS"
+                and row["stored_value"] == row["independently_derived_value"]
+                for row in validations
+            )
+        )
+        assessments = evidence["findings"]["revision_assessments"]
+        self.assertEqual((19, 19), (len(assessments), len({row["assessment_id"] for row in assessments})))
+        self.assertTrue(
+            all(
+                row["assessment_id"] == "R11-ASSESS-" + row["historical_finding_id"]
+                and row["validation_result"] == "PASS"
+                for row in assessments
+            )
+        )
+        self.assertEqual(
+            (0, 0, 0, 0),
+            (
+                tests["duplicate_schema_obligation_id_count"],
+                tests["unmapped_schema_obligation_count"],
+                tests["test_only_claim_bypass_count"],
+                evidence["crash_cases"]["unmapped_schema_window_count"],
+            ),
+        )
+        zero_count_keys = (
+            "alternate_implementation_path_count",
+            "derived_count_mismatch_count",
+            "full_matrix_duplication_in_contract_count",
+            "full_matrix_duplication_in_plan_count",
+            "matrix_with_positional_string_only_rows_count",
+            "row_with_generic_evidence_count",
+            "row_without_implementation_path_count",
+            "row_without_normative_test_or_validation_count",
+            "row_without_required_typed_effect_count",
+            "row_without_source_reference_count",
+            "row_without_unique_id_count",
+            "unauthorized_persistent_artifact_count",
+        )
+        self.assertEqual(
+            (0,) * len(zero_count_keys),
+            tuple(evidence["counts"][key] for key in zero_count_keys),
+        )
+
+    def test_crash_c23_atomic_after_begin_before_queue_read(self) -> None:
+        self._assert_atomic_reconcile_crash_point(23)
+
+    def test_crash_c24_atomic_after_queue_history_before_receipt_cas(self) -> None:
+        self._assert_atomic_reconcile_crash_point(24)
+
+    def test_crash_c25_atomic_after_receipt_cas_before_commit(self) -> None:
+        self._assert_atomic_reconcile_crash_point(25)
+
+    def test_crash_c26_atomic_after_commit_before_result_return(self) -> None:
+        self._assert_atomic_reconcile_crash_point(26)
+
+    def test_crash_c27_atomic_after_applied_before_session_followup(self) -> None:
+        self._assert_atomic_reconcile_crash_point(27)
+
+    def test_crash_c28_malformed_receipt_before_startup_read(self) -> None:
+        registry, service, _journal, _session, _command, _receipt = (
+            self._corrupt_prepared_receipt()
+        )
+        before = self._sqlite_fact_snapshot(self.path)
+        result = self._worker(registry, service).start()
+        self.assertEqual(WorkerStartupStatus.PERSISTENCE_FAILURE, result.status)
+        self.assertEqual(before, self._sqlite_fact_snapshot(self.path))
+
+    def test_crash_c29_corruption_detected_during_raw_receipt_decode(self) -> None:
+        _, _, journal, _, command, _ = self._corrupt_prepared_receipt()
+        before = self._sqlite_fact_snapshot(self.path)
+        with self.assertRaises(RepositoryError) as raised:
+            journal.get_operation_for_claim(
+                command_id=command.command_id, claim_count=command.claim_count
+            )
+        self.assertEqual(
+            RepositoryFailureCode.MALFORMED_PERSISTED_PAYLOAD,
+            raised.exception.code,
+        )
+        self.assertEqual(before, self._sqlite_fact_snapshot(self.path))
+
+    def test_crash_c30_malformed_queue_history_inside_reconcile_transaction(self) -> None:
+        _, journal, _, _, receipt = self._reconciliation_fixture(
+            self.path, "FAILED", 8930
+        )
+        connection = sqlite3.connect(self.path)
+        try:
+            connection.execute(
+                "DELETE FROM workflow_command_events WHERE event_sequence="
+                "(SELECT MAX(event_sequence) FROM workflow_command_events)"
+            )
+            connection.commit()
+        finally:
+            connection.close()
+        before = self._sqlite_fact_snapshot(self.path)
+        trace: list[str] = []
+        original_open = journal._open
+
+        def traced_open(entity: str, identity: str) -> sqlite3.Connection:
+            opened = original_open(entity, identity)
+            opened.set_trace_callback(trace.append)
+            return opened
+
+        with patch.object(journal, "_open", side_effect=traced_open):
+            with self.assertRaises(RepositoryError) as raised:
+                journal.reconcile_operation(
+                    operation_id=receipt.operation_id,
+                    expected_state=receipt.state,
+                    expected_state_version=receipt.state_version,
+                    occurred_at="2026-08-24T12:00:10.000000Z",
+                )
+        self.assertEqual(
+            RepositoryFailureCode.MALFORMED_PERSISTED_PAYLOAD,
+            raised.exception.code,
+        )
+        normalized = tuple(statement.strip().upper() for statement in trace)
+        self.assertEqual(1, sum(value == "BEGIN IMMEDIATE" for value in normalized))
+        self.assertEqual(1, sum(value == "ROLLBACK" for value in normalized))
+        self.assertFalse(any(value.startswith("UPDATE ") for value in normalized))
+        self.assertEqual(before, self._sqlite_fact_snapshot(self.path))
+
+    def test_crash_c31_repository_error_before_receipt_cas(self) -> None:
+        _, journal, _, command, receipt = self._reconciliation_fixture(
+            self.path, "CANCELLED", 8940
+        )
+        connection = sqlite3.connect(self.path)
+        try:
+            connection.execute(
+                "UPDATE workflow_command_events SET reason_code='OTHER_CANCEL' "
+                "WHERE command_id=? AND event_kind='CANCELLED'",
+                (command.command_id,),
+            )
+            connection.commit()
+        finally:
+            connection.close()
+        before = self._sqlite_fact_snapshot(self.path)
+        trace: list[str] = []
+        original_open = journal._open
+
+        def traced_open(entity: str, identity: str) -> sqlite3.Connection:
+            opened = original_open(entity, identity)
+            opened.set_trace_callback(trace.append)
+            return opened
+
+        with (
+            patch.object(journal, "_open", side_effect=traced_open),
+            self.assertRaises(RepositoryError) as raised,
+        ):
+            journal.reconcile_operation(
+                operation_id=receipt.operation_id,
+                expected_state=receipt.state,
+                expected_state_version=receipt.state_version,
+                occurred_at="2026-08-24T12:00:10.000000Z",
+            )
+        self.assertEqual(
+            RepositoryFailureCode.MALFORMED_PERSISTED_PAYLOAD,
+            raised.exception.code,
+        )
+        normalized = tuple(statement.strip().upper() for statement in trace)
+        self.assertEqual(1, sum(value == "BEGIN IMMEDIATE" for value in normalized))
+        self.assertEqual(1, sum(value == "ROLLBACK" for value in normalized))
+        self.assertFalse(any(value.startswith("UPDATE ") for value in normalized))
+        self.assertEqual(before, self._sqlite_fact_snapshot(self.path))
+
+    def test_crash_c32_exit_after_repository_error_before_startup_mapping(self) -> None:
+        registry = self._registry()
+        service = self._service(registry)
+        self._enqueue(service)
+        journal = SqliteWorkerJournalRepository(self.path)
+        session_id = str(UUID(int=8950))
+        owner = f"worker-1@{session_id}"
+        session = journal.start_session(
+            session_id=session_id,
+            worker_id="worker-1",
+            queue_owner_id=owner,
+            started_at="2026-08-24T12:00:00.000000Z",
+            stale_before="2026-08-24T11:59:30.000000Z",
+        ).session
+        command = service.claim_next_eligible(
+            eligible_definition_keys=registry.keys(), lease_owner=owner
+        ).command
+        receipt = journal.create_operation(
+            operation_id=str(UUID(int=8951)),
+            command=command,
+            operation_kind=WorkerOperationKind.COMMAND_HANDLER_INVOCATION,
+            worker_id="worker-1",
+            session_id=session.session_id,
+            queue_owner_id=owner,
+            occurred_at="2026-08-24T12:00:00.000000Z",
+            stale_before="2026-08-24T11:59:30.000000Z",
+        ).operation
+        running = service.mark_running(
+            command_id=command.command_id,
+            expected_state=command.state,
+            expected_state_version=command.state_version,
+            lease_owner=owner,
+        ).command
+        service.mark_failed(
+            command_id=running.command_id,
+            expected_state=running.state,
+            expected_state_version=running.state_version,
+            lease_owner=owner,
+            failure_code="TEST_FAILURE",
+        )
+        connection = sqlite3.connect(self.path)
+        try:
+            connection.execute(
+                "DELETE FROM workflow_command_events WHERE command_id=? "
+                "AND event_kind='FAILED'",
+                (command.command_id,),
+            )
+            connection.commit()
+        finally:
+            connection.close()
+        before = self._sqlite_fact_snapshot(self.path)
+        with self.assertRaises(RepositoryError) as raised:
+            journal.reconcile_operation(
+                operation_id=receipt.operation_id,
+                expected_state=receipt.state,
+                expected_state_version=receipt.state_version,
+                occurred_at="2026-08-24T12:00:10.000000Z",
+            )
+        self.assertEqual(
+            RepositoryFailureCode.MALFORMED_PERSISTED_PAYLOAD,
+            raised.exception.code,
+        )
+        self.assertEqual(before, self._sqlite_fact_snapshot(self.path))
+        self.assertEqual(
+            7,
+            worker_main(
+                [
+                    "--database-path",
+                    str(self.path),
+                    "--worker-id",
+                    "worker-1",
+                ],
+                registry_provider=lambda: registry,
+            ),
+        )
+        self.assertEqual(before, self._sqlite_fact_snapshot(self.path))
 
 
 if __name__ == "__main__":

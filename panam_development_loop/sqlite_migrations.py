@@ -33,6 +33,142 @@ class Migration:
     statements: tuple[str, ...]
 
 
+# This buffer is the byte-for-byte accepted Revision 011 Migration 5 payload.
+# Keep it unindented and LF-terminated; executable statements are derived from it.
+_MIGRATION_FIVE_SQL = """CREATE TABLE worker_sessions (
+  session_sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+  session_id TEXT NOT NULL,
+  worker_id TEXT NOT NULL,
+  queue_owner_id TEXT NOT NULL,
+  state TEXT NOT NULL,
+  state_version INTEGER NOT NULL DEFAULT 1,
+  started_at TEXT NOT NULL,
+  last_heartbeat_at TEXT NOT NULL,
+  stopped_at TEXT NULL,
+  stop_reason_code TEXT NULL,
+  CHECK(length(session_id)=36 AND session_id=lower(session_id)
+    AND substr(session_id,9,1)='-' AND substr(session_id,14,1)='-'
+    AND substr(session_id,19,1)='-' AND substr(session_id,24,1)='-'
+    AND length(replace(session_id,'-',''))=32
+    AND replace(session_id,'-','') NOT GLOB '*[^0-9a-f]*'
+    AND session_id<>'00000000-0000-0000-0000-000000000000'),
+  CHECK(length(worker_id) BETWEEN 1 AND 91
+    AND substr(worker_id,1,1) GLOB '[A-Za-z0-9]'
+    AND worker_id NOT GLOB '*[^A-Za-z0-9._:/-]*'),
+  CHECK(queue_owner_id=worker_id||'@'||session_id AND length(queue_owner_id) BETWEEN 38 AND 128),
+  CHECK(state IN ('ACTIVE','STOPPING','STOPPED','FAILED')),
+  CHECK(typeof(state_version)='integer' AND state_version>=1),
+  CHECK((length(started_at)=27 AND substr(started_at,5,1)='-' AND substr(started_at,8,1)='-' AND substr(started_at,11,1)='T' AND substr(started_at,14,1)=':' AND substr(started_at,17,1)=':' AND substr(started_at,20,1)='.' AND substr(started_at,27,1)='Z' AND substr(started_at,1,4)||substr(started_at,6,2)||substr(started_at,9,2)||substr(started_at,12,2)||substr(started_at,15,2)||substr(started_at,18,2)||substr(started_at,21,6) NOT GLOB '*[^0-9]*')),
+  CHECK((length(last_heartbeat_at)=27 AND substr(last_heartbeat_at,5,1)='-' AND substr(last_heartbeat_at,8,1)='-' AND substr(last_heartbeat_at,11,1)='T' AND substr(last_heartbeat_at,14,1)=':' AND substr(last_heartbeat_at,17,1)=':' AND substr(last_heartbeat_at,20,1)='.' AND substr(last_heartbeat_at,27,1)='Z' AND substr(last_heartbeat_at,1,4)||substr(last_heartbeat_at,6,2)||substr(last_heartbeat_at,9,2)||substr(last_heartbeat_at,12,2)||substr(last_heartbeat_at,15,2)||substr(last_heartbeat_at,18,2)||substr(last_heartbeat_at,21,6) NOT GLOB '*[^0-9]*')),
+  CHECK(stopped_at IS NULL OR (length(stopped_at)=27 AND substr(stopped_at,5,1)='-' AND substr(stopped_at,8,1)='-' AND substr(stopped_at,11,1)='T' AND substr(stopped_at,14,1)=':' AND substr(stopped_at,17,1)=':' AND substr(stopped_at,20,1)='.' AND substr(stopped_at,27,1)='Z' AND substr(stopped_at,1,4)||substr(stopped_at,6,2)||substr(stopped_at,9,2)||substr(stopped_at,12,2)||substr(stopped_at,15,2)||substr(stopped_at,18,2)||substr(stopped_at,21,6) NOT GLOB '*[^0-9]*')),
+  CHECK(stop_reason_code IS NULL OR (length(stop_reason_code) BETWEEN 1 AND 64
+    AND substr(stop_reason_code,1,1) GLOB '[A-Z]'
+    AND stop_reason_code NOT GLOB '*[^A-Z0-9_]*')),
+  CHECK(started_at<=last_heartbeat_at),
+  CHECK((state='ACTIVE' AND stopped_at IS NULL AND stop_reason_code IS NULL)
+    OR (state='STOPPING' AND stopped_at IS NULL AND stop_reason_code IS NOT NULL)
+    OR (state IN ('STOPPED','FAILED') AND stopped_at IS NOT NULL
+      AND stop_reason_code IS NOT NULL AND last_heartbeat_at<=stopped_at))
+);
+CREATE UNIQUE INDEX worker_sessions_session_id_uq ON worker_sessions(session_id);
+CREATE UNIQUE INDEX worker_sessions_one_nonterminal_worker_idx
+  ON worker_sessions(worker_id) WHERE state IN ('ACTIVE','STOPPING');
+CREATE INDEX worker_sessions_state_heartbeat_idx
+  ON worker_sessions(state,last_heartbeat_at,session_sequence);
+
+CREATE TABLE worker_operations (
+  operation_sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+  operation_id TEXT NOT NULL,
+  operation_kind TEXT NOT NULL,
+  command_id TEXT NOT NULL REFERENCES workflow_commands(command_id) ON UPDATE RESTRICT ON DELETE RESTRICT,
+  project_id TEXT NOT NULL,
+  development_run_id TEXT NULL,
+  phase_id TEXT NULL,
+  session_id TEXT NOT NULL REFERENCES worker_sessions(session_id) ON UPDATE RESTRICT ON DELETE RESTRICT,
+  worker_id TEXT NOT NULL,
+  queue_owner_id TEXT NOT NULL,
+  claim_count INTEGER NOT NULL,
+  precondition_state_version INTEGER NOT NULL,
+  state TEXT NOT NULL,
+  state_version INTEGER NOT NULL DEFAULT 1,
+  external_effect_class TEXT NOT NULL DEFAULT 'NONE',
+  reconciliation_status TEXT NOT NULL DEFAULT 'NOT_REQUIRED',
+  durable_failure_code TEXT NULL,
+  diagnostic_detail TEXT NULL,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  started_at TEXT NULL,
+  completed_at TEXT NULL,
+  CHECK(length(operation_id)=36 AND operation_id=lower(operation_id)
+    AND substr(operation_id,9,1)='-' AND substr(operation_id,14,1)='-'
+    AND substr(operation_id,19,1)='-' AND substr(operation_id,24,1)='-'
+    AND length(replace(operation_id,'-',''))=32
+    AND replace(operation_id,'-','') NOT GLOB '*[^0-9a-f]*'
+    AND operation_id<>'00000000-0000-0000-0000-000000000000'),
+  CHECK(operation_kind='COMMAND_HANDLER_INVOCATION'),
+  CHECK(length(worker_id) BETWEEN 1 AND 91
+    AND substr(worker_id,1,1) GLOB '[A-Za-z0-9]'
+    AND worker_id NOT GLOB '*[^A-Za-z0-9._:/-]*'),
+  CHECK(queue_owner_id=worker_id||'@'||session_id AND length(queue_owner_id) BETWEEN 38 AND 128),
+  CHECK(typeof(claim_count)='integer' AND claim_count>=1),
+  CHECK(typeof(precondition_state_version)='integer' AND precondition_state_version>=1),
+  CHECK(state IN ('PREPARED','RUNNING','RESULT_SUCCEEDED','RESULT_FAILED','CANCELLATION_OBSERVED',
+    'SUCCEEDED','FAILED','CANCELLED','CLAIM_RELEASED','LEASE_LOST','RECONCILIATION_REQUIRED')),
+  CHECK(typeof(state_version)='integer' AND state_version>=1),
+  CHECK(external_effect_class='NONE'),
+  CHECK(reconciliation_status IN ('NOT_REQUIRED','REQUIRED')),
+  CHECK(durable_failure_code IS NULL OR durable_failure_code IN (
+    'PAYLOAD_INVALID','VALIDATOR_EXCEPTION','HANDLER_REPORTED_FAILURE','HANDLER_EXCEPTION',
+    'HANDLER_BASE_EXCEPTION','QUEUE_CAS_LOST','LEASE_LOST','CANCELLATION_OBSERVED',
+    'SESSION_FENCED','QUEUE_REPOSITORY_FAILURE','WORKER_REPOSITORY_FAILURE',
+    'MIGRATION_FAILURE','CLEANUP_FAILURE','SHUTDOWN_GRACE_EXPIRED','RECONCILIATION_REQUIRED')),
+  CHECK(diagnostic_detail IS NULL
+    OR (durable_failure_code='HANDLER_EXCEPTION' AND diagnostic_detail IN (
+      'HANDLER_PROTOCOL_ERROR:INVALID_RETURN',
+      'HANDLER_PROTOCOL_ERROR:CANCELLED_WITHOUT_AUTHORITATIVE_CANCELLATION'))
+    OR (durable_failure_code='RECONCILIATION_REQUIRED'
+      AND diagnostic_detail='HANDLER_LOOKUP_MISMATCH:FROZEN_REGISTRY_INVARIANT_LOST')),
+  CHECK(diagnostic_detail IS NULL
+    OR (diagnostic_detail IN (
+      'HANDLER_PROTOCOL_ERROR:INVALID_RETURN',
+      'HANDLER_PROTOCOL_ERROR:CANCELLED_WITHOUT_AUTHORITATIVE_CANCELLATION')
+      AND state IN ('RESULT_FAILED','FAILED'))
+    OR (diagnostic_detail='HANDLER_LOOKUP_MISMATCH:FROZEN_REGISTRY_INVARIANT_LOST'
+      AND state='RECONCILIATION_REQUIRED')),
+  CHECK(state NOT IN ('RESULT_SUCCEEDED','SUCCEEDED')
+    OR (durable_failure_code IS NULL AND diagnostic_detail IS NULL)),
+  CHECK((length(created_at)=27 AND substr(created_at,5,1)='-' AND substr(created_at,8,1)='-' AND substr(created_at,11,1)='T' AND substr(created_at,14,1)=':' AND substr(created_at,17,1)=':' AND substr(created_at,20,1)='.' AND substr(created_at,27,1)='Z' AND substr(created_at,1,4)||substr(created_at,6,2)||substr(created_at,9,2)||substr(created_at,12,2)||substr(created_at,15,2)||substr(created_at,18,2)||substr(created_at,21,6) NOT GLOB '*[^0-9]*')),
+  CHECK((length(updated_at)=27 AND substr(updated_at,5,1)='-' AND substr(updated_at,8,1)='-' AND substr(updated_at,11,1)='T' AND substr(updated_at,14,1)=':' AND substr(updated_at,17,1)=':' AND substr(updated_at,20,1)='.' AND substr(updated_at,27,1)='Z' AND substr(updated_at,1,4)||substr(updated_at,6,2)||substr(updated_at,9,2)||substr(updated_at,12,2)||substr(updated_at,15,2)||substr(updated_at,18,2)||substr(updated_at,21,6) NOT GLOB '*[^0-9]*')),
+  CHECK(started_at IS NULL OR (length(started_at)=27 AND substr(started_at,5,1)='-' AND substr(started_at,8,1)='-' AND substr(started_at,11,1)='T' AND substr(started_at,14,1)=':' AND substr(started_at,17,1)=':' AND substr(started_at,20,1)='.' AND substr(started_at,27,1)='Z' AND substr(started_at,1,4)||substr(started_at,6,2)||substr(started_at,9,2)||substr(started_at,12,2)||substr(started_at,15,2)||substr(started_at,18,2)||substr(started_at,21,6) NOT GLOB '*[^0-9]*')),
+  CHECK(completed_at IS NULL OR (length(completed_at)=27 AND substr(completed_at,5,1)='-' AND substr(completed_at,8,1)='-' AND substr(completed_at,11,1)='T' AND substr(completed_at,14,1)=':' AND substr(completed_at,17,1)=':' AND substr(completed_at,20,1)='.' AND substr(completed_at,27,1)='Z' AND substr(completed_at,1,4)||substr(completed_at,6,2)||substr(completed_at,9,2)||substr(completed_at,12,2)||substr(completed_at,15,2)||substr(completed_at,18,2)||substr(completed_at,21,6) NOT GLOB '*[^0-9]*')),
+  CHECK(created_at<=updated_at),
+  CHECK((state='PREPARED' AND durable_failure_code IS NULL AND diagnostic_detail IS NULL AND started_at IS NULL AND completed_at IS NULL AND reconciliation_status='NOT_REQUIRED')
+    OR (state='RUNNING' AND durable_failure_code IS NULL AND diagnostic_detail IS NULL AND started_at IS NOT NULL AND completed_at IS NULL AND reconciliation_status='NOT_REQUIRED')
+    OR (state='RESULT_SUCCEEDED' AND durable_failure_code IS NULL AND diagnostic_detail IS NULL AND started_at IS NOT NULL AND completed_at IS NULL AND reconciliation_status='NOT_REQUIRED')
+    OR (state IN ('RESULT_FAILED','CANCELLATION_OBSERVED') AND durable_failure_code IS NOT NULL AND started_at IS NOT NULL AND completed_at IS NULL AND reconciliation_status='NOT_REQUIRED')
+    OR (state='SUCCEEDED' AND durable_failure_code IS NULL AND diagnostic_detail IS NULL AND started_at IS NOT NULL AND completed_at=updated_at AND reconciliation_status='NOT_REQUIRED')
+    OR (state='FAILED' AND durable_failure_code IS NOT NULL AND started_at IS NOT NULL AND completed_at=updated_at AND reconciliation_status='NOT_REQUIRED')
+    OR (state='CANCELLED' AND durable_failure_code IS NOT NULL AND completed_at=updated_at AND reconciliation_status='NOT_REQUIRED')
+    OR (state='CLAIM_RELEASED' AND durable_failure_code IS NOT NULL AND started_at IS NULL AND completed_at=updated_at AND reconciliation_status='NOT_REQUIRED')
+    OR (state IN ('LEASE_LOST','RECONCILIATION_REQUIRED') AND durable_failure_code IS NOT NULL AND completed_at=updated_at AND reconciliation_status='REQUIRED')),
+  CHECK(started_at IS NULL OR created_at<=started_at),
+  CHECK(completed_at IS NULL OR started_at IS NULL OR started_at<=completed_at)
+);
+CREATE UNIQUE INDEX worker_operations_operation_id_uq ON worker_operations(operation_id);
+CREATE UNIQUE INDEX worker_operations_command_claim_uq ON worker_operations(command_id,claim_count);
+CREATE INDEX worker_operations_worker_state_sequence_idx
+  ON worker_operations(worker_id,state,operation_sequence);
+"""
+
+
+def _migration_five_statements() -> tuple[str, ...]:
+    return tuple(
+        statement.strip()
+        for statement in _MIGRATION_FIVE_SQL.split(";")
+        if statement.strip()
+    )
+
+
 PRODUCTION_MIGRATIONS = (
     Migration(
         version=1,
@@ -374,6 +510,7 @@ PRODUCTION_MIGRATIONS = (
             """,
         ),
     ),
+    Migration(version=5, statements=_migration_five_statements()),
 )
 
 _FORBIDDEN_OPERATION_TOKENS = frozenset(
@@ -414,13 +551,13 @@ def validate_migration_registry(
         raise MigrationError(MigrationFailureCode.INVALID_REGISTRY, "declared order")
     if versions != list(range(1, len(versions) + 1)):
         raise MigrationError(MigrationFailureCode.INVALID_REGISTRY, "contiguous versions")
-    if require_production_version and versions != [1, 2, 3, 4]:
+    if require_production_version and versions != [1, 2, 3, 4, 5]:
         raise MigrationError(MigrationFailureCode.INVALID_REGISTRY, "production version")
     return registry
 
 
 def initialize_database(database_path: Path, applied_at: str) -> None:
-    """Initialize an explicit production database path through migration version 4."""
+    """Initialize an explicit production database path through migration version 5."""
 
     registry = validate_migration_registry(PRODUCTION_MIGRATIONS, require_production_version=True)
     connection = sqlite3.connect(database_path)

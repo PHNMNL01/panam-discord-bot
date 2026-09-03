@@ -12,6 +12,11 @@ from .models import (
     ProjectPolicy,
     QueueResult,
     ValidatedCommandEnvelope,
+    WorkerJournalResult,
+    WorkerOperationKind,
+    WorkerOperationState,
+    WorkerReconciliationStatus,
+    WorkerSessionState,
     WorkflowCommand,
     WorkflowCommandEvent,
     WorkflowCommandState,
@@ -206,3 +211,96 @@ class WorkflowCommandRepository(Protocol):
         observed_at: str,
         event_id: str,
     ) -> QueueResult: ...
+
+
+class WorkerJournalRepository(Protocol):
+    """Exact durable Worker session and operation journal port."""
+
+    def start_session(
+        self,
+        *,
+        session_id: str,
+        worker_id: str,
+        queue_owner_id: str,
+        started_at: str,
+        stale_before: str,
+    ) -> WorkerJournalResult: ...
+
+    def get_session(self, *, session_id: str) -> WorkerJournalResult: ...
+
+    def heartbeat(
+        self,
+        *,
+        session_id: str,
+        expected_state: WorkerSessionState,
+        expected_state_version: int,
+        observed_at: str,
+        stale_before: str,
+    ) -> WorkerJournalResult: ...
+
+    def transition_session(
+        self,
+        *,
+        session_id: str,
+        expected_state: WorkerSessionState,
+        expected_state_version: int,
+        next_state: WorkerSessionState,
+        reason_code: str,
+        observed_at: str,
+        stale_before: str,
+    ) -> WorkerJournalResult: ...
+
+    def create_operation(
+        self,
+        *,
+        operation_id: str,
+        command: WorkflowCommand,
+        operation_kind: WorkerOperationKind,
+        worker_id: str,
+        session_id: str,
+        queue_owner_id: str,
+        occurred_at: str,
+        stale_before: str,
+    ) -> WorkerJournalResult: ...
+
+    def get_operation_for_claim(
+        self,
+        *,
+        command_id: str,
+        claim_count: int,
+    ) -> WorkerJournalResult: ...
+
+    def transition_operation(
+        self,
+        *,
+        operation_id: str,
+        expected_state: WorkerOperationState,
+        expected_state_version: int,
+        next_state: WorkerOperationState,
+        reconciliation_status: WorkerReconciliationStatus,
+        durable_failure_code: str | None,
+        diagnostic_detail: str | None,
+        occurred_at: str,
+        stale_before: str,
+    ) -> WorkerJournalResult: ...
+
+    def reconcile_operation(
+        self,
+        *,
+        operation_id: str,
+        expected_state: WorkerOperationState,
+        expected_state_version: int,
+        occurred_at: str,
+    ) -> WorkerJournalResult: ...
+
+    def list_nonterminal_operations(
+        self,
+        *,
+        worker_id: str,
+    ) -> WorkerJournalResult: ...
+
+    def list_owned_commands(
+        self,
+        *,
+        worker_id: str,
+    ) -> WorkerJournalResult: ...

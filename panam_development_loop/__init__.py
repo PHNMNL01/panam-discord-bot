@@ -52,6 +52,24 @@ from .models import (
     WorkflowCommandEvent,
     WorkflowCommandEventKind,
     WorkflowCommandState,
+    WorkerSessionState,
+    WorkerOperationKind,
+    WorkerOperationState,
+    WorkerReconciliationStatus,
+    WorkerJournalResultCode,
+    WorkerStartupStatus,
+    WorkerIterationStatus,
+    WorkerHandlerStatus,
+    WorkerCheckpointDirective,
+    WorkerFailureCode,
+    WorkerConfiguration,
+    WorkerSession,
+    WorkerOperationReceipt,
+    WorkerJournalResult,
+    WorkerStartupResult,
+    WorkerIterationResult,
+    WorkerHandlerContext,
+    WorkerHandlerResult,
 )
 from .repositories import (
     ApprovalBindingRepository,
@@ -61,6 +79,7 @@ from .repositories import (
     ProjectPolicyRepository,
     RepositoryError,
     RepositoryFailureCode,
+    WorkerJournalRepository,
     WorkflowCommandRepository,
 )
 from .sqlite_repositories import (
@@ -69,6 +88,7 @@ from .sqlite_repositories import (
     SqliteMilestoneContractRepository,
     SqlitePhaseContractRepository,
     SqliteProjectPolicyRepository,
+    SqliteWorkerJournalRepository,
     SqliteWorkflowCommandRepository,
 )
 from .command_queue import (
@@ -89,6 +109,14 @@ from .project_policy_reader import ProjectPolicyReader
 from .sqlite_store import SqliteRunStore
 from .transition_policy import TransitionPolicy
 from .transition_service import TransitionService
+from .worker import (
+    DevelopmentWorker,
+    WorkerCheckpoint,
+    WorkerCommandHandler,
+    WorkerHandlerEntry,
+    WorkerHandlerRegistry,
+)
+from .worker_main import main
 
 __all__ = [
     "AcceptedStateEvent",
@@ -170,4 +198,30 @@ __all__ = [
     "render_error",
     "render_json",
     "render_text",
+    "WorkerSessionState",
+    "WorkerOperationKind",
+    "WorkerOperationState",
+    "WorkerReconciliationStatus",
+    "WorkerJournalResultCode",
+    "WorkerStartupStatus",
+    "WorkerIterationStatus",
+    "WorkerHandlerStatus",
+    "WorkerCheckpointDirective",
+    "WorkerFailureCode",
+    "WorkerConfiguration",
+    "WorkerSession",
+    "WorkerOperationReceipt",
+    "WorkerJournalResult",
+    "WorkerStartupResult",
+    "WorkerIterationResult",
+    "WorkerHandlerContext",
+    "WorkerHandlerResult",
+    "WorkerCheckpoint",
+    "WorkerCommandHandler",
+    "WorkerHandlerEntry",
+    "WorkerJournalRepository",
+    "SqliteWorkerJournalRepository",
+    "WorkerHandlerRegistry",
+    "DevelopmentWorker",
+    "main",
 ]

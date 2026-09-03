@@ -2,10 +2,12 @@
 
 import hashlib
 import json
+import math
 import re
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from enum import Enum
+from pathlib import Path
 from typing import Optional
 
 
@@ -2023,3 +2025,668 @@ class QueueResult:
             valid = False
         if not valid:
             raise ValueError(code.value)
+
+
+class WorkerSessionState(str, Enum):
+    ACTIVE = "ACTIVE"
+    STOPPING = "STOPPING"
+    STOPPED = "STOPPED"
+    FAILED = "FAILED"
+
+
+class WorkerOperationKind(str, Enum):
+    COMMAND_HANDLER_INVOCATION = "COMMAND_HANDLER_INVOCATION"
+
+
+class WorkerOperationState(str, Enum):
+    PREPARED = "PREPARED"
+    RUNNING = "RUNNING"
+    RESULT_SUCCEEDED = "RESULT_SUCCEEDED"
+    RESULT_FAILED = "RESULT_FAILED"
+    CANCELLATION_OBSERVED = "CANCELLATION_OBSERVED"
+    SUCCEEDED = "SUCCEEDED"
+    FAILED = "FAILED"
+    CANCELLED = "CANCELLED"
+    CLAIM_RELEASED = "CLAIM_RELEASED"
+    LEASE_LOST = "LEASE_LOST"
+    RECONCILIATION_REQUIRED = "RECONCILIATION_REQUIRED"
+
+
+class WorkerReconciliationStatus(str, Enum):
+    NOT_REQUIRED = "NOT_REQUIRED"
+    REQUIRED = "REQUIRED"
+
+
+class WorkerJournalResultCode(str, Enum):
+    APPLIED = "APPLIED"
+    FOUND = "FOUND"
+    NOT_FOUND = "NOT_FOUND"
+    LISTED = "LISTED"
+    CAS_CONFLICT = "CAS_CONFLICT"
+    ACTIVE_SESSION_EXISTS = "ACTIVE_SESSION_EXISTS"
+    STALE_SESSION_RECONCILIATION_REQUIRED = (
+        "STALE_SESSION_RECONCILIATION_REQUIRED"
+    )
+    TERMINAL_OBSERVED = "TERMINAL_OBSERVED"
+    TRANSIENT_CONTENTION = "TRANSIENT_CONTENTION"
+    DATABASE_MISMATCH = "DATABASE_MISMATCH"
+
+
+class WorkerStartupStatus(str, Enum):
+    STARTED_NO_RECOVERY = "STARTED_NO_RECOVERY"
+    STARTED_AFTER_CLAIM_RECOVERY = "STARTED_AFTER_CLAIM_RECOVERY"
+    STARTED_AFTER_TERMINAL_MIRRORING = "STARTED_AFTER_TERMINAL_MIRRORING"
+    STARTED_AFTER_MIXED_RECOVERY = "STARTED_AFTER_MIXED_RECOVERY"
+    CONFIGURATION_INVALID = "CONFIGURATION_INVALID"
+    HANDLER_REGISTRY_EMPTY = "HANDLER_REGISTRY_EMPTY"
+    HANDLER_REGISTRY_INVALID = "HANDLER_REGISTRY_INVALID"
+    HANDLER_REGISTRY_OVERSIZED = "HANDLER_REGISTRY_OVERSIZED"
+    ACTIVE_SESSION_EXISTS = "ACTIVE_SESSION_EXISTS"
+    STALE_SESSION_RECONCILIATION_REQUIRED = (
+        "STALE_SESSION_RECONCILIATION_REQUIRED"
+    )
+    CLAIM_LEASE_ACTIVE_RECONCILIATION_REQUIRED = (
+        "CLAIM_LEASE_ACTIVE_RECONCILIATION_REQUIRED"
+    )
+    AMBIGUOUS_RUNNING = "AMBIGUOUS_RUNNING"
+    CANCELLATION_OWNER_RECONCILIATION_REQUIRED = (
+        "CANCELLATION_OWNER_RECONCILIATION_REQUIRED"
+    )
+    JOURNAL_CONFLICT = "JOURNAL_CONFLICT"
+    DATABASE_MISMATCH = "DATABASE_MISMATCH"
+    MIGRATION_FAILURE = "MIGRATION_FAILURE"
+    PERSISTENCE_FAILURE = "PERSISTENCE_FAILURE"
+
+
+class WorkerIterationStatus(str, Enum):
+    NOT_STARTED = "NOT_STARTED"
+    IDLE = "IDLE"
+    CONTENDED = "CONTENDED"
+    CLAIMED = "CLAIMED"
+    SUCCEEDED = "SUCCEEDED"
+    FAILED = "FAILED"
+    CANCELLED = "CANCELLED"
+    RECONCILIATION_REQUIRED = "RECONCILIATION_REQUIRED"
+    STOPPED = "STOPPED"
+
+
+class WorkerHandlerStatus(str, Enum):
+    SUCCEEDED = "SUCCEEDED"
+    FAILED = "FAILED"
+    CANCELLED = "CANCELLED"
+
+
+class WorkerCheckpointDirective(str, Enum):
+    CONTINUE = "CONTINUE"
+    CANCEL = "CANCEL"
+    STOP = "STOP"
+    LEASE_LOST = "LEASE_LOST"
+    RECONCILIATION_REQUIRED = "RECONCILIATION_REQUIRED"
+
+
+class WorkerFailureCode(str, Enum):
+    PAYLOAD_INVALID = "PAYLOAD_INVALID"
+    VALIDATOR_EXCEPTION = "VALIDATOR_EXCEPTION"
+    HANDLER_REPORTED_FAILURE = "HANDLER_REPORTED_FAILURE"
+    HANDLER_EXCEPTION = "HANDLER_EXCEPTION"
+    HANDLER_BASE_EXCEPTION = "HANDLER_BASE_EXCEPTION"
+    QUEUE_CAS_LOST = "QUEUE_CAS_LOST"
+    LEASE_LOST = "LEASE_LOST"
+    CANCELLATION_OBSERVED = "CANCELLATION_OBSERVED"
+    SESSION_FENCED = "SESSION_FENCED"
+    QUEUE_REPOSITORY_FAILURE = "QUEUE_REPOSITORY_FAILURE"
+    WORKER_REPOSITORY_FAILURE = "WORKER_REPOSITORY_FAILURE"
+    MIGRATION_FAILURE = "MIGRATION_FAILURE"
+    CLEANUP_FAILURE = "CLEANUP_FAILURE"
+    SHUTDOWN_GRACE_EXPIRED = "SHUTDOWN_GRACE_EXPIRED"
+    RECONCILIATION_REQUIRED = "RECONCILIATION_REQUIRED"
+
+
+_WORKER_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/-]{0,90}$")
+_WORKER_RESULT_CODE_PATTERN = re.compile(r"^[A-Z][A-Z0-9_]{0,63}$")
+_WORKER_DIAGNOSTICS = frozenset(
+    {
+        "HANDLER_PROTOCOL_ERROR:INVALID_RETURN",
+        "HANDLER_PROTOCOL_ERROR:CANCELLED_WITHOUT_AUTHORITATIVE_CANCELLATION",
+        "HANDLER_LOOKUP_MISMATCH:FROZEN_REGISTRY_INVARIANT_LOST",
+    }
+)
+_WORKER_TERMINAL_OPERATION_STATES = frozenset(
+    {
+        WorkerOperationState.SUCCEEDED,
+        WorkerOperationState.FAILED,
+        WorkerOperationState.CANCELLED,
+        WorkerOperationState.CLAIM_RELEASED,
+        WorkerOperationState.LEASE_LOST,
+        WorkerOperationState.RECONCILIATION_REQUIRED,
+    }
+)
+_WORKER_RECEIPT_TRANSITIONS = {
+    WorkerOperationState.PREPARED: frozenset(
+        {
+            WorkerOperationState.RUNNING,
+            WorkerOperationState.FAILED,
+            WorkerOperationState.CANCELLED,
+            WorkerOperationState.CLAIM_RELEASED,
+            WorkerOperationState.LEASE_LOST,
+            WorkerOperationState.RECONCILIATION_REQUIRED,
+        }
+    ),
+    WorkerOperationState.RUNNING: frozenset(
+        {
+            WorkerOperationState.RESULT_SUCCEEDED,
+            WorkerOperationState.RESULT_FAILED,
+            WorkerOperationState.CANCELLATION_OBSERVED,
+            WorkerOperationState.LEASE_LOST,
+            WorkerOperationState.RECONCILIATION_REQUIRED,
+        }
+    ),
+    WorkerOperationState.RESULT_SUCCEEDED: frozenset(
+        {
+            WorkerOperationState.SUCCEEDED,
+            WorkerOperationState.CANCELLED,
+            WorkerOperationState.LEASE_LOST,
+            WorkerOperationState.RECONCILIATION_REQUIRED,
+        }
+    ),
+    WorkerOperationState.RESULT_FAILED: frozenset(
+        {
+            WorkerOperationState.FAILED,
+            WorkerOperationState.CANCELLED,
+            WorkerOperationState.LEASE_LOST,
+            WorkerOperationState.RECONCILIATION_REQUIRED,
+        }
+    ),
+    WorkerOperationState.CANCELLATION_OBSERVED: frozenset(
+        {
+            WorkerOperationState.CANCELLED,
+            WorkerOperationState.LEASE_LOST,
+            WorkerOperationState.RECONCILIATION_REQUIRED,
+        }
+    ),
+}
+
+
+def _worker_uuid(value: object, field_name: str) -> str:
+    text = _queue_uuid(value, field_name)
+    if text == "00000000-0000-0000-0000-000000000000":
+        raise ValueError(field_name)
+    return text
+
+
+def _worker_id(value: object, field_name: str = "worker_id") -> str:
+    return _queue_text(value, field_name, _WORKER_ID_PATTERN)
+
+
+def _worker_queue_owner(value: object, worker_id: str, session_id: str) -> str:
+    owner = _queue_text(value, "queue_owner_id", _QUEUE_ACTOR_PATTERN)
+    if owner != f"{worker_id}@{session_id}":
+        raise ValueError("queue_owner_id")
+    return owner
+
+
+def _worker_optional_code(value: object, field_name: str) -> str | None:
+    if value is None:
+        return None
+    return _queue_text(value, field_name, _WORKER_RESULT_CODE_PATTERN)
+
+
+def _worker_float(
+    value: object, field_name: str, minimum: float, maximum: float
+) -> float:
+    if type(value) is not float:
+        raise TypeError(field_name)
+    if not math.isfinite(value) or value < minimum or value > maximum:
+        raise ValueError(field_name)
+    return value
+
+
+def _worker_receipt_code_diagnostic_valid(
+    state: WorkerOperationState,
+    durable_failure_code: str | None,
+    diagnostic_detail: str | None,
+) -> bool:
+    """Mirror the frozen Migration 5 state/code/diagnostic CHECK domain."""
+
+    if type(state) is not WorkerOperationState:
+        return False
+    if durable_failure_code is not None and durable_failure_code not in {
+        code.value for code in WorkerFailureCode
+    }:
+        return False
+    if diagnostic_detail is not None and diagnostic_detail not in _WORKER_DIAGNOSTICS:
+        return False
+    if diagnostic_detail is not None:
+        if diagnostic_detail in {
+            "HANDLER_PROTOCOL_ERROR:INVALID_RETURN",
+            "HANDLER_PROTOCOL_ERROR:CANCELLED_WITHOUT_AUTHORITATIVE_CANCELLATION",
+        }:
+            if durable_failure_code != WorkerFailureCode.HANDLER_EXCEPTION.value:
+                return False
+            if state not in {
+                WorkerOperationState.RESULT_FAILED,
+                WorkerOperationState.FAILED,
+            }:
+                return False
+        elif (
+            durable_failure_code != WorkerFailureCode.RECONCILIATION_REQUIRED.value
+            or state is not WorkerOperationState.RECONCILIATION_REQUIRED
+        ):
+            return False
+    if state in {
+        WorkerOperationState.PREPARED,
+        WorkerOperationState.RUNNING,
+        WorkerOperationState.RESULT_SUCCEEDED,
+        WorkerOperationState.SUCCEEDED,
+    }:
+        return durable_failure_code is None and diagnostic_detail is None
+    return durable_failure_code is not None
+
+
+@dataclass(frozen=True)
+class WorkerConfiguration:
+    database_path: Path
+    worker_id: str
+    poll_interval_seconds: float = 1.0
+    heartbeat_interval_seconds: float = 5.0
+    heartbeat_stale_after_seconds: float = 30.0
+    lease_duration_seconds: int = 60
+    lease_renew_margin_seconds: float = 5.0
+    shutdown_grace_seconds: float = 30.0
+
+    def __post_init__(self) -> None:
+        if type(self.database_path) is not type(Path()):
+            raise TypeError("database_path")
+        _worker_id(self.worker_id)
+        _worker_float(self.poll_interval_seconds, "poll_interval_seconds", 0.01, 60.0)
+        heartbeat = _worker_float(
+            self.heartbeat_interval_seconds,
+            "heartbeat_interval_seconds",
+            0.1,
+            60.0,
+        )
+        stale = _worker_float(
+            self.heartbeat_stale_after_seconds,
+            "heartbeat_stale_after_seconds",
+            0.0,
+            3600.0,
+        )
+        if stale <= 2.0 * heartbeat:
+            raise ValueError("heartbeat_stale_after_seconds")
+        lease = _queue_integer(
+            self.lease_duration_seconds, "lease_duration_seconds", 1, 86_400
+        )
+        margin = _worker_float(
+            self.lease_renew_margin_seconds,
+            "lease_renew_margin_seconds",
+            0.0,
+            86_400.0,
+        )
+        if margin <= 0.0 or margin >= lease:
+            raise ValueError("lease_renew_margin_seconds")
+        _worker_float(
+            self.shutdown_grace_seconds, "shutdown_grace_seconds", 0.0, 300.0
+        )
+
+
+@dataclass(frozen=True)
+class WorkerSession:
+    session_sequence: int
+    session_id: str
+    worker_id: str
+    queue_owner_id: str
+    state: WorkerSessionState
+    state_version: int
+    started_at: str
+    last_heartbeat_at: str
+    stopped_at: str | None = None
+    stop_reason_code: str | None = None
+
+    def __post_init__(self) -> None:
+        _queue_integer(self.session_sequence, "session_sequence", 1, _SIGNED_64_MAX)
+        session_id = _worker_uuid(self.session_id, "session_id")
+        worker_id = _worker_id(self.worker_id)
+        _worker_queue_owner(self.queue_owner_id, worker_id, session_id)
+        if type(self.state) is not WorkerSessionState:
+            raise TypeError("state")
+        _queue_integer(self.state_version, "state_version", 1, _SIGNED_64_MAX)
+        started = _parse_queue_timestamp(self.started_at, "started_at")
+        heartbeat = _parse_queue_timestamp(
+            self.last_heartbeat_at, "last_heartbeat_at"
+        )
+        stopped = (
+            None
+            if self.stopped_at is None
+            else _parse_queue_timestamp(self.stopped_at, "stopped_at")
+        )
+        reason = _worker_optional_code(self.stop_reason_code, "stop_reason_code")
+        if started > heartbeat or (stopped is not None and started > stopped):
+            raise ValueError("session timestamps")
+        if self.state is WorkerSessionState.ACTIVE:
+            valid_shape = stopped is None and reason is None
+        elif self.state is WorkerSessionState.STOPPING:
+            valid_shape = stopped is None and reason is not None
+        else:
+            valid_shape = (
+                stopped is not None and reason is not None and heartbeat <= stopped
+            )
+        if not valid_shape:
+            raise ValueError("session state shape")
+
+
+@dataclass(frozen=True)
+class WorkerOperationReceipt:
+    operation_sequence: int
+    operation_id: str
+    operation_kind: WorkerOperationKind
+    command_id: str
+    project_id: str
+    development_run_id: str | None
+    phase_id: str | None
+    session_id: str
+    worker_id: str
+    queue_owner_id: str
+    claim_count: int
+    precondition_state_version: int
+    state: WorkerOperationState
+    state_version: int
+    external_effect_class: str
+    reconciliation_status: WorkerReconciliationStatus
+    durable_failure_code: str | None
+    diagnostic_detail: str | None
+    created_at: str
+    updated_at: str
+    started_at: str | None
+    completed_at: str | None
+
+    def __post_init__(self) -> None:
+        _queue_integer(
+            self.operation_sequence, "operation_sequence", 1, _SIGNED_64_MAX
+        )
+        _worker_uuid(self.operation_id, "operation_id")
+        if type(self.operation_kind) is not WorkerOperationKind:
+            raise TypeError("operation_kind")
+        _queue_uuid(self.command_id, "command_id")
+        _queue_identity(self.project_id, "project_id")
+        _queue_optional_identity(self.development_run_id, "development_run_id")
+        _queue_optional_identity(self.phase_id, "phase_id")
+        session_id = _worker_uuid(self.session_id, "session_id")
+        worker_id = _worker_id(self.worker_id)
+        _worker_queue_owner(self.queue_owner_id, worker_id, session_id)
+        _queue_integer(self.claim_count, "claim_count", 1, _SIGNED_64_MAX)
+        _queue_integer(
+            self.precondition_state_version,
+            "precondition_state_version",
+            1,
+            _SIGNED_64_MAX,
+        )
+        if type(self.state) is not WorkerOperationState:
+            raise TypeError("state")
+        _queue_integer(self.state_version, "state_version", 1, _SIGNED_64_MAX)
+        if self.external_effect_class != "NONE":
+            raise ValueError("external_effect_class")
+        if type(self.reconciliation_status) is not WorkerReconciliationStatus:
+            raise TypeError("reconciliation_status")
+        if self.durable_failure_code is not None:
+            _worker_optional_code(
+                self.durable_failure_code, "durable_failure_code"
+            )
+        if self.diagnostic_detail is not None and (
+            type(self.diagnostic_detail) is not str
+            or self.diagnostic_detail not in _WORKER_DIAGNOSTICS
+        ):
+            raise ValueError("diagnostic_detail")
+        if not _worker_receipt_code_diagnostic_valid(
+            self.state, self.durable_failure_code, self.diagnostic_detail
+        ):
+            raise ValueError("worker receipt domain")
+        created = _parse_queue_timestamp(self.created_at, "created_at")
+        updated = _parse_queue_timestamp(self.updated_at, "updated_at")
+        started = (
+            None
+            if self.started_at is None
+            else _parse_queue_timestamp(self.started_at, "started_at")
+        )
+        completed = (
+            None
+            if self.completed_at is None
+            else _parse_queue_timestamp(self.completed_at, "completed_at")
+        )
+        if created > updated or (started is not None and created > started):
+            raise ValueError("operation timestamps")
+        if completed is not None and started is not None and started > completed:
+            raise ValueError("completed_at")
+        state = self.state
+        if state is WorkerOperationState.PREPARED:
+            valid_shape = (
+                started is None
+                and completed is None
+                and self.reconciliation_status
+                is WorkerReconciliationStatus.NOT_REQUIRED
+            )
+        elif state in {
+            WorkerOperationState.RUNNING,
+            WorkerOperationState.RESULT_SUCCEEDED,
+        }:
+            valid_shape = (
+                started is not None
+                and completed is None
+                and self.reconciliation_status
+                is WorkerReconciliationStatus.NOT_REQUIRED
+            )
+        elif state in {
+            WorkerOperationState.RESULT_FAILED,
+            WorkerOperationState.CANCELLATION_OBSERVED,
+        }:
+            valid_shape = (
+                started is not None
+                and completed is None
+                and self.reconciliation_status
+                is WorkerReconciliationStatus.NOT_REQUIRED
+            )
+        elif state in {
+            WorkerOperationState.SUCCEEDED,
+            WorkerOperationState.FAILED,
+        }:
+            valid_shape = (
+                started is not None
+                and completed is not None
+                and self.completed_at == self.updated_at
+                and self.reconciliation_status
+                is WorkerReconciliationStatus.NOT_REQUIRED
+            )
+        elif state is WorkerOperationState.CANCELLED:
+            valid_shape = (
+                completed is not None
+                and self.completed_at == self.updated_at
+                and self.reconciliation_status
+                is WorkerReconciliationStatus.NOT_REQUIRED
+            )
+        elif state is WorkerOperationState.CLAIM_RELEASED:
+            valid_shape = (
+                started is None
+                and completed is not None
+                and self.completed_at == self.updated_at
+                and self.reconciliation_status
+                is WorkerReconciliationStatus.NOT_REQUIRED
+            )
+        else:
+            valid_shape = (
+                completed is not None
+                and self.completed_at == self.updated_at
+                and self.reconciliation_status is WorkerReconciliationStatus.REQUIRED
+            )
+        if not valid_shape:
+            raise ValueError("operation state shape")
+
+
+@dataclass(frozen=True)
+class WorkerJournalResult:
+    code: WorkerJournalResultCode
+    session: WorkerSession | None = None
+    operation: WorkerOperationReceipt | None = None
+    operations: tuple[WorkerOperationReceipt, ...] = ()
+    commands: tuple[WorkflowCommand, ...] = ()
+
+    def __post_init__(self) -> None:
+        if type(self.code) is not WorkerJournalResultCode:
+            raise TypeError("code")
+        if self.session is not None and type(self.session) is not WorkerSession:
+            raise TypeError("session")
+        if self.operation is not None and type(self.operation) is not WorkerOperationReceipt:
+            raise TypeError("operation")
+        if type(self.operations) is not tuple or any(
+            type(value) is not WorkerOperationReceipt for value in self.operations
+        ):
+            raise TypeError("operations")
+        if type(self.commands) is not tuple or any(
+            type(value) is not WorkflowCommand for value in self.commands
+        ):
+            raise TypeError("commands")
+        singular_count = int(self.session is not None) + int(self.operation is not None)
+        plural_populated = bool(self.operations) + bool(self.commands)
+        code = self.code
+        if code in {WorkerJournalResultCode.APPLIED, WorkerJournalResultCode.FOUND}:
+            valid = singular_count == 1 and not plural_populated
+        elif code is WorkerJournalResultCode.NOT_FOUND:
+            valid = singular_count == 0 and not plural_populated
+        elif code is WorkerJournalResultCode.LISTED:
+            valid = singular_count == 0 and plural_populated <= 1
+        elif code in {
+            WorkerJournalResultCode.ACTIVE_SESSION_EXISTS,
+            WorkerJournalResultCode.STALE_SESSION_RECONCILIATION_REQUIRED,
+        }:
+            valid = self.session is not None and self.operation is None and not plural_populated
+        elif code is WorkerJournalResultCode.CAS_CONFLICT:
+            valid = singular_count <= 1 and not plural_populated
+        elif code is WorkerJournalResultCode.TERMINAL_OBSERVED:
+            valid = singular_count == 1 and not plural_populated
+        else:
+            valid = singular_count == 0 and not plural_populated
+        if not valid:
+            raise ValueError(code.value)
+
+
+@dataclass(frozen=True)
+class WorkerStartupResult:
+    status: WorkerStartupStatus
+    session: WorkerSession | None = None
+    recovered_claim_count: int = 0
+    mirrored_receipt_count: int = 0
+    detail_code: str | None = None
+
+    def __post_init__(self) -> None:
+        if type(self.status) is not WorkerStartupStatus:
+            raise TypeError("status")
+        if self.session is not None and type(self.session) is not WorkerSession:
+            raise TypeError("session")
+        _queue_integer(
+            self.recovered_claim_count, "recovered_claim_count", 0, _SIGNED_64_MAX
+        )
+        _queue_integer(
+            self.mirrored_receipt_count, "mirrored_receipt_count", 0, _SIGNED_64_MAX
+        )
+        _worker_optional_code(self.detail_code, "detail_code")
+        started = self.status in {
+            WorkerStartupStatus.STARTED_NO_RECOVERY,
+            WorkerStartupStatus.STARTED_AFTER_CLAIM_RECOVERY,
+            WorkerStartupStatus.STARTED_AFTER_TERMINAL_MIRRORING,
+            WorkerStartupStatus.STARTED_AFTER_MIXED_RECOVERY,
+        }
+        observed_session = self.status in {
+            WorkerStartupStatus.ACTIVE_SESSION_EXISTS,
+            WorkerStartupStatus.STALE_SESSION_RECONCILIATION_REQUIRED,
+        }
+        if (started or observed_session) != (self.session is not None):
+            raise ValueError("session")
+        if not started and (
+            self.recovered_claim_count != 0 or self.mirrored_receipt_count != 0
+        ):
+            raise ValueError("startup counts")
+        if self.status is WorkerStartupStatus.STARTED_NO_RECOVERY and (
+            self.recovered_claim_count != 0 or self.mirrored_receipt_count != 0
+        ):
+            raise ValueError("startup counts")
+        if self.status is WorkerStartupStatus.STARTED_AFTER_CLAIM_RECOVERY and (
+            self.recovered_claim_count < 1 or self.mirrored_receipt_count != 0
+        ):
+            raise ValueError("startup counts")
+        if self.status is WorkerStartupStatus.STARTED_AFTER_TERMINAL_MIRRORING and (
+            self.recovered_claim_count != 0 or self.mirrored_receipt_count < 1
+        ):
+            raise ValueError("startup counts")
+        if self.status is WorkerStartupStatus.STARTED_AFTER_MIXED_RECOVERY and (
+            self.recovered_claim_count < 1 or self.mirrored_receipt_count < 1
+        ):
+            raise ValueError("startup counts")
+
+
+@dataclass(frozen=True)
+class WorkerIterationResult:
+    status: WorkerIterationStatus
+    command_id: str | None = None
+    operation_id: str | None = None
+    detail_code: str | None = None
+
+    def __post_init__(self) -> None:
+        if type(self.status) is not WorkerIterationStatus:
+            raise TypeError("status")
+        if self.command_id is not None:
+            _queue_uuid(self.command_id, "command_id")
+        if self.operation_id is not None:
+            _worker_uuid(self.operation_id, "operation_id")
+        _worker_optional_code(self.detail_code, "detail_code")
+        carries_operation = self.status in {
+            WorkerIterationStatus.CLAIMED,
+            WorkerIterationStatus.SUCCEEDED,
+            WorkerIterationStatus.FAILED,
+            WorkerIterationStatus.CANCELLED,
+            WorkerIterationStatus.RECONCILIATION_REQUIRED,
+        }
+        if carries_operation != (
+            self.command_id is not None and self.operation_id is not None
+        ):
+            raise ValueError("iteration payload")
+
+
+@dataclass(frozen=True)
+class WorkerHandlerContext:
+    command: WorkflowCommand
+    worker_id: str
+    session_id: str
+    queue_owner_id: str
+    checkpoint: "WorkerCheckpoint"
+
+    def __post_init__(self) -> None:
+        if type(self.command) is not WorkflowCommand:
+            raise TypeError("command")
+        worker_id = _worker_id(self.worker_id)
+        session_id = _worker_uuid(self.session_id, "session_id")
+        _worker_queue_owner(self.queue_owner_id, worker_id, session_id)
+        # Import locally to avoid a module-load cycle while requiring the exact
+        # Worker-owned capability rather than a structural callable substitute.
+        from .worker import _is_worker_checkpoint
+
+        if not _is_worker_checkpoint(self.checkpoint):
+            raise TypeError("checkpoint")
+
+
+@dataclass(frozen=True)
+class WorkerHandlerResult:
+    status: WorkerHandlerStatus
+    result_code: str
+
+    def __post_init__(self) -> None:
+        if type(self.status) is not WorkerHandlerStatus:
+            raise TypeError("status")
+        result_code = _queue_text(
+            self.result_code, "result_code", _WORKER_RESULT_CODE_PATTERN
+        )
+        if self.status is WorkerHandlerStatus.SUCCEEDED:
+            valid = result_code == "SUCCESS"
+        elif self.status is WorkerHandlerStatus.CANCELLED:
+            valid = result_code == "CANCELLED"
+        else:
+            valid = result_code not in {"SUCCESS", "CANCELLED"}
+        if not valid:
+            raise ValueError("result_code")
