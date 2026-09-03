@@ -10,6 +10,16 @@ from .models import (
     MilestoneContract,
     PhaseContract,
     ProjectPolicy,
+    QueueResult,
+    ValidatedCommandEnvelope,
+    WorkerJournalResult,
+    WorkerOperationKind,
+    WorkerOperationState,
+    WorkerReconciliationStatus,
+    WorkerSessionState,
+    WorkflowCommand,
+    WorkflowCommandEvent,
+    WorkflowCommandState,
 )
 
 
@@ -84,3 +94,213 @@ class DevelopmentRunInspectionRepository(Protocol):
     def get_run(self, run_id: str) -> DevelopmentRun | None: ...
 
     def get_history(self, run_id: str) -> list[AcceptedStateEvent]: ...
+
+
+class WorkflowCommandRepository(Protocol):
+    def enqueue(
+        self,
+        *,
+        command_id: str,
+        event_id: str,
+        envelope: ValidatedCommandEnvelope,
+        actor_id: str,
+        occurred_at: str,
+    ) -> QueueResult: ...
+
+    def get(self, command_id: str) -> WorkflowCommand | None: ...
+
+    def list_project(self, project_id: str) -> tuple[WorkflowCommand, ...]: ...
+
+    def history(self, command_id: str) -> tuple[WorkflowCommandEvent, ...] | None: ...
+
+    def claim_next(
+        self,
+        *,
+        event_id: str,
+        lease_owner: str,
+        lease_acquired_at: str,
+        lease_expires_at: str,
+    ) -> QueueResult: ...
+
+    def claim_next_eligible(
+        self,
+        *,
+        event_id: str,
+        eligible_definition_keys: tuple[tuple[str, int], ...],
+        lease_owner: str,
+        lease_acquired_at: str,
+        lease_expires_at: str,
+    ) -> QueueResult: ...
+
+    def renew_lease(
+        self,
+        *,
+        command_id: str,
+        expected_state: WorkflowCommandState,
+        expected_state_version: int,
+        lease_owner: str,
+        observed_at: str,
+        lease_expires_at: str,
+        event_id: str,
+    ) -> QueueResult: ...
+
+    def mark_running(
+        self,
+        *,
+        command_id: str,
+        expected_state: WorkflowCommandState,
+        expected_state_version: int,
+        lease_owner: str,
+        occurred_at: str,
+        event_id: str,
+    ) -> QueueResult: ...
+
+    def request_cancellation(
+        self,
+        *,
+        command_id: str,
+        expected_state: WorkflowCommandState,
+        expected_state_version: int,
+        requested_by: str,
+        reason_code: str,
+        occurred_at: str,
+        event_id: str,
+    ) -> QueueResult: ...
+
+    def acknowledge_cancellation(
+        self,
+        *,
+        command_id: str,
+        expected_state: WorkflowCommandState,
+        expected_state_version: int,
+        lease_owner: str,
+        observed_at: str,
+        event_id: str,
+    ) -> QueueResult: ...
+
+    def mark_succeeded(
+        self,
+        *,
+        command_id: str,
+        expected_state: WorkflowCommandState,
+        expected_state_version: int,
+        lease_owner: str,
+        observed_at: str,
+        event_id: str,
+    ) -> QueueResult: ...
+
+    def mark_failed(
+        self,
+        *,
+        command_id: str,
+        expected_state: WorkflowCommandState,
+        expected_state_version: int,
+        lease_owner: str,
+        failure_code: str,
+        observed_at: str,
+        event_id: str,
+    ) -> QueueResult: ...
+
+    def recover_expired_claim(
+        self,
+        *,
+        command_id: str,
+        expected_state: WorkflowCommandState,
+        expected_state_version: int,
+        recovery_actor: str,
+        observed_at: str,
+        event_id: str,
+    ) -> QueueResult: ...
+
+
+class WorkerJournalRepository(Protocol):
+    """Exact durable Worker session and operation journal port."""
+
+    def start_session(
+        self,
+        *,
+        session_id: str,
+        worker_id: str,
+        queue_owner_id: str,
+        started_at: str,
+        stale_before: str,
+    ) -> WorkerJournalResult: ...
+
+    def get_session(self, *, session_id: str) -> WorkerJournalResult: ...
+
+    def heartbeat(
+        self,
+        *,
+        session_id: str,
+        expected_state: WorkerSessionState,
+        expected_state_version: int,
+        observed_at: str,
+        stale_before: str,
+    ) -> WorkerJournalResult: ...
+
+    def transition_session(
+        self,
+        *,
+        session_id: str,
+        expected_state: WorkerSessionState,
+        expected_state_version: int,
+        next_state: WorkerSessionState,
+        reason_code: str,
+        observed_at: str,
+        stale_before: str,
+    ) -> WorkerJournalResult: ...
+
+    def create_operation(
+        self,
+        *,
+        operation_id: str,
+        command: WorkflowCommand,
+        operation_kind: WorkerOperationKind,
+        worker_id: str,
+        session_id: str,
+        queue_owner_id: str,
+        occurred_at: str,
+        stale_before: str,
+    ) -> WorkerJournalResult: ...
+
+    def get_operation_for_claim(
+        self,
+        *,
+        command_id: str,
+        claim_count: int,
+    ) -> WorkerJournalResult: ...
+
+    def transition_operation(
+        self,
+        *,
+        operation_id: str,
+        expected_state: WorkerOperationState,
+        expected_state_version: int,
+        next_state: WorkerOperationState,
+        reconciliation_status: WorkerReconciliationStatus,
+        durable_failure_code: str | None,
+        diagnostic_detail: str | None,
+        occurred_at: str,
+        stale_before: str,
+    ) -> WorkerJournalResult: ...
+
+    def reconcile_operation(
+        self,
+        *,
+        operation_id: str,
+        expected_state: WorkerOperationState,
+        expected_state_version: int,
+        occurred_at: str,
+    ) -> WorkerJournalResult: ...
+
+    def list_nonterminal_operations(
+        self,
+        *,
+        worker_id: str,
+    ) -> WorkerJournalResult: ...
+
+    def list_owned_commands(
+        self,
+        *,
+        worker_id: str,
+    ) -> WorkerJournalResult: ...

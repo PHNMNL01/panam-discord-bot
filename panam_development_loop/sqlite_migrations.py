@@ -1,4 +1,4 @@
-"""Internal controlled SQLite migration support through the DL-P1.8 schema."""
+"""Internal controlled SQLite migration support through the DL-2.1 schema."""
 
 import re
 import sqlite3
@@ -31,6 +31,142 @@ class Migration:
 
     version: int
     statements: tuple[str, ...]
+
+
+# This buffer is the byte-for-byte accepted Revision 011 Migration 5 payload.
+# Keep it unindented and LF-terminated; executable statements are derived from it.
+_MIGRATION_FIVE_SQL = """CREATE TABLE worker_sessions (
+  session_sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+  session_id TEXT NOT NULL,
+  worker_id TEXT NOT NULL,
+  queue_owner_id TEXT NOT NULL,
+  state TEXT NOT NULL,
+  state_version INTEGER NOT NULL DEFAULT 1,
+  started_at TEXT NOT NULL,
+  last_heartbeat_at TEXT NOT NULL,
+  stopped_at TEXT NULL,
+  stop_reason_code TEXT NULL,
+  CHECK(length(session_id)=36 AND session_id=lower(session_id)
+    AND substr(session_id,9,1)='-' AND substr(session_id,14,1)='-'
+    AND substr(session_id,19,1)='-' AND substr(session_id,24,1)='-'
+    AND length(replace(session_id,'-',''))=32
+    AND replace(session_id,'-','') NOT GLOB '*[^0-9a-f]*'
+    AND session_id<>'00000000-0000-0000-0000-000000000000'),
+  CHECK(length(worker_id) BETWEEN 1 AND 91
+    AND substr(worker_id,1,1) GLOB '[A-Za-z0-9]'
+    AND worker_id NOT GLOB '*[^A-Za-z0-9._:/-]*'),
+  CHECK(queue_owner_id=worker_id||'@'||session_id AND length(queue_owner_id) BETWEEN 38 AND 128),
+  CHECK(state IN ('ACTIVE','STOPPING','STOPPED','FAILED')),
+  CHECK(typeof(state_version)='integer' AND state_version>=1),
+  CHECK((length(started_at)=27 AND substr(started_at,5,1)='-' AND substr(started_at,8,1)='-' AND substr(started_at,11,1)='T' AND substr(started_at,14,1)=':' AND substr(started_at,17,1)=':' AND substr(started_at,20,1)='.' AND substr(started_at,27,1)='Z' AND substr(started_at,1,4)||substr(started_at,6,2)||substr(started_at,9,2)||substr(started_at,12,2)||substr(started_at,15,2)||substr(started_at,18,2)||substr(started_at,21,6) NOT GLOB '*[^0-9]*')),
+  CHECK((length(last_heartbeat_at)=27 AND substr(last_heartbeat_at,5,1)='-' AND substr(last_heartbeat_at,8,1)='-' AND substr(last_heartbeat_at,11,1)='T' AND substr(last_heartbeat_at,14,1)=':' AND substr(last_heartbeat_at,17,1)=':' AND substr(last_heartbeat_at,20,1)='.' AND substr(last_heartbeat_at,27,1)='Z' AND substr(last_heartbeat_at,1,4)||substr(last_heartbeat_at,6,2)||substr(last_heartbeat_at,9,2)||substr(last_heartbeat_at,12,2)||substr(last_heartbeat_at,15,2)||substr(last_heartbeat_at,18,2)||substr(last_heartbeat_at,21,6) NOT GLOB '*[^0-9]*')),
+  CHECK(stopped_at IS NULL OR (length(stopped_at)=27 AND substr(stopped_at,5,1)='-' AND substr(stopped_at,8,1)='-' AND substr(stopped_at,11,1)='T' AND substr(stopped_at,14,1)=':' AND substr(stopped_at,17,1)=':' AND substr(stopped_at,20,1)='.' AND substr(stopped_at,27,1)='Z' AND substr(stopped_at,1,4)||substr(stopped_at,6,2)||substr(stopped_at,9,2)||substr(stopped_at,12,2)||substr(stopped_at,15,2)||substr(stopped_at,18,2)||substr(stopped_at,21,6) NOT GLOB '*[^0-9]*')),
+  CHECK(stop_reason_code IS NULL OR (length(stop_reason_code) BETWEEN 1 AND 64
+    AND substr(stop_reason_code,1,1) GLOB '[A-Z]'
+    AND stop_reason_code NOT GLOB '*[^A-Z0-9_]*')),
+  CHECK(started_at<=last_heartbeat_at),
+  CHECK((state='ACTIVE' AND stopped_at IS NULL AND stop_reason_code IS NULL)
+    OR (state='STOPPING' AND stopped_at IS NULL AND stop_reason_code IS NOT NULL)
+    OR (state IN ('STOPPED','FAILED') AND stopped_at IS NOT NULL
+      AND stop_reason_code IS NOT NULL AND last_heartbeat_at<=stopped_at))
+);
+CREATE UNIQUE INDEX worker_sessions_session_id_uq ON worker_sessions(session_id);
+CREATE UNIQUE INDEX worker_sessions_one_nonterminal_worker_idx
+  ON worker_sessions(worker_id) WHERE state IN ('ACTIVE','STOPPING');
+CREATE INDEX worker_sessions_state_heartbeat_idx
+  ON worker_sessions(state,last_heartbeat_at,session_sequence);
+
+CREATE TABLE worker_operations (
+  operation_sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+  operation_id TEXT NOT NULL,
+  operation_kind TEXT NOT NULL,
+  command_id TEXT NOT NULL REFERENCES workflow_commands(command_id) ON UPDATE RESTRICT ON DELETE RESTRICT,
+  project_id TEXT NOT NULL,
+  development_run_id TEXT NULL,
+  phase_id TEXT NULL,
+  session_id TEXT NOT NULL REFERENCES worker_sessions(session_id) ON UPDATE RESTRICT ON DELETE RESTRICT,
+  worker_id TEXT NOT NULL,
+  queue_owner_id TEXT NOT NULL,
+  claim_count INTEGER NOT NULL,
+  precondition_state_version INTEGER NOT NULL,
+  state TEXT NOT NULL,
+  state_version INTEGER NOT NULL DEFAULT 1,
+  external_effect_class TEXT NOT NULL DEFAULT 'NONE',
+  reconciliation_status TEXT NOT NULL DEFAULT 'NOT_REQUIRED',
+  durable_failure_code TEXT NULL,
+  diagnostic_detail TEXT NULL,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  started_at TEXT NULL,
+  completed_at TEXT NULL,
+  CHECK(length(operation_id)=36 AND operation_id=lower(operation_id)
+    AND substr(operation_id,9,1)='-' AND substr(operation_id,14,1)='-'
+    AND substr(operation_id,19,1)='-' AND substr(operation_id,24,1)='-'
+    AND length(replace(operation_id,'-',''))=32
+    AND replace(operation_id,'-','') NOT GLOB '*[^0-9a-f]*'
+    AND operation_id<>'00000000-0000-0000-0000-000000000000'),
+  CHECK(operation_kind='COMMAND_HANDLER_INVOCATION'),
+  CHECK(length(worker_id) BETWEEN 1 AND 91
+    AND substr(worker_id,1,1) GLOB '[A-Za-z0-9]'
+    AND worker_id NOT GLOB '*[^A-Za-z0-9._:/-]*'),
+  CHECK(queue_owner_id=worker_id||'@'||session_id AND length(queue_owner_id) BETWEEN 38 AND 128),
+  CHECK(typeof(claim_count)='integer' AND claim_count>=1),
+  CHECK(typeof(precondition_state_version)='integer' AND precondition_state_version>=1),
+  CHECK(state IN ('PREPARED','RUNNING','RESULT_SUCCEEDED','RESULT_FAILED','CANCELLATION_OBSERVED',
+    'SUCCEEDED','FAILED','CANCELLED','CLAIM_RELEASED','LEASE_LOST','RECONCILIATION_REQUIRED')),
+  CHECK(typeof(state_version)='integer' AND state_version>=1),
+  CHECK(external_effect_class='NONE'),
+  CHECK(reconciliation_status IN ('NOT_REQUIRED','REQUIRED')),
+  CHECK(durable_failure_code IS NULL OR durable_failure_code IN (
+    'PAYLOAD_INVALID','VALIDATOR_EXCEPTION','HANDLER_REPORTED_FAILURE','HANDLER_EXCEPTION',
+    'HANDLER_BASE_EXCEPTION','QUEUE_CAS_LOST','LEASE_LOST','CANCELLATION_OBSERVED',
+    'SESSION_FENCED','QUEUE_REPOSITORY_FAILURE','WORKER_REPOSITORY_FAILURE',
+    'MIGRATION_FAILURE','CLEANUP_FAILURE','SHUTDOWN_GRACE_EXPIRED','RECONCILIATION_REQUIRED')),
+  CHECK(diagnostic_detail IS NULL
+    OR (durable_failure_code='HANDLER_EXCEPTION' AND diagnostic_detail IN (
+      'HANDLER_PROTOCOL_ERROR:INVALID_RETURN',
+      'HANDLER_PROTOCOL_ERROR:CANCELLED_WITHOUT_AUTHORITATIVE_CANCELLATION'))
+    OR (durable_failure_code='RECONCILIATION_REQUIRED'
+      AND diagnostic_detail='HANDLER_LOOKUP_MISMATCH:FROZEN_REGISTRY_INVARIANT_LOST')),
+  CHECK(diagnostic_detail IS NULL
+    OR (diagnostic_detail IN (
+      'HANDLER_PROTOCOL_ERROR:INVALID_RETURN',
+      'HANDLER_PROTOCOL_ERROR:CANCELLED_WITHOUT_AUTHORITATIVE_CANCELLATION')
+      AND state IN ('RESULT_FAILED','FAILED'))
+    OR (diagnostic_detail='HANDLER_LOOKUP_MISMATCH:FROZEN_REGISTRY_INVARIANT_LOST'
+      AND state='RECONCILIATION_REQUIRED')),
+  CHECK(state NOT IN ('RESULT_SUCCEEDED','SUCCEEDED')
+    OR (durable_failure_code IS NULL AND diagnostic_detail IS NULL)),
+  CHECK((length(created_at)=27 AND substr(created_at,5,1)='-' AND substr(created_at,8,1)='-' AND substr(created_at,11,1)='T' AND substr(created_at,14,1)=':' AND substr(created_at,17,1)=':' AND substr(created_at,20,1)='.' AND substr(created_at,27,1)='Z' AND substr(created_at,1,4)||substr(created_at,6,2)||substr(created_at,9,2)||substr(created_at,12,2)||substr(created_at,15,2)||substr(created_at,18,2)||substr(created_at,21,6) NOT GLOB '*[^0-9]*')),
+  CHECK((length(updated_at)=27 AND substr(updated_at,5,1)='-' AND substr(updated_at,8,1)='-' AND substr(updated_at,11,1)='T' AND substr(updated_at,14,1)=':' AND substr(updated_at,17,1)=':' AND substr(updated_at,20,1)='.' AND substr(updated_at,27,1)='Z' AND substr(updated_at,1,4)||substr(updated_at,6,2)||substr(updated_at,9,2)||substr(updated_at,12,2)||substr(updated_at,15,2)||substr(updated_at,18,2)||substr(updated_at,21,6) NOT GLOB '*[^0-9]*')),
+  CHECK(started_at IS NULL OR (length(started_at)=27 AND substr(started_at,5,1)='-' AND substr(started_at,8,1)='-' AND substr(started_at,11,1)='T' AND substr(started_at,14,1)=':' AND substr(started_at,17,1)=':' AND substr(started_at,20,1)='.' AND substr(started_at,27,1)='Z' AND substr(started_at,1,4)||substr(started_at,6,2)||substr(started_at,9,2)||substr(started_at,12,2)||substr(started_at,15,2)||substr(started_at,18,2)||substr(started_at,21,6) NOT GLOB '*[^0-9]*')),
+  CHECK(completed_at IS NULL OR (length(completed_at)=27 AND substr(completed_at,5,1)='-' AND substr(completed_at,8,1)='-' AND substr(completed_at,11,1)='T' AND substr(completed_at,14,1)=':' AND substr(completed_at,17,1)=':' AND substr(completed_at,20,1)='.' AND substr(completed_at,27,1)='Z' AND substr(completed_at,1,4)||substr(completed_at,6,2)||substr(completed_at,9,2)||substr(completed_at,12,2)||substr(completed_at,15,2)||substr(completed_at,18,2)||substr(completed_at,21,6) NOT GLOB '*[^0-9]*')),
+  CHECK(created_at<=updated_at),
+  CHECK((state='PREPARED' AND durable_failure_code IS NULL AND diagnostic_detail IS NULL AND started_at IS NULL AND completed_at IS NULL AND reconciliation_status='NOT_REQUIRED')
+    OR (state='RUNNING' AND durable_failure_code IS NULL AND diagnostic_detail IS NULL AND started_at IS NOT NULL AND completed_at IS NULL AND reconciliation_status='NOT_REQUIRED')
+    OR (state='RESULT_SUCCEEDED' AND durable_failure_code IS NULL AND diagnostic_detail IS NULL AND started_at IS NOT NULL AND completed_at IS NULL AND reconciliation_status='NOT_REQUIRED')
+    OR (state IN ('RESULT_FAILED','CANCELLATION_OBSERVED') AND durable_failure_code IS NOT NULL AND started_at IS NOT NULL AND completed_at IS NULL AND reconciliation_status='NOT_REQUIRED')
+    OR (state='SUCCEEDED' AND durable_failure_code IS NULL AND diagnostic_detail IS NULL AND started_at IS NOT NULL AND completed_at=updated_at AND reconciliation_status='NOT_REQUIRED')
+    OR (state='FAILED' AND durable_failure_code IS NOT NULL AND started_at IS NOT NULL AND completed_at=updated_at AND reconciliation_status='NOT_REQUIRED')
+    OR (state='CANCELLED' AND durable_failure_code IS NOT NULL AND completed_at=updated_at AND reconciliation_status='NOT_REQUIRED')
+    OR (state='CLAIM_RELEASED' AND durable_failure_code IS NOT NULL AND started_at IS NULL AND completed_at=updated_at AND reconciliation_status='NOT_REQUIRED')
+    OR (state IN ('LEASE_LOST','RECONCILIATION_REQUIRED') AND durable_failure_code IS NOT NULL AND completed_at=updated_at AND reconciliation_status='REQUIRED')),
+  CHECK(started_at IS NULL OR created_at<=started_at),
+  CHECK(completed_at IS NULL OR started_at IS NULL OR started_at<=completed_at)
+);
+CREATE UNIQUE INDEX worker_operations_operation_id_uq ON worker_operations(operation_id);
+CREATE UNIQUE INDEX worker_operations_command_claim_uq ON worker_operations(command_id,claim_count);
+CREATE INDEX worker_operations_worker_state_sequence_idx
+  ON worker_operations(worker_id,state,operation_sequence);
+"""
+
+
+def _migration_five_statements() -> tuple[str, ...]:
+    return tuple(
+        statement.strip()
+        for statement in _MIGRATION_FIVE_SQL.split(";")
+        if statement.strip()
+    )
 
 
 PRODUCTION_MIGRATIONS = (
@@ -140,6 +276,241 @@ PRODUCTION_MIGRATIONS = (
             """,
         ),
     ),
+    Migration(
+        version=4,
+        statements=(
+            """
+            CREATE TABLE workflow_commands (
+                queue_sequence INTEGER PRIMARY KEY AUTOINCREMENT
+                    CHECK(queue_sequence > 0),
+                command_id TEXT NOT NULL UNIQUE
+                    CHECK(length(command_id) = 36
+                          AND substr(command_id, 9, 1) = '-'
+                          AND substr(command_id, 14, 1) = '-'
+                          AND substr(command_id, 19, 1) = '-'
+                          AND substr(command_id, 24, 1) = '-'
+                          AND length(replace(command_id, '-', '')) = 32
+                          AND command_id NOT GLOB '*[^0-9a-f-]*'),
+                project_id TEXT NOT NULL
+                    CHECK(length(CAST(project_id AS BLOB)) BETWEEN 1 AND 256),
+                development_run_id TEXT NULL
+                    CHECK(development_run_id IS NULL OR
+                          length(CAST(development_run_id AS BLOB)) BETWEEN 1 AND 256),
+                phase_id TEXT NULL
+                    CHECK(phase_id IS NULL OR
+                          length(CAST(phase_id AS BLOB)) BETWEEN 1 AND 256),
+                command_kind TEXT NOT NULL
+                    CHECK(length(command_kind) BETWEEN 1 AND 64
+                          AND substr(command_kind, 1, 1) GLOB '[A-Z]'
+                          AND command_kind NOT GLOB '*[^A-Z0-9_]*'),
+                command_schema_version INTEGER NOT NULL
+                    CHECK(command_schema_version BETWEEN 1 AND 2147483647),
+                payload_json TEXT NOT NULL
+                    CHECK(length(CAST(payload_json AS BLOB)) BETWEEN 2 AND 65536),
+                intent_digest TEXT NOT NULL
+                    CHECK(length(intent_digest) = 64
+                          AND intent_digest NOT GLOB '*[^0-9a-f]*'),
+                idempotency_key TEXT NOT NULL
+                    CHECK(length(idempotency_key) BETWEEN 1 AND 128
+                          AND substr(idempotency_key, 1, 1) GLOB '[A-Za-z0-9]'
+                          AND idempotency_key NOT GLOB '*[^A-Za-z0-9._:/-]*'),
+                priority INTEGER NOT NULL DEFAULT 0
+                    CHECK(priority BETWEEN 0 AND 100),
+                state TEXT NOT NULL
+                    CHECK(state IN ('PENDING','CLAIMED','RUNNING','SUCCEEDED','FAILED','CANCELLED')),
+                state_version INTEGER NOT NULL
+                    CHECK(state_version BETWEEN 1 AND 9223372036854775807),
+                claim_count INTEGER NOT NULL DEFAULT 0
+                    CHECK(claim_count BETWEEN 0 AND 9223372036854775807),
+                lease_owner TEXT NULL
+                    CHECK(lease_owner IS NULL OR
+                          (length(lease_owner) BETWEEN 1 AND 128
+                           AND substr(lease_owner, 1, 1) GLOB '[A-Za-z0-9]'
+                           AND lease_owner NOT GLOB '*[^A-Za-z0-9._:@/-]*')),
+                lease_acquired_at TEXT NULL,
+                lease_expires_at TEXT NULL,
+                cancellation_requested_at TEXT NULL,
+                cancellation_requested_by TEXT NULL
+                    CHECK(cancellation_requested_by IS NULL OR
+                          (length(cancellation_requested_by) BETWEEN 1 AND 128
+                           AND substr(cancellation_requested_by, 1, 1) GLOB '[A-Za-z0-9]'
+                           AND cancellation_requested_by NOT GLOB '*[^A-Za-z0-9._:@/-]*')),
+                cancellation_reason_code TEXT NULL
+                    CHECK(cancellation_reason_code IS NULL OR
+                          (length(cancellation_reason_code) BETWEEN 1 AND 64
+                           AND substr(cancellation_reason_code, 1, 1) GLOB '[A-Z]'
+                           AND cancellation_reason_code NOT GLOB '*[^A-Z0-9_]*')),
+                failure_code TEXT NULL
+                    CHECK(failure_code IS NULL OR
+                          (length(failure_code) BETWEEN 1 AND 64
+                           AND substr(failure_code, 1, 1) GLOB '[A-Z]'
+                           AND failure_code NOT GLOB '*[^A-Z0-9_]*')),
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                started_at TEXT NULL,
+                completed_at TEXT NULL,
+                UNIQUE(project_id, idempotency_key),
+                FOREIGN KEY(development_run_id) REFERENCES development_runs(run_id)
+                    ON UPDATE RESTRICT ON DELETE RESTRICT,
+                FOREIGN KEY(project_id, phase_id) REFERENCES phases(project_id, phase_id)
+                    ON UPDATE RESTRICT ON DELETE RESTRICT,
+                CHECK((state IN ('CLAIMED','RUNNING')) =
+                      (lease_owner IS NOT NULL AND lease_acquired_at IS NOT NULL
+                       AND lease_expires_at IS NOT NULL)),
+                CHECK((state IN ('CLAIMED','RUNNING')) OR
+                      (lease_owner IS NULL AND lease_acquired_at IS NULL
+                       AND lease_expires_at IS NULL)),
+                CHECK(lease_acquired_at IS NULL OR lease_acquired_at < lease_expires_at),
+                CHECK((cancellation_requested_at IS NULL
+                       AND cancellation_requested_by IS NULL
+                       AND cancellation_reason_code IS NULL)
+                      OR
+                      (cancellation_requested_at IS NOT NULL
+                       AND cancellation_requested_by IS NOT NULL
+                       AND cancellation_reason_code IS NOT NULL)),
+                CHECK(state != 'PENDING' OR cancellation_requested_at IS NULL),
+                CHECK(state != 'CANCELLED' OR cancellation_requested_at IS NOT NULL),
+                CHECK((state = 'FAILED') = (failure_code IS NOT NULL)),
+                CHECK(state NOT IN ('PENDING','CLAIMED') OR started_at IS NULL),
+                CHECK(state NOT IN ('RUNNING','SUCCEEDED','FAILED') OR started_at IS NOT NULL),
+                CHECK((state IN ('SUCCEEDED','FAILED','CANCELLED')) = (completed_at IS NOT NULL)),
+                CHECK(updated_at >= created_at),
+                CHECK(started_at IS NULL OR started_at >= created_at),
+                CHECK(completed_at IS NULL OR completed_at >= created_at),
+                CHECK(completed_at IS NULL OR started_at IS NULL OR completed_at >= started_at),
+                CHECK(cancellation_requested_at IS NULL OR cancellation_requested_at >= created_at),
+                CHECK(length(created_at) = 27 AND substr(created_at,5,1)='-'
+                      AND substr(created_at,8,1)='-' AND substr(created_at,11,1)='T'
+                      AND substr(created_at,14,1)=':' AND substr(created_at,17,1)=':'
+                      AND substr(created_at,20,1)='.' AND substr(created_at,27,1)='Z'
+                      AND length(replace(replace(replace(replace(replace(created_at,'-',''),'T',''),':',''),'.',''),'Z',''))=20
+                      AND replace(replace(replace(replace(replace(created_at,'-',''),'T',''),':',''),'.',''),'Z','') NOT GLOB '*[^0-9]*'),
+                CHECK(length(updated_at) = 27 AND substr(updated_at,5,1)='-'
+                      AND substr(updated_at,8,1)='-' AND substr(updated_at,11,1)='T'
+                      AND substr(updated_at,14,1)=':' AND substr(updated_at,17,1)=':'
+                      AND substr(updated_at,20,1)='.' AND substr(updated_at,27,1)='Z'
+                      AND length(replace(replace(replace(replace(replace(updated_at,'-',''),'T',''),':',''),'.',''),'Z',''))=20
+                      AND replace(replace(replace(replace(replace(updated_at,'-',''),'T',''),':',''),'.',''),'Z','') NOT GLOB '*[^0-9]*'),
+                CHECK(lease_acquired_at IS NULL OR
+                      (length(lease_acquired_at)=27 AND substr(lease_acquired_at,5,1)='-'
+                       AND substr(lease_acquired_at,8,1)='-' AND substr(lease_acquired_at,11,1)='T'
+                       AND substr(lease_acquired_at,14,1)=':' AND substr(lease_acquired_at,17,1)=':'
+                       AND substr(lease_acquired_at,20,1)='.' AND substr(lease_acquired_at,27,1)='Z'
+                       AND length(replace(replace(replace(replace(replace(lease_acquired_at,'-',''),'T',''),':',''),'.',''),'Z',''))=20
+                       AND replace(replace(replace(replace(replace(lease_acquired_at,'-',''),'T',''),':',''),'.',''),'Z','') NOT GLOB '*[^0-9]*')),
+                CHECK(lease_expires_at IS NULL OR
+                      (length(lease_expires_at)=27 AND substr(lease_expires_at,5,1)='-'
+                       AND substr(lease_expires_at,8,1)='-' AND substr(lease_expires_at,11,1)='T'
+                       AND substr(lease_expires_at,14,1)=':' AND substr(lease_expires_at,17,1)=':'
+                       AND substr(lease_expires_at,20,1)='.' AND substr(lease_expires_at,27,1)='Z'
+                       AND length(replace(replace(replace(replace(replace(lease_expires_at,'-',''),'T',''),':',''),'.',''),'Z',''))=20
+                       AND replace(replace(replace(replace(replace(lease_expires_at,'-',''),'T',''),':',''),'.',''),'Z','') NOT GLOB '*[^0-9]*')),
+                CHECK(cancellation_requested_at IS NULL OR
+                      (length(cancellation_requested_at)=27 AND substr(cancellation_requested_at,5,1)='-'
+                       AND substr(cancellation_requested_at,8,1)='-' AND substr(cancellation_requested_at,11,1)='T'
+                       AND substr(cancellation_requested_at,14,1)=':' AND substr(cancellation_requested_at,17,1)=':'
+                       AND substr(cancellation_requested_at,20,1)='.' AND substr(cancellation_requested_at,27,1)='Z'
+                       AND length(replace(replace(replace(replace(replace(cancellation_requested_at,'-',''),'T',''),':',''),'.',''),'Z',''))=20
+                       AND replace(replace(replace(replace(replace(cancellation_requested_at,'-',''),'T',''),':',''),'.',''),'Z','') NOT GLOB '*[^0-9]*')),
+                CHECK(started_at IS NULL OR
+                      (length(started_at)=27 AND substr(started_at,5,1)='-'
+                       AND substr(started_at,8,1)='-' AND substr(started_at,11,1)='T'
+                       AND substr(started_at,14,1)=':' AND substr(started_at,17,1)=':'
+                       AND substr(started_at,20,1)='.' AND substr(started_at,27,1)='Z'
+                       AND length(replace(replace(replace(replace(replace(started_at,'-',''),'T',''),':',''),'.',''),'Z',''))=20
+                       AND replace(replace(replace(replace(replace(started_at,'-',''),'T',''),':',''),'.',''),'Z','') NOT GLOB '*[^0-9]*')),
+                CHECK(completed_at IS NULL OR
+                      (length(completed_at)=27 AND substr(completed_at,5,1)='-'
+                       AND substr(completed_at,8,1)='-' AND substr(completed_at,11,1)='T'
+                       AND substr(completed_at,14,1)=':' AND substr(completed_at,17,1)=':'
+                       AND substr(completed_at,20,1)='.' AND substr(completed_at,27,1)='Z'
+                       AND length(replace(replace(replace(replace(replace(completed_at,'-',''),'T',''),':',''),'.',''),'Z',''))=20
+                       AND replace(replace(replace(replace(replace(completed_at,'-',''),'T',''),':',''),'.',''),'Z','') NOT GLOB '*[^0-9]*'))
+            )
+            """,
+            """
+            CREATE TABLE workflow_command_events (
+                event_sequence INTEGER PRIMARY KEY AUTOINCREMENT
+                    CHECK(event_sequence > 0),
+                event_id TEXT NOT NULL UNIQUE
+                    CHECK(length(event_id)=36
+                          AND substr(event_id,9,1)='-' AND substr(event_id,14,1)='-'
+                          AND substr(event_id,19,1)='-' AND substr(event_id,24,1)='-'
+                          AND length(replace(event_id,'-',''))=32
+                          AND event_id NOT GLOB '*[^0-9a-f-]*'),
+                command_id TEXT NOT NULL,
+                event_kind TEXT NOT NULL
+                    CHECK(event_kind IN ('ENQUEUED','CLAIMED','LEASE_RENEWED','STARTED',
+                                         'CANCELLATION_REQUESTED','CANCELLED',
+                                         'EXPIRED_CLAIM_RELEASED','SUCCEEDED','FAILED')),
+                prior_state TEXT NULL
+                    CHECK(prior_state IS NULL OR prior_state IN
+                          ('PENDING','CLAIMED','RUNNING','SUCCEEDED','FAILED','CANCELLED')),
+                next_state TEXT NOT NULL
+                    CHECK(next_state IN ('PENDING','CLAIMED','RUNNING','SUCCEEDED','FAILED','CANCELLED')),
+                prior_state_version INTEGER NULL
+                    CHECK(prior_state_version IS NULL OR
+                          prior_state_version BETWEEN 1 AND 9223372036854775806),
+                next_state_version INTEGER NOT NULL
+                    CHECK(next_state_version BETWEEN 1 AND 9223372036854775807),
+                actor_id TEXT NOT NULL
+                    CHECK(length(actor_id) BETWEEN 1 AND 128
+                          AND substr(actor_id,1,1) GLOB '[A-Za-z0-9]'
+                          AND actor_id NOT GLOB '*[^A-Za-z0-9._:@/-]*'),
+                occurred_at TEXT NOT NULL
+                    CHECK(length(occurred_at)=27 AND substr(occurred_at,5,1)='-'
+                          AND substr(occurred_at,8,1)='-' AND substr(occurred_at,11,1)='T'
+                          AND substr(occurred_at,14,1)=':' AND substr(occurred_at,17,1)=':'
+                          AND substr(occurred_at,20,1)='.' AND substr(occurred_at,27,1)='Z'
+                          AND length(replace(replace(replace(replace(replace(occurred_at,'-',''),'T',''),':',''),'.',''),'Z',''))=20
+                          AND replace(replace(replace(replace(replace(occurred_at,'-',''),'T',''),':',''),'.',''),'Z','') NOT GLOB '*[^0-9]*'),
+                lease_owner TEXT NULL
+                    CHECK(lease_owner IS NULL OR
+                          (length(lease_owner) BETWEEN 1 AND 128
+                           AND substr(lease_owner,1,1) GLOB '[A-Za-z0-9]'
+                           AND lease_owner NOT GLOB '*[^A-Za-z0-9._:@/-]*')),
+                lease_expires_at TEXT NULL
+                    CHECK(lease_expires_at IS NULL OR
+                          (length(lease_expires_at)=27 AND substr(lease_expires_at,5,1)='-'
+                           AND substr(lease_expires_at,8,1)='-' AND substr(lease_expires_at,11,1)='T'
+                           AND substr(lease_expires_at,14,1)=':' AND substr(lease_expires_at,17,1)=':'
+                           AND substr(lease_expires_at,20,1)='.' AND substr(lease_expires_at,27,1)='Z'
+                           AND length(replace(replace(replace(replace(replace(lease_expires_at,'-',''),'T',''),':',''),'.',''),'Z',''))=20
+                           AND replace(replace(replace(replace(replace(lease_expires_at,'-',''),'T',''),':',''),'.',''),'Z','') NOT GLOB '*[^0-9]*')),
+                claim_count INTEGER NOT NULL
+                    CHECK(claim_count BETWEEN 0 AND 9223372036854775807),
+                reason_code TEXT NULL
+                    CHECK(reason_code IS NULL OR
+                          (length(reason_code) BETWEEN 1 AND 64
+                           AND substr(reason_code,1,1) GLOB '[A-Z]'
+                           AND reason_code NOT GLOB '*[^A-Z0-9_]*')),
+                UNIQUE(command_id, next_state_version),
+                FOREIGN KEY(command_id) REFERENCES workflow_commands(command_id)
+                    ON UPDATE RESTRICT ON DELETE RESTRICT,
+                CHECK((prior_state IS NULL) = (prior_state_version IS NULL)),
+                CHECK((event_kind='ENQUEUED' AND prior_state IS NULL
+                       AND next_state='PENDING' AND next_state_version=1)
+                      OR
+                      (event_kind!='ENQUEUED' AND prior_state IS NOT NULL
+                       AND next_state_version=prior_state_version+1)),
+                CHECK((lease_owner IS NULL) = (lease_expires_at IS NULL))
+            )
+            """,
+            """
+            CREATE INDEX workflow_commands_claim_order_idx
+            ON workflow_commands(state, priority DESC, queue_sequence ASC)
+            """,
+            """
+            CREATE INDEX workflow_commands_lease_expiry_idx
+            ON workflow_commands(state, lease_expires_at ASC)
+            """,
+            """
+            CREATE INDEX workflow_commands_project_sequence_idx
+            ON workflow_commands(project_id, queue_sequence ASC)
+            """,
+        ),
+    ),
+    Migration(version=5, statements=_migration_five_statements()),
 )
 
 _FORBIDDEN_OPERATION_TOKENS = frozenset(
@@ -180,13 +551,13 @@ def validate_migration_registry(
         raise MigrationError(MigrationFailureCode.INVALID_REGISTRY, "declared order")
     if versions != list(range(1, len(versions) + 1)):
         raise MigrationError(MigrationFailureCode.INVALID_REGISTRY, "contiguous versions")
-    if require_production_version and versions != [1, 2, 3]:
+    if require_production_version and versions != [1, 2, 3, 4, 5]:
         raise MigrationError(MigrationFailureCode.INVALID_REGISTRY, "production version")
     return registry
 
 
 def initialize_database(database_path: Path, applied_at: str) -> None:
-    """Initialize an explicit production database path through migration version 3."""
+    """Initialize an explicit production database path through migration version 5."""
 
     registry = validate_migration_registry(PRODUCTION_MIGRATIONS, require_production_version=True)
     connection = sqlite3.connect(database_path)
