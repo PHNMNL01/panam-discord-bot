@@ -1,10 +1,10 @@
-# DL-2.2 Worker Process Foundation - Post-Merge Reconciliation Handoff Draft
+# DL-2.2 Worker Process Foundation - Post-Commit-1 Post-Merge Reconciliation Handoff
 
 ## Status
 
 ~~~text
-HANDOFF_TYPE: POST_MERGE_RECONCILIATION_HANDOFF_DRAFT
-HANDOFF_STATUS: DRAFT_PENDING_INDEPENDENT_VERIFICATION
+HANDOFF_TYPE: POST_COMMIT_1_POST_MERGE_RECONCILIATION_HANDOFF
+HANDOFF_STATUS: FINALIZED_PENDING_INDEPENDENT_FINAL_HANDOFF_VERIFICATION
 FINAL: false
 
 PHASE: DL-P2
@@ -17,11 +17,19 @@ SOURCE_COMPLETION_STATUS: NOT_ESTABLISHED
 VAULT_COMPLETION_STATUS: NOT_ESTABLISHED
 REVISION_012_STATUS: NOT_OPENED
 
-RECONCILIATION_HANDOFF_COMMIT_1_STATUS: NOT_CREATED
-RECONCILIATION_HANDOFF_COMMIT_1_SHA: NOT_AVAILABLE
-RECONCILIATION_HANDOFF_COMMIT_1_PARENT: NOT_AVAILABLE
-RECONCILIATION_HANDOFF_COMMIT_1_TREE: NOT_AVAILABLE
-HANDOFF_FINALIZATION_STATUS: NOT_EXECUTED
+RECONCILIATION_HANDOFF_COMMIT_1_STATUS: CREATED
+RECONCILIATION_HANDOFF_COMMIT_1_SHA: b9e074acd0964145d154f872608216d2b3c9769c
+RECONCILIATION_HANDOFF_COMMIT_1_PARENT: e070e5f826ede43ef628216d8475e1e9e0efd600
+RECONCILIATION_HANDOFF_COMMIT_1_PARENT_COUNT: 1
+RECONCILIATION_HANDOFF_COMMIT_1_TREE: a3d16a0204bfe82fc3be6a273ab5610a2e87e525
+RECONCILIATION_HANDOFF_COMMIT_1_DOCS_TREE: 86e4dbd208721c5218e207f0f4b29a6aa9a7fada
+RECONCILIATION_HANDOFF_COMMIT_1_HANDOFFS_TREE: b5b5ca4ca77131a30c786c07540f8508b46c6767
+RECONCILIATION_HANDOFF_COMMIT_1_BLOB: 0745ab52230ee8d4c7c7eb5084ba3c8c9d18c42a
+RECONCILIATION_HANDOFF_COMMIT_1_EXECUTION_RESULT: R11_DL_2_2_RECONCILIATION_HANDOFF_COMMIT_1_SUCCESS
+RECONCILIATION_HANDOFF_COMMIT_1_SUBJECT: DL-2.2: add post-merge reconciliation handoff draft
+RECONCILIATION_HANDOFF_COMMIT_1_BODY: Record the independently verified DL-2.2 post-merge reconciliation handoff draft.
+RECONCILIATION_HANDOFF_COMMIT_1_SIGNATURE: ABSENT
+HANDOFF_FINALIZATION_STATUS: COMPLETED
 FINAL_HANDOFF_VERIFICATION_STATUS: NOT_EXECUTED
 HANDOFF_FINALIZATION_COMMIT_2_STATUS: NOT_CREATED
 HANDOFF_FINALIZATION_COMMIT_2_SHA: NOT_AVAILABLE
@@ -29,11 +37,13 @@ HANDOFF_PHASE_BRANCH_PUSH_STATUS: NOT_EXECUTED
 SOURCE_SYNC_VERIFICATION_STATUS: NOT_EXECUTED
 ~~~
 
-This document is the sole canonical DL-2.2 handoff. It is a post-merge
-reconciliation draft, not a normal pre-implementation handoff, final handoff,
-phase-completion record, or Vault-completion record. It makes no lifecycle
-transition. DL-P2 is not complete and remains IN_PROGRESS. The current
-completion subject is DL-2.2 only; DL-P2 phase completion is not in scope.
+This document is the sole canonical DL-2.2 handoff. It is the current
+post-Commit-1 finalization generation of the post-merge reconciliation handoff,
+pending independent final-handoff verification. It is not a normal
+pre-implementation handoff, an independently verified final handoff, a
+phase-completion record, or a Vault-completion record. DL-P2 is not complete
+and remains IN_PROGRESS. The current completion subject is DL-2.2 only; DL-P2
+phase completion is not in scope.
 
 ## Authority and reconciliation boundary
 
@@ -41,10 +51,13 @@ completion subject is DL-2.2 only; DL-P2 phase completion is not in scope.
 |---|---|
 | Scope-correction and reconciliation authority | HAD-DL-P2-DL-2.2-REVISION-011-SCOPE-CORRECTION-AND-HANDOFF-RECONCILIATION-AUTHORIZATION-001 |
 | Authorized preparation execution | DL_2_2_REVISION_011_POST_MERGE_HANDOFF_DRAFT_PREPARATION_EXECUTION |
+| Handoff-finalization authority | HAD-DL-P2-DL-2.2-REVISION-011-HANDOFF-FINALIZATION-AUTHORIZATION-001 |
+| Authorized finalization execution | DL_2_2_REVISION_011_HANDOFF_FINALIZATION_EXECUTION |
 | Phase | DL-P2 Phase Lifecycle, Command Queue and Worker |
 | Current milestone | DL-2.2 Worker Process Foundation |
 | Source implementation | HUMAN_ACCEPTED |
 | Corrected implementation verification | R11_CORRECTED_IMPLEMENTATION_VERIFICATION_PASS_WITH_NONBLOCKING_OBSERVATIONS |
+| Reconciliation handoff Commit 1 | b9e074acd0964145d154f872608216d2b3c9769c; CREATED |
 | Handoff anomaly | POST_MERGE_HANDOFF_SEQUENCE_ANOMALY |
 | Vault | unchanged; completion NOT_ESTABLISHED |
 
@@ -76,12 +89,107 @@ accepted implementation
 -> PR #50
 -> independent PR verification
 -> merge commit 830a90f3bb57883b5ae420cdffcd12e9473a8643
+-> post-merge handoff draft
+-> Generation-001 verification process failure
+-> Human recovery decision
+-> Generation-002 successful verification
+-> reconciliation handoff Commit 1 b9e074acd0964145d154f872608216d2b3c9769c
+-> current handoff finalization
 ~~~
 
 This ordering is historical reality and is not rewritten or disguised. The
-later documentation-only reconciliation Commit 1 will not be described as the
-already-existing implementation commit, and source history will not be
-rewritten.
+documentation-only reconciliation Commit 1 is not the already-existing
+implementation commit. Commit 1 froze the verified pre-commit handoff draft;
+this current working-tree generation records the now-known Commit-1 reality.
+Source history is not rewritten.
+
+## Draft verification and recovery history
+
+Generation 001 remains immutable process-failure provenance:
+
+| Field | Value |
+|---|---|
+| Authority | HAD-DL-P2-DL-2.2-REVISION-011-DRAFT-HANDOFF-VERIFICATION-AUTHORIZATION-001 |
+| Execution | DL_2_2_REVISION_011_INDEPENDENT_DRAFT_HANDOFF_VERIFICATION_EXECUTION |
+| Result | R11_DL_2_2_DRAFT_HANDOFF_VERIFICATION_PROCESS_FAILED |
+| Blocking finding | ZERO_GIT_OBJECT_WRITE_NOT_PROVEN |
+| Classification | GENERATION_001_OBJECT_TIMESTAMP_AMBIGUITY |
+| Lifecycle interpretation | PROCESS_FAILED_RETAINED_AS_HISTORICAL_PROVENANCE |
+
+Generation 001 is not reclassified as PASS. The Human recovery decision
+authorized one corrected read-only verification generation:
+
+| Field | Value |
+|---|---|
+| Recovery authority | HAD-DL-P2-DL-2.2-REVISION-011-DRAFT-HANDOFF-VERIFICATION-PROCESS-RECOVERY-001 |
+| Execution | DL_2_2_REVISION_011_INDEPENDENT_DRAFT_HANDOFF_VERIFICATION_GENERATION_002_EXECUTION |
+| Result | R11_DL_2_2_DRAFT_HANDOFF_VERIFICATION_GENERATION_002_PASS_WITH_NONBLOCKING_OBSERVATIONS |
+| Registry | R11_DL_2_2_INDEPENDENT_DRAFT_HANDOFF_VERIFICATION_GENERATION_002_V1 |
+| Factual defects | 0 |
+| Provenance defects | 0 |
+| Scope defects | 0 |
+| Status defects | 0 |
+| Self-reference defects | 0 |
+| Object-store preservation | PASS |
+
+## Reconciliation handoff Commit 1
+
+### Current post-Commit-1 reality
+
+| Field | Value |
+|---|---|
+| Authority | HAD-DL-P2-DL-2.2-REVISION-011-RECONCILIATION-HANDOFF-COMMIT-1-AUTHORIZATION-001 |
+| Execution | DL_2_2_REVISION_011_RECONCILIATION_HANDOFF_COMMIT_1_EXECUTION |
+| Result | R11_DL_2_2_RECONCILIATION_HANDOFF_COMMIT_1_SUCCESS |
+| Registry | R11_DL_2_2_ACTUAL_RECONCILIATION_HANDOFF_COMMIT_1_V1 |
+| Commit | b9e074acd0964145d154f872608216d2b3c9769c |
+| Parent count | 1 |
+| Parent | e070e5f826ede43ef628216d8475e1e9e0efd600 |
+| Root tree | a3d16a0204bfe82fc3be6a273ab5610a2e87e525 |
+| Docs tree | 86e4dbd208721c5218e207f0f4b29a6aa9a7fada |
+| Handoffs tree | b5b5ca4ca77131a30c786c07540f8508b46c6767 |
+| Committed handoff mode | 100644 |
+| Committed handoff blob | 0745ab52230ee8d4c7c7eb5084ba3c8c9d18c42a |
+| Subject | DL-2.2: add post-merge reconciliation handoff draft |
+| Body | Record the independently verified DL-2.2 post-merge reconciliation handoff draft. |
+| Signature | ABSENT |
+| Delta | A docs/handoffs/dl-2-2-worker-process-foundation.md |
+| Changed paths | 1 |
+| Source/test paths | 0 |
+| Watchlist paths | 0 |
+| Staging operations | 1; PASS |
+| Commit invocations | 1; PASS |
+| Retry count | 0 |
+
+### Historical Commit-1 perspective
+
+Commit 1 contains the exact independently verified pre-commit draft. Inside
+that historical payload, the following statements were correct:
+
+~~~text
+RECONCILIATION_HANDOFF_COMMIT_1_STATUS = NOT_CREATED
+RECONCILIATION_HANDOFF_COMMIT_1_SHA = NOT_AVAILABLE
+~~~
+
+The current post-Commit-1 reality is:
+
+~~~text
+RECONCILIATION_HANDOFF_COMMIT_1_STATUS = CREATED
+RECONCILIATION_HANDOFF_COMMIT_1_SHA = b9e074acd0964145d154f872608216d2b3c9769c
+~~~
+
+The historical committed-draft identity is frozen as:
+
+~~~text
+HISTORICAL_COMMIT_1_HANDOFF_BLOB: 0745ab52230ee8d4c7c7eb5084ba3c8c9d18c42a
+HISTORICAL_COMMIT_1_HANDOFF_BYTES: 14808
+HISTORICAL_COMMIT_1_HANDOFF_SHA256: 79623FE5A9329C591EDD556027E930D3A1EB5917D1FD0D90D8BCA675EC9A8D35
+CLASSIFICATION: HISTORICAL_PRE_COMMIT_DRAFT_FROZEN_IN_COMMIT_1
+~~~
+
+Commit 1 does not contain this finalized working-tree generation. The current
+generation necessarily has a different external raw identity and does not
+embed its own SHA-256.
 
 ## Accepted implementation
 
@@ -321,7 +429,7 @@ This handoff is specifically for DL-2.2, not the entire DL-P2 phase.
 | Subject | DL-2.2: implement Worker Process Foundation |
 
 This is the normative accepted implementation subject. It is not replaced by
-either future documentation-only reconciliation commit.
+reconciliation handoff Commit 1 or the future handoff-only Commit 2.
 
 ### Source push
 
@@ -384,10 +492,12 @@ Revision 011 did not pass on the first attempt. Immutable history includes
 prior failed or revision-required implementation generations and their
 findings, a Human correction authority, corrected implementation continuation,
 independent corrected verification, Human implementation acceptance, the
-source commit and push lifecycle, the PR lifecycle, and this Human-controlled
-post-merge handoff reconciliation. The accepted closure counts are recorded in
-the verification table; earlier failures are provenance rather than erased
-history. No missing historical detail is inferred or fabricated here.
+source commit and push lifecycle, the PR lifecycle, Generation-001 handoff
+verification process failure, the Human recovery decision, Generation-002
+successful verification, reconciliation handoff Commit 1, and this
+Human-controlled post-Commit-1 finalization. The accepted closure counts are
+recorded in the verification table; earlier failures are provenance rather than
+erased history. No missing historical detail is inferred or fabricated here.
 
 ## Exclusions and deferred boundaries
 
@@ -417,33 +527,28 @@ VAULT_WRITE: NOT_AUTHORIZED
 VAULT_LIFECYCLE: PENDING_FUTURE_SEPARATE_AUTHORITY
 ~~~
 
-This handoff does not authorize staging, Commit 1, finalization, Commit 2,
-push, fetch, pull, branch or PR changes, source/test modification, implementation
+This handoff does not authorize staging, rewriting Commit 1, Commit 2, push,
+fetch, pull, branch or PR changes, source/test modification, implementation
 test execution, Vault or Capability Registry writes, SOURCE_COMPLETED, DL-2.2
 completion, DL-P2 completion, DL-2.3 start, or Revision 012 opening.
 
 ## Remaining reconciliation sequence
 
-1. Independently verify this draft handoff.
-2. Obtain Human authorization for documentation-only reconciliation Commit 1.
-3. Create Commit 1.
-4. Read the actual Commit-1 SHA and provenance from Git.
-5. Finalize this handoff using the actual Commit-1 provenance.
-6. Independently verify the finalized handoff.
-7. Obtain Human authorization for handoff-only Commit 2.
-8. Create Commit 2.
-9. Obtain Human authorization for a non-force phase-branch push.
-10. Push both reconciliation handoff commits.
-11. Independently verify source synchronization.
-12. Establish DL-2.2 SOURCE_COMPLETED.
-13. Perform the separately authorized Vault lifecycle.
-14. Route to the Human DL-2.2 milestone-completion decision.
+1. Independently verify the finalized handoff.
+2. Obtain Human authorization for handoff-only Commit 2.
+3. Create Commit 2.
+4. Obtain Human authorization for a non-force phase-branch push.
+5. Push reconciliation Commit 1 and Commit 2.
+6. Independently verify source synchronization and reconciliation.
+7. Establish DL-2.2 SOURCE_COMPLETED.
+8. Perform the separately authorized Vault lifecycle.
+9. Route to the Human DL-2.2 milestone-completion decision.
 
 DL-P2 phase completion is deliberately absent from this sequence. Successful
-draft preparation routes only to:
+handoff finalization routes only to:
 
 ~~~text
-HUMAN_DL_P2_DL_2_2_REVISION_011_DRAFT_HANDOFF_VERIFICATION_AUTHORIZATION_DECISION
+HUMAN_DL_P2_DL_2_2_REVISION_011_FINAL_HANDOFF_VERIFICATION_AUTHORIZATION_DECISION
 ~~~
 
-That next gate is not performed by this draft.
+That next gate is not performed by this finalization execution.
