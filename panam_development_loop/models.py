@@ -1,4 +1,4 @@
-"""Domain values for the bounded DL-P1.1 and DL-P1.2 slices."""
+"""Domain values for the bounded Development Loop foundation slices."""
 
 import hashlib
 import json
@@ -1220,6 +1220,491 @@ class TransactionalTransitionResult:
                 raise ValueError("run-not-found result")
         elif self.reason_code is TransactionalTransitionReasonCode.STALE_PERSISTED_RUN:
             if not evaluation_allowed or self.persisted_run is None:
+                raise ValueError("stale result")
+
+
+# DL-2.3 Phase State Machine domain ---------------------------------------
+
+
+class PhaseState(str, Enum):
+    """The complete canonical Phase lifecycle vocabulary."""
+
+    DRAFT = "DRAFT"
+    AWAITING_START_APPROVAL = "AWAITING_START_APPROVAL"
+    CREATING_BRANCH = "CREATING_BRANCH"
+    ACTIVE = "ACTIVE"
+    PREPARING_MERGE = "PREPARING_MERGE"
+    READY_FOR_PR = "READY_FOR_PR"
+    PR_CREATED = "PR_CREATED"
+    MERGED = "MERGED"
+    CLOSED = "CLOSED"
+    BLOCKED = "BLOCKED"
+    CANCELLED = "CANCELLED"
+
+
+class PhaseTransitionRuleId(str, Enum):
+    """Stable identities for the eight canonical successful-path edges."""
+
+    DL_2_3_DRAFT_TO_AWAITING_START_APPROVAL_V1 = (
+        "DL_2_3_DRAFT_TO_AWAITING_START_APPROVAL_V1"
+    )
+    DL_2_3_AWAITING_START_APPROVAL_TO_CREATING_BRANCH_V1 = (
+        "DL_2_3_AWAITING_START_APPROVAL_TO_CREATING_BRANCH_V1"
+    )
+    DL_2_3_CREATING_BRANCH_TO_ACTIVE_V1 = (
+        "DL_2_3_CREATING_BRANCH_TO_ACTIVE_V1"
+    )
+    DL_2_3_ACTIVE_TO_PREPARING_MERGE_V1 = (
+        "DL_2_3_ACTIVE_TO_PREPARING_MERGE_V1"
+    )
+    DL_2_3_PREPARING_MERGE_TO_READY_FOR_PR_V1 = (
+        "DL_2_3_PREPARING_MERGE_TO_READY_FOR_PR_V1"
+    )
+    DL_2_3_READY_FOR_PR_TO_PR_CREATED_V1 = (
+        "DL_2_3_READY_FOR_PR_TO_PR_CREATED_V1"
+    )
+    DL_2_3_PR_CREATED_TO_MERGED_V1 = (
+        "DL_2_3_PR_CREATED_TO_MERGED_V1"
+    )
+    DL_2_3_MERGED_TO_CLOSED_V1 = "DL_2_3_MERGED_TO_CLOSED_V1"
+
+
+class PhaseTransitionEvaluationReasonCode(str, Enum):
+    """Stable pure-policy outcomes for Phase transition evaluation."""
+
+    RULE_ALLOWED = "RULE_ALLOWED"
+    CONTRACT_REQUIRED = "CONTRACT_REQUIRED"
+    EVALUATION_VERSION_UNSUPPORTED = "EVALUATION_VERSION_UNSUPPORTED"
+    REGISTRY_RULE_ID_UNSUPPORTED = "REGISTRY_RULE_ID_UNSUPPORTED"
+    CANONICAL_RULE_NOT_EXECUTABLE = "CANONICAL_RULE_NOT_EXECUTABLE"
+    REGISTRY_NO_REGISTERED_TRANSITION = "REGISTRY_NO_REGISTERED_TRANSITION"
+    REQUEST_NOT_EVALUATION_REQUEST = "REQUEST_NOT_EVALUATION_REQUEST"
+    REQUEST_REQUIRED_FIELD_MISSING = "REQUEST_REQUIRED_FIELD_MISSING"
+    REQUEST_WRONG_TYPE = "REQUEST_WRONG_TYPE"
+    EVALUATION_VERSION_MALFORMED = "EVALUATION_VERSION_MALFORMED"
+    REQUEST_RULE_ID_MALFORMED = "REQUEST_RULE_ID_MALFORMED"
+    REQUEST_UNKNOWN_SOURCE_STATE = "REQUEST_UNKNOWN_SOURCE_STATE"
+    REQUEST_UNKNOWN_TARGET_STATE = "REQUEST_UNKNOWN_TARGET_STATE"
+    REQUEST_SURPLUS_PREREQUISITE = "REQUEST_SURPLUS_PREREQUISITE"
+    REGISTRY_RULE_SOURCE_MISMATCH = "REGISTRY_RULE_SOURCE_MISMATCH"
+    REGISTRY_RULE_TARGET_MISMATCH = "REGISTRY_RULE_TARGET_MISMATCH"
+    REGISTRY_EDGE_TYPE_MISMATCH = "REGISTRY_EDGE_TYPE_MISMATCH"
+    STATE_RECORD_MALFORMED = "STATE_RECORD_MALFORMED"
+    CONTRACT_MALFORMED = "CONTRACT_MALFORMED"
+    CONTRACT_IDENTITY_MISMATCH = "CONTRACT_IDENTITY_MISMATCH"
+    CONTRACT_DIGEST_MISMATCH = "CONTRACT_DIGEST_MISMATCH"
+
+
+class PhaseTransactionalTransitionReasonCode(str, Enum):
+    """Stable outcomes of the Phase transactional persistence boundary."""
+
+    COMMITTED = "COMMITTED"
+    EVALUATION_NOT_ALLOWED = "EVALUATION_NOT_ALLOWED"
+    PHASE_STATE_NOT_FOUND = "PHASE_STATE_NOT_FOUND"
+    STALE_PERSISTED_PHASE_STATE = "STALE_PERSISTED_PHASE_STATE"
+
+
+_PHASE_IDENTITY_MAX_BYTES = 256
+_PHASE_SIGNED_64_MAX = 9_223_372_036_854_775_807
+_PHASE_SHA256_PATTERN = re.compile(r"\A[0-9a-f]{64}\Z", re.ASCII)
+_PHASE_RULE_ID_PATTERN = re.compile(
+    r"\A[A-Z][A-Z0-9]*(?:_[A-Z0-9]+)*_V1\Z",
+    re.ASCII,
+)
+_PHASE_UUID_PATTERN = re.compile(
+    r"\A[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\Z",
+    re.ASCII,
+)
+_PHASE_TIMESTAMP_PATTERN = re.compile(
+    r"\A([0-9]{4})-([0-9]{2})-([0-9]{2})T"
+    r"([0-9]{2}):([0-9]{2}):([0-9]{2})\.([0-9]{6})Z\Z",
+    re.ASCII,
+)
+
+
+def _phase_identity(value: object, field_name: str) -> str:
+    if (
+        type(value) is not str
+        or not value
+        or value != value.strip()
+        or len(value.encode("utf-8")) > _PHASE_IDENTITY_MAX_BYTES
+        or any(ord(character) < 32 or ord(character) == 127 for character in value)
+    ):
+        raise ValueError(field_name)
+    return value
+
+
+def _phase_digest(value: object, field_name: str) -> str:
+    if type(value) is not str or _PHASE_SHA256_PATTERN.fullmatch(value) is None:
+        raise ValueError(field_name)
+    return value
+
+
+def _phase_timestamp(value: object, field_name: str) -> str:
+    if type(value) is not str:
+        raise TypeError(field_name)
+    match = _PHASE_TIMESTAMP_PATTERN.fullmatch(value)
+    if match is None:
+        raise ValueError(field_name)
+    try:
+        datetime(*(int(part) for part in match.groups()), tzinfo=timezone.utc)
+    except ValueError as error:
+        raise ValueError(field_name) from error
+    return value
+
+
+def _phase_state_version(value: object, field_name: str, *, minimum: int) -> int:
+    if (
+        type(value) is not int
+        or value < minimum
+        or value > _PHASE_SIGNED_64_MAX
+    ):
+        raise ValueError(field_name)
+    return value
+
+
+def _phase_contract_is_exact(value: object) -> bool:
+    if type(value) is not PhaseContract:
+        return False
+    try:
+        return PhaseContract(
+            project_id=value.project_id,
+            phase_id=value.phase_id,
+            contract_version=value.contract_version,
+        ) == value
+    except (AttributeError, TypeError, ValueError):
+        return False
+
+
+@dataclass(frozen=True)
+class PhaseStateRecord:
+    """Mutable Phase lifecycle state represented as an immutable snapshot."""
+
+    project_id: str
+    phase_id: str
+    phase_contract_digest: str
+    current_state: PhaseState
+    state_version: int
+    created_at: str
+    updated_at: str
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "project_id", _phase_identity(self.project_id, "project_id"))
+        object.__setattr__(self, "phase_id", _phase_identity(self.phase_id, "phase_id"))
+        object.__setattr__(
+            self,
+            "phase_contract_digest",
+            _phase_digest(self.phase_contract_digest, "phase_contract_digest"),
+        )
+        if type(self.current_state) is not PhaseState:
+            raise TypeError("current_state")
+        object.__setattr__(
+            self,
+            "state_version",
+            _phase_state_version(self.state_version, "state_version", minimum=0),
+        )
+        object.__setattr__(self, "created_at", _phase_timestamp(self.created_at, "created_at"))
+        object.__setattr__(self, "updated_at", _phase_timestamp(self.updated_at, "updated_at"))
+        if self.updated_at < self.created_at:
+            raise ValueError("updated_at")
+
+
+@dataclass(frozen=True)
+class AcceptedPhaseStateEvent:
+    """One transactionally accepted Phase transition event."""
+
+    event_id: str
+    project_id: str
+    phase_id: str
+    phase_contract_digest: str
+    from_state: PhaseState
+    to_state: PhaseState
+    transition_reason: str
+    occurred_at: str
+    state_version: int
+
+    def __post_init__(self) -> None:
+        if (
+            type(self.event_id) is not str
+            or _PHASE_UUID_PATTERN.fullmatch(self.event_id) is None
+            or self.event_id == "00000000-0000-0000-0000-000000000000"
+        ):
+            raise ValueError("event_id")
+        object.__setattr__(self, "project_id", _phase_identity(self.project_id, "project_id"))
+        object.__setattr__(self, "phase_id", _phase_identity(self.phase_id, "phase_id"))
+        object.__setattr__(
+            self,
+            "phase_contract_digest",
+            _phase_digest(self.phase_contract_digest, "phase_contract_digest"),
+        )
+        if type(self.from_state) is not PhaseState:
+            raise TypeError("from_state")
+        if type(self.to_state) is not PhaseState:
+            raise TypeError("to_state")
+        if (
+            self.from_state is not PhaseState.DRAFT
+            or self.to_state is not PhaseState.AWAITING_START_APPROVAL
+        ):
+            raise ValueError("from_state/to_state")
+        if self.transition_reason != PhaseTransitionEvaluationReasonCode.RULE_ALLOWED.value:
+            raise ValueError("transition_reason")
+        object.__setattr__(
+            self,
+            "occurred_at",
+            _phase_timestamp(self.occurred_at, "occurred_at"),
+        )
+        if _phase_state_version(self.state_version, "state_version", minimum=1) != 1:
+            raise ValueError("state_version")
+
+
+_PHASE_SUCCESSFUL_PATH = (
+    PhaseState.DRAFT,
+    PhaseState.AWAITING_START_APPROVAL,
+    PhaseState.CREATING_BRANCH,
+    PhaseState.ACTIVE,
+    PhaseState.PREPARING_MERGE,
+    PhaseState.READY_FOR_PR,
+    PhaseState.PR_CREATED,
+    PhaseState.MERGED,
+    PhaseState.CLOSED,
+)
+_PHASE_CANONICAL_PAIRS = tuple(zip(_PHASE_SUCCESSFUL_PATH, _PHASE_SUCCESSFUL_PATH[1:]))
+
+
+@dataclass(frozen=True)
+class PhaseTransitionRule:
+    """An immutable canonical Phase edge descriptor."""
+
+    rule_id: PhaseTransitionRuleId
+    source_state: PhaseState
+    target_state: PhaseState
+    edge_type: WorkflowEdgeType | None
+    executable: bool
+
+    def __post_init__(self) -> None:
+        if type(self.rule_id) is not PhaseTransitionRuleId:
+            raise TypeError("rule_id")
+        if _PHASE_RULE_ID_PATTERN.fullmatch(self.rule_id.value) is None:
+            raise ValueError("rule_id")
+        if type(self.source_state) is not PhaseState:
+            raise TypeError("source_state")
+        if type(self.target_state) is not PhaseState:
+            raise TypeError("target_state")
+        if self.edge_type is not None and type(self.edge_type) is not WorkflowEdgeType:
+            raise TypeError("edge_type")
+
+        if type(self.executable) is not bool:
+            raise TypeError("executable")
+        index = tuple(PhaseTransitionRuleId).index(self.rule_id)
+        expected_source, expected_target = _PHASE_CANONICAL_PAIRS[index]
+        if (self.source_state, self.target_state) != (expected_source, expected_target):
+            raise ValueError("source_state/target_state")
+        if index == 0:
+            if self.edge_type is not WorkflowEdgeType.UNCONDITIONAL or not self.executable:
+                raise ValueError("executable edge")
+        elif self.edge_type is not None or self.executable:
+            raise ValueError("deferred edge")
+
+
+@dataclass(frozen=True)
+class PhaseTransitionEvaluationRequest:
+    """Pure Phase evaluation input; the state record is the expected snapshot."""
+
+    evaluation_version: str | None = None
+    phase_state: PhaseStateRecord | None = None
+    rule_id: str | None = None
+    requested_state: PhaseState | None = None
+    edge_type: WorkflowEdgeType | None = None
+    phase_contract: PhaseContract | None = None
+    approval_snapshot: object | None = None
+    evidence_snapshots: tuple[object, ...] = ()
+    repository_binding: object | None = None
+
+    __hash__ = None
+
+
+_PHASE_REASONS_BY_DECISION = {
+    TransitionEvaluationDecision.ALLOWED: {
+        PhaseTransitionEvaluationReasonCode.RULE_ALLOWED,
+    },
+    TransitionEvaluationDecision.GATED: {
+        PhaseTransitionEvaluationReasonCode.CONTRACT_REQUIRED,
+    },
+    TransitionEvaluationDecision.UNSUPPORTED: {
+        PhaseTransitionEvaluationReasonCode.EVALUATION_VERSION_UNSUPPORTED,
+        PhaseTransitionEvaluationReasonCode.REGISTRY_RULE_ID_UNSUPPORTED,
+        PhaseTransitionEvaluationReasonCode.CANONICAL_RULE_NOT_EXECUTABLE,
+        PhaseTransitionEvaluationReasonCode.REGISTRY_NO_REGISTERED_TRANSITION,
+    },
+    TransitionEvaluationDecision.INVALID: {
+        PhaseTransitionEvaluationReasonCode.REQUEST_NOT_EVALUATION_REQUEST,
+        PhaseTransitionEvaluationReasonCode.REQUEST_REQUIRED_FIELD_MISSING,
+        PhaseTransitionEvaluationReasonCode.REQUEST_WRONG_TYPE,
+        PhaseTransitionEvaluationReasonCode.EVALUATION_VERSION_MALFORMED,
+        PhaseTransitionEvaluationReasonCode.REQUEST_RULE_ID_MALFORMED,
+        PhaseTransitionEvaluationReasonCode.REQUEST_UNKNOWN_SOURCE_STATE,
+        PhaseTransitionEvaluationReasonCode.REQUEST_UNKNOWN_TARGET_STATE,
+        PhaseTransitionEvaluationReasonCode.REQUEST_SURPLUS_PREREQUISITE,
+        PhaseTransitionEvaluationReasonCode.REGISTRY_RULE_SOURCE_MISMATCH,
+        PhaseTransitionEvaluationReasonCode.REGISTRY_RULE_TARGET_MISMATCH,
+        PhaseTransitionEvaluationReasonCode.REGISTRY_EDGE_TYPE_MISMATCH,
+        PhaseTransitionEvaluationReasonCode.STATE_RECORD_MALFORMED,
+        PhaseTransitionEvaluationReasonCode.CONTRACT_MALFORMED,
+        PhaseTransitionEvaluationReasonCode.CONTRACT_IDENTITY_MISMATCH,
+        PhaseTransitionEvaluationReasonCode.CONTRACT_DIGEST_MISMATCH,
+    },
+    TransitionEvaluationDecision.DENIED: set(),
+}
+
+
+@dataclass(frozen=True)
+class PhaseTransitionEvaluationResult:
+    """Deterministic Phase evaluation result with no side effects."""
+
+    decision: TransitionEvaluationDecision
+    reason_code: PhaseTransitionEvaluationReasonCode
+    project_id: str | None = None
+    phase_id: str | None = None
+    phase_contract_digest: str | None = None
+    current_state: PhaseState | None = None
+    current_state_version: int | None = None
+    requested_state: PhaseState | None = None
+    rule_id: PhaseTransitionRuleId | None = None
+    edge_type: WorkflowEdgeType | None = None
+    side_effects_performed: bool = field(default=False, init=False)
+
+    def __post_init__(self) -> None:
+        if type(self.decision) is not TransitionEvaluationDecision:
+            raise TypeError("decision")
+        if type(self.reason_code) is not PhaseTransitionEvaluationReasonCode:
+            raise TypeError("reason_code")
+        if self.reason_code not in _PHASE_REASONS_BY_DECISION[self.decision]:
+            raise ValueError("reason_code")
+        for field_name, value in (
+            ("project_id", self.project_id),
+            ("phase_id", self.phase_id),
+        ):
+            if value is not None:
+                _phase_identity(value, field_name)
+        if self.phase_contract_digest is not None:
+            _phase_digest(self.phase_contract_digest, "phase_contract_digest")
+        if self.current_state is not None and type(self.current_state) is not PhaseState:
+            raise TypeError("current_state")
+        if self.current_state_version is not None:
+            _phase_state_version(
+                self.current_state_version,
+                "current_state_version",
+                minimum=0,
+            )
+        if self.requested_state is not None and type(self.requested_state) is not PhaseState:
+            raise TypeError("requested_state")
+        if self.rule_id is not None and type(self.rule_id) is not PhaseTransitionRuleId:
+            raise TypeError("rule_id")
+        if self.edge_type is not None and type(self.edge_type) is not WorkflowEdgeType:
+            raise TypeError("edge_type")
+
+        state_bindings = (
+            self.project_id,
+            self.phase_id,
+            self.phase_contract_digest,
+            self.current_state,
+            self.current_state_version,
+        )
+        if any(value is None for value in state_bindings) and any(
+            value is not None for value in state_bindings
+        ):
+            raise ValueError("phase state binding")
+        if self.requested_state is not None and self.project_id is None:
+            raise ValueError("requested state binding")
+        if self.rule_id is not None and self.requested_state is None:
+            raise ValueError("rule binding")
+        if self.edge_type is not None and self.rule_id is None:
+            raise ValueError("edge binding")
+
+        if self.decision is TransitionEvaluationDecision.ALLOWED:
+            executable_source, executable_target = _PHASE_CANONICAL_PAIRS[0]
+            executable_rule_id = tuple(PhaseTransitionRuleId)[0]
+            if (
+                any(value is None for value in state_bindings)
+                or self.requested_state is not executable_target
+                or self.current_state is not executable_source
+                or self.rule_id is not executable_rule_id
+                or self.edge_type is not WorkflowEdgeType.UNCONDITIONAL
+            ):
+                raise ValueError("allowed result binding")
+
+
+@dataclass(frozen=True)
+class PhaseTransactionalTransitionResult:
+    """Binds a Phase policy result to its authoritative durable outcome."""
+
+    committed: bool
+    reason_code: PhaseTransactionalTransitionReasonCode
+    evaluation_result: PhaseTransitionEvaluationResult
+    persisted_state: PhaseStateRecord | None
+    accepted_event: AcceptedPhaseStateEvent | None
+
+    def __post_init__(self) -> None:
+        if type(self.committed) is not bool:
+            raise TypeError("committed")
+        if type(self.reason_code) is not PhaseTransactionalTransitionReasonCode:
+            raise TypeError("reason_code")
+        if type(self.evaluation_result) is not PhaseTransitionEvaluationResult:
+            raise TypeError("evaluation_result")
+        if self.persisted_state is not None and type(self.persisted_state) is not PhaseStateRecord:
+            raise TypeError("persisted_state")
+        if self.accepted_event is not None and type(
+            self.accepted_event
+        ) is not AcceptedPhaseStateEvent:
+            raise TypeError("accepted_event")
+
+        allowed = self.evaluation_result.decision is TransitionEvaluationDecision.ALLOWED
+        if self.reason_code is PhaseTransactionalTransitionReasonCode.COMMITTED:
+            if (
+                not self.committed
+                or not allowed
+                or self.persisted_state is None
+                or self.accepted_event is None
+            ):
+                raise ValueError("committed result")
+            state = self.persisted_state
+            event = self.accepted_event
+            if (
+                self.evaluation_result.project_id != state.project_id
+                or self.evaluation_result.phase_id != state.phase_id
+                or self.evaluation_result.phase_contract_digest
+                != state.phase_contract_digest
+                or state.project_id != event.project_id
+                or state.phase_id != event.phase_id
+                or state.phase_contract_digest != event.phase_contract_digest
+                or state.current_state is not event.to_state
+                or state.state_version != event.state_version
+                or state.updated_at != event.occurred_at
+                or self.evaluation_result.current_state is not event.from_state
+                or self.evaluation_result.requested_state is not event.to_state
+                or self.evaluation_result.current_state_version is None
+                or event.state_version != self.evaluation_result.current_state_version + 1
+            ):
+                raise ValueError("committed result binding")
+            return
+
+        if self.committed or self.accepted_event is not None:
+            raise ValueError("non-committed result")
+        if self.reason_code is PhaseTransactionalTransitionReasonCode.EVALUATION_NOT_ALLOWED:
+            if allowed or self.persisted_state is not None:
+                raise ValueError("evaluation result")
+        elif self.reason_code is PhaseTransactionalTransitionReasonCode.PHASE_STATE_NOT_FOUND:
+            if not allowed or self.persisted_state is not None:
+                raise ValueError("phase-state-not-found result")
+        elif self.reason_code is PhaseTransactionalTransitionReasonCode.STALE_PERSISTED_PHASE_STATE:
+            if (
+                not allowed
+                or self.persisted_state is None
+                or self.evaluation_result.project_id != self.persisted_state.project_id
+                or self.evaluation_result.phase_id != self.persisted_state.phase_id
+                or self.evaluation_result.phase_contract_digest
+                != self.persisted_state.phase_contract_digest
+            ):
                 raise ValueError("stale result")
 
 

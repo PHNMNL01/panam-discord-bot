@@ -1,6 +1,7 @@
 """Durable Development Loop state, transition, and contract domain values."""
 
 from .models import (
+    AcceptedPhaseStateEvent,
     AcceptedStateEvent,
     ApprovalBinding,
     ApprovalKind,
@@ -22,6 +23,15 @@ from .models import (
     ExpectedEvidenceBinding,
     MilestoneContract,
     PhaseContract,
+    PhaseState,
+    PhaseStateRecord,
+    PhaseTransactionalTransitionReasonCode,
+    PhaseTransactionalTransitionResult,
+    PhaseTransitionEvaluationReasonCode,
+    PhaseTransitionEvaluationRequest,
+    PhaseTransitionEvaluationResult,
+    PhaseTransitionRule,
+    PhaseTransitionRuleId,
     ProjectPolicy,
     ProjectPolicyReadOutcome,
     ProjectPolicyReadResult,
@@ -76,6 +86,7 @@ from .repositories import (
     DevelopmentRunInspectionRepository,
     MilestoneContractRepository,
     PhaseContractRepository,
+    PhaseStateInspectionRepository,
     ProjectPolicyRepository,
     RepositoryError,
     RepositoryFailureCode,
@@ -87,6 +98,7 @@ from .sqlite_repositories import (
     SqliteDevelopmentRunInspectionRepository,
     SqliteMilestoneContractRepository,
     SqlitePhaseContractRepository,
+    SqlitePhaseStateInspectionRepository,
     SqliteProjectPolicyRepository,
     SqliteWorkerJournalRepository,
     SqliteWorkflowCommandRepository,
@@ -109,6 +121,9 @@ from .project_policy_reader import ProjectPolicyReader
 from .sqlite_store import SqliteRunStore
 from .transition_policy import TransitionPolicy
 from .transition_service import TransitionService
+from .phase_transition_policy import PhaseTransitionPolicy
+from .phase_transition_service import PhaseTransitionService
+from .sqlite_phase_store import SqlitePhaseStore
 from .worker import (
     DevelopmentWorker,
     WorkerCheckpoint,
@@ -224,4 +239,19 @@ __all__ = [
     "WorkerHandlerRegistry",
     "DevelopmentWorker",
     "main",
+    "AcceptedPhaseStateEvent",
+    "PhaseState",
+    "PhaseStateRecord",
+    "PhaseTransactionalTransitionReasonCode",
+    "PhaseTransactionalTransitionResult",
+    "PhaseTransitionEvaluationReasonCode",
+    "PhaseTransitionEvaluationRequest",
+    "PhaseTransitionEvaluationResult",
+    "PhaseTransitionRule",
+    "PhaseTransitionRuleId",
+    "PhaseStateInspectionRepository",
+    "SqlitePhaseStateInspectionRepository",
+    "SqlitePhaseStore",
+    "PhaseTransitionPolicy",
+    "PhaseTransitionService",
 ]

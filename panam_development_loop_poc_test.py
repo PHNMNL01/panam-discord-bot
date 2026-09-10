@@ -1,4 +1,4 @@
-"""Focused deterministic tests for the DL-P1.1 through DL-P1.8 slices."""
+"""Focused deterministic tests for the implemented Development Loop slices."""
 
 import io
 import hashlib
@@ -24,10 +24,12 @@ from unittest.mock import Mock, patch
 
 import panam_development_loop.sqlite_repositories as sqlite_repository_module
 import panam_development_loop.models as models_module
+import panam_development_loop.phase_transition_policy as phase_policy_module
 import panam_development_loop.worker as worker_module
 import panam_development_loop.worker_main as worker_main_module
 
 from panam_development_loop import (
+    AcceptedPhaseStateEvent,
     ApprovalBinding,
     ApprovalKind,
     ApprovalSnapshot,
@@ -51,6 +53,18 @@ from panam_development_loop import (
     ExpectedEvidenceBinding,
     MilestoneContract,
     PhaseContract,
+    PhaseState,
+    PhaseStateInspectionRepository,
+    PhaseStateRecord,
+    PhaseTransactionalTransitionReasonCode,
+    PhaseTransactionalTransitionResult,
+    PhaseTransitionEvaluationReasonCode,
+    PhaseTransitionEvaluationRequest,
+    PhaseTransitionEvaluationResult,
+    PhaseTransitionPolicy,
+    PhaseTransitionRule,
+    PhaseTransitionRuleId,
+    PhaseTransitionService,
     ProjectPolicy,
     ProjectPolicyReadOutcome,
     ProjectPolicyReadResult,
@@ -66,6 +80,8 @@ from panam_development_loop import (
     SqliteDevelopmentRunInspectionRepository,
     SqliteMilestoneContractRepository,
     SqlitePhaseContractRepository,
+    SqlitePhaseStateInspectionRepository,
+    SqlitePhaseStore,
     SqliteProjectPolicyRepository,
     SqliteRunStore,
     SqliteWorkflowCommandRepository,
@@ -278,12 +294,16 @@ class _ConnectionProxy:
         *,
         fail_statement: str | None = None,
         zero_update: bool = False,
+        zero_phase_update: bool = False,
+        suppress_phase_event_insert: bool = False,
         fail_commit: bool = False,
         fail_rollback: bool = False,
     ) -> None:
         self.connection = connection
         self.fail_statement = fail_statement
         self.zero_update = zero_update
+        self.zero_phase_update = zero_phase_update
+        self.suppress_phase_event_insert = suppress_phase_event_insert
         self.fail_commit = fail_commit
         self.fail_rollback = fail_rollback
         self.rollback_calls = 0
@@ -303,6 +323,12 @@ class _ConnectionProxy:
         if self.fail_statement is not None and self.fail_statement in normalized:
             raise sqlite3.OperationalError(f"injected {self.fail_statement}")
         if self.zero_update and normalized.startswith("UPDATE DEVELOPMENT_RUNS"):
+            return _ZeroRowCount()
+        if self.zero_phase_update and normalized.startswith("UPDATE PHASE_STATES"):
+            return _ZeroRowCount()
+        if self.suppress_phase_event_insert and normalized.startswith(
+            "INSERT INTO PHASE_STATE_EVENTS"
+        ):
             return _ZeroRowCount()
         return self.connection.execute(statement, parameters)
 
@@ -1292,12 +1318,14 @@ class SqliteMigrationTest(unittest.TestCase):
         SqliteRunStore(path).initialize("first-at")
         connection = self._connection(path)
         try:
-            self.assertEqual([(1, "first-at"), (2, "first-at"), (3, "first-at"), (4, "first-at"), (5, "first-at")], self._ledger_snapshot(connection))
+            self.assertEqual([(1, "first-at"), (2, "first-at"), (3, "first-at"), (4, "first-at"), (5, "first-at"), (6, "first-at")], self._ledger_snapshot(connection))
             self.assertEqual(
                 [
                     "approvals",
                     "development_runs",
                     "milestone_contracts",
+                    "phase_state_events",
+                    "phase_states",
                     "phases",
                     "project_policies",
                     "schema_migrations",
@@ -1357,7 +1385,7 @@ class SqliteMigrationTest(unittest.TestCase):
             for table_name, table_sql in before_schema.items():
                 self.assertEqual(table_sql, after_schema[table_name])
             self.assertEqual(
-                [(1, "legacy-applied-at"), (2, "new-at"), (3, "new-at"), (4, "new-at"), (5, "new-at")],
+                [(1, "legacy-applied-at"), (2, "new-at"), (3, "new-at"), (4, "new-at"), (5, "new-at"), (6, "new-at")],
                 self._ledger_snapshot(connection),
             )
             self.assertEqual(before_runs, [tuple(row) for row in connection.execute("SELECT * FROM development_runs")])
@@ -1479,7 +1507,7 @@ class SqliteMigrationTest(unittest.TestCase):
             malformed.commit()
             self.assertEqual(MigrationFailureCode.INVALID_APPLIED_HISTORY, self._assert_history_rejected_without_mutation(malformed).code)
             future.execute("CREATE TABLE schema_migrations (version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL)")
-            future.execute("INSERT INTO schema_migrations VALUES(6, 'future-at')")
+            future.execute("INSERT INTO schema_migrations VALUES(7, 'future-at')")
             future.commit()
             self.assertEqual(MigrationFailureCode.UNKNOWN_FUTURE_VERSION, self._assert_history_rejected_without_mutation(future).code)
         finally:
@@ -1790,7 +1818,7 @@ class SqliteRepositoryTest(unittest.TestCase):
         SqliteRunStore(future).initialize("at")
         connection = sqlite3.connect(future)
         try:
-            connection.execute("INSERT INTO schema_migrations VALUES(6, 'future')")
+            connection.execute("INSERT INTO schema_migrations VALUES(7, 'future')")
             connection.commit()
         finally:
             connection.close()
@@ -1889,7 +1917,7 @@ class SqliteMigrationTwoTest(unittest.TestCase):
             PRODUCTION_MIGRATIONS,
             require_production_version=True,
         )
-        self.assertEqual([1, 2, 3, 4, 5], [migration.version for migration in validated])
+        self.assertEqual([1, 2, 3, 4, 5, 6], [migration.version for migration in validated])
         self.assertIn("base_commit", PRODUCTION_MIGRATIONS[1].statements[2])
         for identifier in ("base_commit", "commit_hash", "rollback_reason"):
             with self.subTest(identifier=identifier):
@@ -1929,7 +1957,7 @@ class SqliteMigrationTwoTest(unittest.TestCase):
                 )
             ]
             self.assertEqual(
-                ["approvals", "development_runs", "milestone_contracts", "phases", "project_policies", "schema_migrations", "state_events", "worker_operations", "worker_sessions", "workflow_command_events", "workflow_commands"],
+                ["approvals", "development_runs", "milestone_contracts", "phase_state_events", "phase_states", "phases", "project_policies", "schema_migrations", "state_events", "worker_operations", "worker_sessions", "workflow_command_events", "workflow_commands"],
                 tables,
             )
             foreign_keys = connection.execute("PRAGMA foreign_key_list(milestone_contracts)").fetchall()
@@ -2127,7 +2155,7 @@ class ProjectPolicyReadOnlyFoundationTest(unittest.TestCase):
         connection = sqlite3.connect(self.database_path)
         try:
             self.assertEqual(
-            [(1, "initialized-at"), (2, "initialized-at"), (3, "initialized-at"), (4, "initialized-at"), (5, "initialized-at")],
+                [(1, "initialized-at"), (2, "initialized-at"), (3, "initialized-at"), (4, "initialized-at"), (5, "initialized-at"), (6, "initialized-at")],
                 connection.execute(
                     "SELECT version, applied_at FROM schema_migrations ORDER BY version"
                 ).fetchall(),
@@ -2218,7 +2246,7 @@ class ProjectPolicyReadOnlyFoundationTest(unittest.TestCase):
             )
             self.assertEqual(0, connection.execute("SELECT COUNT(*) FROM project_policies").fetchone()[0])
             self.assertEqual(
-            [(1,), (2,), (3,), (4,), (5,)],
+                [(1,), (2,), (3,), (4,), (5,), (6,)],
                 [tuple(row) for row in connection.execute("SELECT version FROM schema_migrations ORDER BY version")],
             )
         finally:
@@ -2359,7 +2387,7 @@ class ProjectPolicyReadOnlyFoundationTest(unittest.TestCase):
         SqliteRunStore(future_path).initialize("at")
         connection = sqlite3.connect(future_path)
         try:
-            connection.execute("INSERT INTO schema_migrations VALUES(6, 'future-at')")
+            connection.execute("INSERT INTO schema_migrations VALUES(7, 'future-at')")
             connection.commit()
         finally:
             connection.close()
@@ -5085,8 +5113,17 @@ class Dl21OperationMatrixCompatibilityTest(unittest.TestCase):
             "SqliteWorkerJournalRepository", "WorkerHandlerRegistry",
             "DevelopmentWorker", "main",
         }
-        self.assertEqual(p1 | expected | worker_exports, set(package.__all__))
-        self.assertEqual(105, len(package.__all__))
+        phase_exports = {
+            "AcceptedPhaseStateEvent", "PhaseState", "PhaseStateRecord",
+            "PhaseTransactionalTransitionReasonCode", "PhaseTransactionalTransitionResult",
+            "PhaseTransitionEvaluationReasonCode", "PhaseTransitionEvaluationRequest",
+            "PhaseTransitionEvaluationResult", "PhaseTransitionRule",
+            "PhaseTransitionRuleId", "PhaseStateInspectionRepository",
+            "SqlitePhaseStateInspectionRepository", "SqlitePhaseStore",
+            "PhaseTransitionPolicy", "PhaseTransitionService",
+        }
+        self.assertEqual(p1 | expected | worker_exports | phase_exports, set(package.__all__))
+        self.assertEqual(120, len(package.__all__))
         self.assertEqual(13, len(expected))
         for forbidden in ("Worker", "OperationJournal", "QueueQueryKind", "Executor"):
             self.assertNotIn(forbidden, package.__all__)
@@ -5496,9 +5533,9 @@ class SqliteMigrationFourTest(unittest.TestCase):
         connection = sqlite3.connect(self.path)
         connection.row_factory = sqlite3.Row
         try:
-            self.assertEqual([1, 2, 3, 4, 5], [row[0] for row in connection.execute("SELECT version FROM schema_migrations ORDER BY version")])
+            self.assertEqual([1, 2, 3, 4, 5, 6], [row[0] for row in connection.execute("SELECT version FROM schema_migrations ORDER BY version")])
             tables = {row[0] for row in connection.execute("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'")}
-            self.assertEqual({"workflow_commands", "workflow_command_events", "worker_sessions", "worker_operations"}, tables - {"schema_migrations", "development_runs", "state_events", "phases", "milestone_contracts", "approvals", "project_policies"})
+            self.assertEqual({"workflow_commands", "workflow_command_events", "worker_sessions", "worker_operations"}, tables - {"schema_migrations", "development_runs", "state_events", "phases", "milestone_contracts", "approvals", "project_policies", "phase_states", "phase_state_events"})
             self.assertEqual(
                 ["workflow_commands_claim_order_idx", "workflow_commands_lease_expiry_idx", "workflow_commands_project_sequence_idx"],
                 sorted(row[0] for row in connection.execute("SELECT name FROM sqlite_master WHERE type='index' AND name LIKE 'workflow_commands_%_idx'")),
@@ -5614,7 +5651,7 @@ class SqliteMigrationFourTest(unittest.TestCase):
             for table in before:
                 expected = before[table]
                 if table == "schema_migrations":
-                    expected = expected + [(4, "v4-at"), (5, "v4-at")]
+                    expected = expected + [(4, "v4-at"), (5, "v4-at"), (6, "v4-at")]
                 self.assertEqual(expected, [tuple(row) for row in connection.execute(f"SELECT * FROM {table}")])
             self.assertEqual(0, connection.execute("SELECT count(*) FROM workflow_commands").fetchone()[0])
             self.assertEqual(0, connection.execute("SELECT count(*) FROM workflow_command_events").fetchone()[0])
@@ -7273,11 +7310,11 @@ class Dl21Ca001CompatibilityTest(unittest.TestCase):
         self.assertNotIn("TEST_COMMAND", statement)
         self.assertEqual(("TEST_COMMAND", 1), parameters)
 
-    def test_migration_version_advances_to_five(self) -> None:
-        self.assertEqual([1, 2, 3, 4, 5], [migration.version for migration in PRODUCTION_MIGRATIONS])
+    def test_migration_version_advances_to_six(self) -> None:
+        self.assertEqual([1, 2, 3, 4, 5, 6], [migration.version for migration in PRODUCTION_MIGRATIONS])
         connection = sqlite3.connect(self.path)
         try:
-            self.assertEqual([1, 2, 3, 4, 5], [row[0] for row in connection.execute("SELECT version FROM schema_migrations ORDER BY version")])
+            self.assertEqual([1, 2, 3, 4, 5, 6], [row[0] for row in connection.execute("SELECT version FROM schema_migrations ORDER BY version")])
         finally:
             connection.close()
 
@@ -7370,7 +7407,7 @@ class Dl21Ca001CompatibilityTest(unittest.TestCase):
             self.assertEqual(expected_hints, get_type_hints(method))
         service_operations = tuple(name for name, value in DurableCommandQueueService.__dict__.items() if not name.startswith("_") and callable(value))
         repository_operations = tuple(name for name, value in WorkflowCommandRepository.__dict__.items() if not name.startswith("_") and callable(value))
-        self.assertEqual((13, 13, 10, 17, 6, 9, 105), (len(service_operations), len(repository_operations), len(QueueMutationKind), len(QueueResultCode), len(WorkflowCommandState), len(WorkflowCommandEventKind), len(package.__all__)))
+        self.assertEqual((13, 13, 10, 17, 6, 9, 120), (len(service_operations), len(repository_operations), len(QueueMutationKind), len(QueueResultCode), len(WorkflowCommandState), len(WorkflowCommandEventKind), len(package.__all__)))
         self.assertNotIn("MAX_ELIGIBLE_DEFINITION_KEYS", package.__all__)
 
 
@@ -8822,7 +8859,7 @@ class Dl22WorkerFoundationTest(unittest.TestCase):
         SqliteRunStore(self.path).initialize("2026-08-24T12:00:01.000000Z")
         connection = sqlite3.connect(self.path)
         try:
-            self.assertEqual([1, 2, 3, 4, 5], [row[0] for row in connection.execute("SELECT version FROM schema_migrations ORDER BY version")])
+            self.assertEqual([1, 2, 3, 4, 5, 6], [row[0] for row in connection.execute("SELECT version FROM schema_migrations ORDER BY version")])
         finally:
             connection.close()
 
@@ -9888,8 +9925,20 @@ class Dl22WorkerFoundationTest(unittest.TestCase):
         )
         expected = tuple(row["symbol"] for row in matrix["rows"])
         self.assertEqual(tuple(range(1, 106)), tuple(row["export_order"] for row in matrix["rows"]))
-        self.assertEqual(expected, tuple(package.__all__))
-        self.assertEqual(105, len(set(package.__all__)))
+        self.assertEqual(expected, tuple(package.__all__[:105]))
+        self.assertEqual(
+            (
+                "AcceptedPhaseStateEvent", "PhaseState", "PhaseStateRecord",
+                "PhaseTransactionalTransitionReasonCode", "PhaseTransactionalTransitionResult",
+                "PhaseTransitionEvaluationReasonCode", "PhaseTransitionEvaluationRequest",
+                "PhaseTransitionEvaluationResult", "PhaseTransitionRule",
+                "PhaseTransitionRuleId", "PhaseStateInspectionRepository",
+                "SqlitePhaseStateInspectionRepository", "SqlitePhaseStore",
+                "PhaseTransitionPolicy", "PhaseTransitionService",
+            ),
+            tuple(package.__all__[105:]),
+        )
+        self.assertEqual(120, len(set(package.__all__)))
 
     def test_handler_validation_failure_and_baseexception(self) -> None:
         self.assertEqual(
@@ -12203,6 +12252,1017 @@ class Dl22WorkerFoundationTest(unittest.TestCase):
             ),
         )
         self.assertEqual(before, self._sqlite_fact_snapshot(self.path))
+
+
+def _phase_contract(phase_id: str = "DL-P2") -> PhaseContract:
+    return PhaseContract(
+        project_id="panam",
+        phase_id=phase_id,
+        contract_version="1",
+    )
+
+
+def _phase_state(
+    contract: PhaseContract,
+    *,
+    current_state: PhaseState = PhaseState.DRAFT,
+    state_version: int = 0,
+    updated_at: str = "2026-09-10T10:00:00.000000Z",
+) -> PhaseStateRecord:
+    return PhaseStateRecord(
+        project_id=contract.project_id,
+        phase_id=contract.phase_id,
+        phase_contract_digest=contract.sha256_digest(),
+        current_state=current_state,
+        state_version=state_version,
+        created_at="2026-09-10T10:00:00.000000Z",
+        updated_at=updated_at,
+    )
+
+
+def _phase_request(
+    state: PhaseStateRecord,
+    contract: PhaseContract | None,
+    **changes: object,
+) -> PhaseTransitionEvaluationRequest:
+    values: dict[str, object] = {
+        "evaluation_version": "1",
+        "phase_state": state,
+        "rule_id": (
+            PhaseTransitionRuleId.DL_2_3_DRAFT_TO_AWAITING_START_APPROVAL_V1.value
+        ),
+        "requested_state": PhaseState.AWAITING_START_APPROVAL,
+        "edge_type": WorkflowEdgeType.UNCONDITIONAL,
+        "phase_contract": contract,
+    }
+    values.update(changes)
+    return PhaseTransitionEvaluationRequest(**values)  # type: ignore[arg-type]
+
+
+def _phase_matrix_request(
+    policy: PhaseTransitionPolicy,
+    contract: PhaseContract,
+    source_state: PhaseState,
+    target_state: PhaseState,
+) -> PhaseTransitionEvaluationRequest:
+    rule = policy.rules_by_pair.get((source_state, target_state))
+    return PhaseTransitionEvaluationRequest(
+        evaluation_version="1",
+        phase_state=_phase_state(contract, current_state=source_state),
+        rule_id=(
+            PhaseTransitionRuleId.DL_2_3_DRAFT_TO_AWAITING_START_APPROVAL_V1.value
+            if rule is None
+            else rule.rule_id.value
+        ),
+        requested_state=target_state,
+        edge_type=(WorkflowEdgeType.UNCONDITIONAL if rule is None else rule.edge_type),
+        phase_contract=contract,
+    )
+
+
+class PhaseDomainAndPolicyTest(unittest.TestCase):
+    def setUp(self) -> None:
+        self.contract = _phase_contract()
+        self.state = _phase_state(self.contract)
+        self.policy = PhaseTransitionPolicy()
+
+    def test_exact_phase_domain_vocabulary_immutability_and_validation(self) -> None:
+        self.assertEqual(
+            (
+                "DRAFT", "AWAITING_START_APPROVAL", "CREATING_BRANCH", "ACTIVE",
+                "PREPARING_MERGE", "READY_FOR_PR", "PR_CREATED", "MERGED",
+                "CLOSED", "BLOCKED", "CANCELLED",
+            ),
+            tuple(state.value for state in PhaseState),
+        )
+        self.assertEqual(self.contract.sha256_digest(), self.state.phase_contract_digest)
+        with self.assertRaises(FrozenInstanceError):
+            self.state.current_state = PhaseState.ACTIVE  # type: ignore[misc]
+        event = AcceptedPhaseStateEvent(
+            event_id=str(UUID(int=1)),
+            project_id="panam",
+            phase_id="DL-P2",
+            phase_contract_digest=self.contract.sha256_digest(),
+            from_state=PhaseState.DRAFT,
+            to_state=PhaseState.AWAITING_START_APPROVAL,
+            transition_reason=PhaseTransitionEvaluationReasonCode.RULE_ALLOWED.value,
+            occurred_at="2026-09-10T10:00:01.000000Z",
+            state_version=1,
+        )
+        with self.assertRaises(FrozenInstanceError):
+            event.state_version = 2  # type: ignore[misc]
+    def test_phase_domain_invalid_values_fail_closed(self) -> None:
+        invalid = (
+            {"project_id": ""},
+            {"phase_id": " bad"},
+            {"phase_contract_digest": "A" * 64},
+            {"current_state": "DRAFT"},
+            {"state_version": True},
+            {"created_at": "created"},
+            {"updated_at": "2026-09-10T09:59:59.000000Z"},
+        )
+        for changes in invalid:
+            values = {
+                "project_id": self.state.project_id,
+                "phase_id": self.state.phase_id,
+                "phase_contract_digest": self.state.phase_contract_digest,
+                "current_state": self.state.current_state,
+                "state_version": self.state.state_version,
+                "created_at": self.state.created_at,
+                "updated_at": self.state.updated_at,
+            }
+            values.update(changes)
+            with self.subTest(changes=changes), self.assertRaises((TypeError, ValueError)):
+                PhaseStateRecord(**values)  # type: ignore[arg-type]
+        with self.assertRaises(ValueError):
+            AcceptedPhaseStateEvent(
+                str(UUID(int=0)), "panam", "DL-P2", self.contract.sha256_digest(),
+                PhaseState.DRAFT, PhaseState.AWAITING_START_APPROVAL,
+                "RULE_ALLOWED", "2026-09-10T10:00:01.000000Z", 1,
+            )
+        with self.assertRaises(ValueError):
+            AcceptedPhaseStateEvent(
+                str(UUID(int=1)), "panam", "DL-P2", self.contract.sha256_digest(),
+                PhaseState.AWAITING_START_APPROVAL, PhaseState.CREATING_BRANCH,
+                "RULE_ALLOWED", "2026-09-10T10:00:01.000000Z", 2,
+            )
+
+    def test_registry_is_exact_immutable_and_excludes_every_noncanonical_pair(self) -> None:
+        expected_path = (
+            PhaseState.DRAFT,
+            PhaseState.AWAITING_START_APPROVAL,
+            PhaseState.CREATING_BRANCH,
+            PhaseState.ACTIVE,
+            PhaseState.PREPARING_MERGE,
+            PhaseState.READY_FOR_PR,
+            PhaseState.PR_CREATED,
+            PhaseState.MERGED,
+            PhaseState.CLOSED,
+        )
+        expected_pairs = set(zip(expected_path, expected_path[1:]))
+        self.assertEqual(expected_pairs, set(self.policy.rules_by_pair))
+        self.assertEqual(8, len(self.policy.rules_by_id))
+        first = self.policy.rules_by_pair[
+            (PhaseState.DRAFT, PhaseState.AWAITING_START_APPROVAL)
+        ]
+        self.assertTrue(first.executable)
+        self.assertIs(WorkflowEdgeType.UNCONDITIONAL, first.edge_type)
+        self.assertTrue(all(
+            not rule.executable and rule.edge_type is None
+            for pair, rule in self.policy.rules_by_pair.items()
+            if pair != (PhaseState.DRAFT, PhaseState.AWAITING_START_APPROVAL)
+        ))
+        with self.assertRaises(TypeError):
+            self.policy.rules_by_pair[(PhaseState.BLOCKED, PhaseState.CANCELLED)] = first  # type: ignore[index]
+        all_pairs = {(source, target) for source in PhaseState for target in PhaseState}
+        self.assertEqual(expected_pairs, all_pairs & set(self.policy.rules_by_pair))
+        self.assertFalse(any(
+            PhaseState.BLOCKED in pair or PhaseState.CANCELLED in pair
+            for pair in self.policy.rules_by_pair
+        ))
+
+    def test_policy_exact_binding_and_failure_matrix(self) -> None:
+        allowed = self.policy.evaluate(_phase_request(self.state, self.contract))
+        self.assertEqual(TransitionEvaluationDecision.ALLOWED, allowed.decision)
+        self.assertEqual(PhaseTransitionEvaluationReasonCode.RULE_ALLOWED, allowed.reason_code)
+        cases = (
+            (object(), TransitionEvaluationDecision.INVALID, PhaseTransitionEvaluationReasonCode.REQUEST_NOT_EVALUATION_REQUEST),
+            (replace(_phase_request(self.state, self.contract), evaluation_version="0"), TransitionEvaluationDecision.INVALID, PhaseTransitionEvaluationReasonCode.EVALUATION_VERSION_MALFORMED),
+            (replace(_phase_request(self.state, self.contract), evaluation_version="2"), TransitionEvaluationDecision.UNSUPPORTED, PhaseTransitionEvaluationReasonCode.EVALUATION_VERSION_UNSUPPORTED),
+            (_phase_request(self.state, None), TransitionEvaluationDecision.GATED, PhaseTransitionEvaluationReasonCode.CONTRACT_REQUIRED),
+            (_phase_request(self.state, PhaseContract("other", "DL-P2", "1")), TransitionEvaluationDecision.INVALID, PhaseTransitionEvaluationReasonCode.CONTRACT_IDENTITY_MISMATCH),
+            (_phase_request(self.state, _phase_contract("OTHER")), TransitionEvaluationDecision.INVALID, PhaseTransitionEvaluationReasonCode.CONTRACT_IDENTITY_MISMATCH),
+            (_phase_request(replace(self.state, phase_contract_digest="a" * 64), self.contract), TransitionEvaluationDecision.INVALID, PhaseTransitionEvaluationReasonCode.CONTRACT_DIGEST_MISMATCH),
+            (_phase_request(self.state, self.contract, evidence_snapshots=(object(),)), TransitionEvaluationDecision.INVALID, PhaseTransitionEvaluationReasonCode.REQUEST_SURPLUS_PREREQUISITE),
+            (_phase_request(self.state, self.contract, approval_snapshot=object()), TransitionEvaluationDecision.INVALID, PhaseTransitionEvaluationReasonCode.REQUEST_SURPLUS_PREREQUISITE),
+            (_phase_request(self.state, self.contract, repository_binding=object()), TransitionEvaluationDecision.INVALID, PhaseTransitionEvaluationReasonCode.REQUEST_SURPLUS_PREREQUISITE),
+            (_phase_request(self.state, self.contract, edge_type=WorkflowEdgeType.EVIDENCE_GATED), TransitionEvaluationDecision.INVALID, PhaseTransitionEvaluationReasonCode.REGISTRY_EDGE_TYPE_MISMATCH),
+        )
+        for candidate, decision, reason in cases:
+            with self.subTest(reason=reason):
+                result = self.policy.evaluate(candidate)
+                self.assertEqual((decision, reason), (result.decision, result.reason_code))
+                self.assertFalse(result.side_effects_performed)
+
+        malformed = _phase_state(self.contract)
+        object.__setattr__(malformed, "phase_contract_digest", "bad")
+        result = self.policy.evaluate(_phase_request(malformed, self.contract))
+        self.assertEqual(PhaseTransitionEvaluationReasonCode.STATE_RECORD_MALFORMED, result.reason_code)
+
+    def test_result_models_reject_incomplete_or_contradictory_bindings(self) -> None:
+        allowed = self.policy.evaluate(_phase_request(self.state, self.contract))
+        self.assertEqual(TransitionEvaluationDecision.ALLOWED, allowed.decision)
+        for field_name in (
+            "project_id",
+            "phase_id",
+            "phase_contract_digest",
+            "current_state",
+            "current_state_version",
+            "requested_state",
+            "rule_id",
+            "edge_type",
+        ):
+            with self.subTest(missing=field_name), self.assertRaises(ValueError):
+                replace(allowed, **{field_name: None})
+
+        contradictory_allowed = (
+            {
+                "current_state": PhaseState.BLOCKED,
+                "requested_state": PhaseState.CANCELLED,
+            },
+            {
+                "current_state": PhaseState.AWAITING_START_APPROVAL,
+                "requested_state": PhaseState.CREATING_BRANCH,
+                "rule_id": PhaseTransitionRuleId.DL_2_3_AWAITING_START_APPROVAL_TO_CREATING_BRANCH_V1,
+                "edge_type": None,
+            },
+        )
+        for changes in contradictory_allowed:
+            with self.subTest(changes=changes), self.assertRaises(ValueError):
+                replace(allowed, **changes)
+
+        other_contract = _phase_contract("OTHER")
+        other_state = _phase_state(
+            other_contract,
+            current_state=PhaseState.AWAITING_START_APPROVAL,
+            state_version=1,
+            updated_at="2026-09-10T10:00:01.000000Z",
+        )
+        other_event = AcceptedPhaseStateEvent(
+            event_id=str(UUID(int=2)),
+            project_id=other_contract.project_id,
+            phase_id=other_contract.phase_id,
+            phase_contract_digest=other_contract.sha256_digest(),
+            from_state=PhaseState.DRAFT,
+            to_state=PhaseState.AWAITING_START_APPROVAL,
+            transition_reason=PhaseTransitionEvaluationReasonCode.RULE_ALLOWED.value,
+            occurred_at="2026-09-10T10:00:01.000000Z",
+            state_version=1,
+        )
+        with self.assertRaises(ValueError):
+            PhaseTransactionalTransitionResult(
+                committed=True,
+                reason_code=PhaseTransactionalTransitionReasonCode.COMMITTED,
+                evaluation_result=allowed,
+                persisted_state=other_state,
+                accepted_event=other_event,
+            )
+        with self.assertRaises(ValueError):
+            PhaseTransactionalTransitionResult(
+                committed=False,
+                reason_code=(
+                    PhaseTransactionalTransitionReasonCode.STALE_PERSISTED_PHASE_STATE
+                ),
+                evaluation_result=allowed,
+                persisted_state=other_state,
+                accepted_event=None,
+            )
+
+    def test_all_121_phase_pairs_are_behaviorally_closed(self) -> None:
+        allowed_pairs: list[tuple[PhaseState, PhaseState]] = []
+        nonallowed_count = 0
+        for source_state in PhaseState:
+            for target_state in PhaseState:
+                result = self.policy.evaluate(
+                    _phase_matrix_request(
+                        self.policy,
+                        self.contract,
+                        source_state,
+                        target_state,
+                    )
+                )
+                if result.decision is TransitionEvaluationDecision.ALLOWED:
+                    allowed_pairs.append((source_state, target_state))
+                else:
+                    nonallowed_count += 1
+        self.assertEqual(
+            [(PhaseState.DRAFT, PhaseState.AWAITING_START_APPROVAL)],
+            allowed_pairs,
+        )
+        self.assertEqual(120, nonallowed_count)
+
+    def test_future_canonical_and_all_other_pairs_are_unsupported(self) -> None:
+        rules = tuple(self.policy.rules_by_pair.values())
+        for index, rule in enumerate(rules[1:], start=1):
+            state = _phase_state(
+                self.contract,
+                current_state=rule.source_state,
+                state_version=index,
+            )
+            request = PhaseTransitionEvaluationRequest(
+                evaluation_version="1",
+                phase_state=state,
+                rule_id=rule.rule_id.value,
+                requested_state=rule.target_state,
+                phase_contract=self.contract,
+            )
+            with self.subTest(rule=rule.rule_id):
+                result = self.policy.evaluate(request)
+                self.assertEqual(TransitionEvaluationDecision.UNSUPPORTED, result.decision)
+                self.assertEqual(
+                    PhaseTransitionEvaluationReasonCode.CANONICAL_RULE_NOT_EXECUTABLE,
+                    result.reason_code,
+                )
+        for source, target in (
+            (PhaseState.DRAFT, PhaseState.DRAFT),
+            (PhaseState.AWAITING_START_APPROVAL, PhaseState.DRAFT),
+            (PhaseState.DRAFT, PhaseState.ACTIVE),
+            (PhaseState.BLOCKED, PhaseState.ACTIVE),
+            (PhaseState.ACTIVE, PhaseState.CANCELLED),
+        ):
+            state = _phase_state(self.contract, current_state=source)
+            request = PhaseTransitionEvaluationRequest(
+                evaluation_version="1",
+                phase_state=state,
+                rule_id=PhaseTransitionRuleId.DL_2_3_DRAFT_TO_AWAITING_START_APPROVAL_V1.value,
+                requested_state=target,
+                edge_type=WorkflowEdgeType.UNCONDITIONAL,
+            )
+            result = self.policy.evaluate(request)
+            self.assertEqual(TransitionEvaluationDecision.UNSUPPORTED, result.decision)
+            self.assertEqual(
+                PhaseTransitionEvaluationReasonCode.REGISTRY_NO_REGISTERED_TRANSITION,
+                result.reason_code,
+            )
+        source = inspect.getsource(phase_policy_module)
+        self.assertFalse(any(
+            token in source
+            for token in (
+                "import sqlite3", "import subprocess", "import urllib",
+                "import socket", "import requests",
+            )
+        ))
+
+
+class PhaseMigrationAndStoreTest(unittest.TestCase):
+    def setUp(self) -> None:
+        self._temporary_directory = tempfile.TemporaryDirectory()
+        self.directory = Path(self._temporary_directory.name)
+        self.path = self.directory / "phase.sqlite3"
+        self.contract = _phase_contract()
+
+    def tearDown(self) -> None:
+        self._temporary_directory.cleanup()
+
+    def _initialize_contract(self) -> SqlitePhaseStore:
+        SqliteRunStore(self.path).initialize("initialized-at")
+        SqlitePhaseContractRepository(self.path).create(self.contract)
+        return SqlitePhaseStore(self.path)
+
+    def test_migration_six_fresh_and_version_five_upgrade_preserve_contracts(self) -> None:
+        SqliteRunStore(self.path).initialize("fresh-at")
+        connection = sqlite3.connect(self.path)
+        try:
+            self.assertEqual(
+                [1, 2, 3, 4, 5, 6],
+                [row[0] for row in connection.execute(
+                    "SELECT version FROM schema_migrations ORDER BY version"
+                )],
+            )
+            self.assertEqual(
+                {"phase_states", "phase_state_events"},
+                {row[0] for row in connection.execute(
+                    "SELECT name FROM sqlite_master WHERE type='table' "
+                    "AND name IN ('phase_states','phase_state_events')"
+                )},
+            )
+        finally:
+            connection.close()
+
+        upgrade_path = self.directory / "upgrade.sqlite3"
+        connection = sqlite3.connect(upgrade_path)
+        connection.row_factory = sqlite3.Row
+        connection.execute("PRAGMA foreign_keys=ON")
+        try:
+            apply_migrations(connection, "v5-at", PRODUCTION_MIGRATIONS[:5])
+            contract = _phase_contract("DL-P2-UPGRADE")
+            connection.execute(
+                "INSERT INTO phases VALUES(?, ?, ?, ?)",
+                (contract.project_id, contract.phase_id, "1", contract.sha256_digest()),
+            )
+            connection.commit()
+            apply_migrations(connection, "v6-at", PRODUCTION_MIGRATIONS)
+            self.assertEqual(
+                (contract.project_id, contract.phase_id, "1", contract.sha256_digest()),
+                tuple(connection.execute("SELECT * FROM phases").fetchone()),
+            )
+            self.assertEqual(0, connection.execute("SELECT count(*) FROM phase_states").fetchone()[0])
+            self.assertEqual(0, connection.execute("SELECT count(*) FROM phase_state_events").fetchone()[0])
+        finally:
+            connection.close()
+
+    def test_migration_six_rolls_back_and_constraints_fail_closed(self) -> None:
+        connection = sqlite3.connect(self.path)
+        connection.row_factory = sqlite3.Row
+        try:
+            apply_migrations(connection, "v5-at", PRODUCTION_MIGRATIONS[:5])
+            failing_registry = PRODUCTION_MIGRATIONS[:5] + (
+                Migration(6, (PRODUCTION_MIGRATIONS[5].statements[0], "INSERT INTO absent_table VALUES(1)")),
+            )
+            with self.assertRaises(MigrationError):
+                apply_migrations(connection, "v6-at", failing_registry)
+            self.assertEqual(
+                [1, 2, 3, 4, 5],
+                [row[0] for row in connection.execute(
+                    "SELECT version FROM schema_migrations ORDER BY version"
+                )],
+            )
+            self.assertIsNone(connection.execute(
+                "SELECT name FROM sqlite_master WHERE name='phase_states'"
+            ).fetchone())
+        finally:
+            connection.close()
+
+        store = self._initialize_contract()
+        other_contract = _phase_contract("DL-P2-OTHER")
+        SqlitePhaseContractRepository(self.path).create(other_contract)
+        connection = sqlite3.connect(self.path)
+        connection.execute("PRAGMA foreign_keys=ON")
+        try:
+            with self.assertRaises(sqlite3.IntegrityError):
+                connection.execute(
+                    "INSERT INTO phase_states VALUES('panam','missing',?,'DRAFT',0,?,?)",
+                    (self.contract.sha256_digest(), "2026-09-10T10:00:00.000000Z", "2026-09-10T10:00:00.000000Z"),
+                )
+            with self.assertRaises(sqlite3.IntegrityError):
+                connection.execute(
+                    "INSERT INTO phase_states VALUES('panam','DL-P2',?,'DRAFT',0,?,?)",
+                    (other_contract.sha256_digest(), "2026-09-10T10:00:00.000000Z", "2026-09-10T10:00:00.000000Z"),
+                )
+            with self.assertRaises(sqlite3.IntegrityError):
+                connection.execute(
+                    "INSERT INTO phase_states VALUES('panam','DL-P2',?,'UNKNOWN',0,?,?)",
+                    (self.contract.sha256_digest(), "2026-09-10T10:00:00.000000Z", "2026-09-10T10:00:00.000000Z"),
+                )
+        finally:
+            connection.close()
+        self.assertIsNone(store.get_state("panam", "DL-P2"))
+
+    def test_explicit_initialization_repository_round_trip_and_failures(self) -> None:
+        store = self._initialize_contract()
+        state = store.initialize_phase(
+            self.contract,
+            "2026-09-10T10:00:00.000000Z",
+        )
+        self.assertEqual((PhaseState.DRAFT, 0), (state.current_state, state.state_version))
+        self.assertEqual(state, store.get_state("panam", "DL-P2"))
+        inspection = SqlitePhaseStateInspectionRepository(self.path)
+        self.assertEqual(state, inspection.get_state("panam", "DL-P2"))
+        self.assertEqual([], inspection.get_history("panam", "DL-P2"))
+        with self.assertRaises(RepositoryError) as duplicate:
+            store.initialize_phase(self.contract, "2026-09-10T10:00:01.000000Z")
+        self.assertEqual(RepositoryFailureCode.DUPLICATE_ENTITY, duplicate.exception.code)
+
+        missing = _phase_contract("MISSING")
+        with self.assertRaises(RepositoryError) as absent:
+            store.initialize_phase(missing, "2026-09-10T10:00:01.000000Z")
+        self.assertEqual(RepositoryFailureCode.RELATIONSHIP_VIOLATION, absent.exception.code)
+
+    def test_malformed_persisted_state_and_history_fail_closed(self) -> None:
+        store = self._initialize_contract()
+        store.initialize_phase(self.contract, "2026-09-10T10:00:00.000000Z")
+        connection = sqlite3.connect(self.path)
+        try:
+            connection.execute("PRAGMA ignore_check_constraints=ON")
+            connection.execute(
+                "UPDATE phase_states SET current_state='UNKNOWN' "
+                "WHERE project_id='panam' AND phase_id='DL-P2'"
+            )
+            connection.commit()
+        finally:
+            connection.close()
+        with self.assertRaises(RepositoryError) as malformed:
+            SqlitePhaseStateInspectionRepository(self.path).get_state("panam", "DL-P2")
+        self.assertEqual(
+            RepositoryFailureCode.MALFORMED_PERSISTED_PAYLOAD,
+            malformed.exception.code,
+        )
+        connection = sqlite3.connect(self.path)
+        connection.execute("PRAGMA foreign_keys=ON")
+        try:
+            connection.execute("PRAGMA ignore_check_constraints=ON")
+            connection.execute(
+                "UPDATE phase_states SET current_state='DRAFT' "
+                "WHERE project_id='panam' AND phase_id='DL-P2'"
+            )
+            connection.execute(
+                "INSERT INTO phase_state_events(event_id,project_id,phase_id,"
+                "phase_contract_digest,from_state,to_state,transition_reason,"
+                "occurred_at,state_version) VALUES(?,?,?,?,?,?,?,?,?)",
+                (
+                    str(UUID(int=40)), "panam", "DL-P2", self.contract.sha256_digest(),
+                    "DRAFT", "AWAITING_START_APPROVAL", "RULE_ALLOWED",
+                    "2026-09-10T10:00:01.000000Z", 2,
+                ),
+            )
+            connection.commit()
+        finally:
+            connection.close()
+        with self.assertRaises(RepositoryError) as malformed_history:
+            SqlitePhaseStateInspectionRepository(self.path).get_history("panam", "DL-P2")
+        self.assertEqual(
+            RepositoryFailureCode.MALFORMED_PERSISTED_PAYLOAD,
+            malformed_history.exception.code,
+        )
+
+    def test_cross_bound_contract_digest_is_rejected_without_repair(self) -> None:
+        store = self._initialize_contract()
+        other_contract = _phase_contract("DL-P2-OTHER")
+        SqlitePhaseContractRepository(self.path).create(other_contract)
+        store.initialize_phase(self.contract, "2026-09-10T10:00:00.000000Z")
+        connection = sqlite3.connect(self.path)
+        try:
+            connection.execute("PRAGMA foreign_keys=OFF")
+            connection.execute(
+                "UPDATE phase_states SET phase_contract_digest=? "
+                "WHERE project_id=? AND phase_id=?",
+                (other_contract.sha256_digest(), "panam", "DL-P2"),
+            )
+            connection.commit()
+            self.assertNotEqual([], connection.execute("PRAGMA foreign_key_check").fetchall())
+        finally:
+            connection.close()
+
+        with self.assertRaises(RepositoryError) as corrupt:
+            SqlitePhaseStateInspectionRepository(self.path).get_state("panam", "DL-P2")
+        self.assertEqual(
+            RepositoryFailureCode.MALFORMED_PERSISTED_PAYLOAD,
+            corrupt.exception.code,
+        )
+        connection = sqlite3.connect(self.path)
+        try:
+            self.assertEqual(
+                other_contract.sha256_digest(),
+                connection.execute(
+                    "SELECT phase_contract_digest FROM phase_states "
+                    "WHERE project_id=? AND phase_id=?",
+                    ("panam", "DL-P2"),
+                ).fetchone()[0],
+            )
+        finally:
+            connection.close()
+
+
+class _BarrierPhasePolicy(PhaseTransitionPolicy):
+    def __init__(self, barrier: threading.Barrier) -> None:
+        super().__init__()
+        self._barrier = barrier
+
+    def evaluate(self, candidate: object) -> PhaseTransitionEvaluationResult:
+        result = super().evaluate(candidate)
+        if result.decision is TransitionEvaluationDecision.ALLOWED:
+            self._barrier.wait(timeout=5)
+        return result
+
+
+class PhaseTransactionalServiceTest(unittest.TestCase):
+    def setUp(self) -> None:
+        self._temporary_directory = tempfile.TemporaryDirectory()
+        self.path = Path(self._temporary_directory.name) / "phase-service.sqlite3"
+        self.contract = _phase_contract()
+        SqliteRunStore(self.path).initialize("initialized-at")
+        SqlitePhaseContractRepository(self.path).create(self.contract)
+        self.store = SqlitePhaseStore(self.path)
+        self.state = self.store.initialize_phase(
+            self.contract,
+            "2026-09-10T10:00:00.000000Z",
+        )
+
+    def tearDown(self) -> None:
+        self._temporary_directory.cleanup()
+
+    def _service(
+        self,
+        *,
+        event_id: int = 10,
+        policy: PhaseTransitionPolicy | None = None,
+    ) -> PhaseTransitionService:
+        return PhaseTransitionService(
+            self.store,
+            policy=policy,
+            clock=lambda: datetime(2026, 9, 10, 10, 0, 1, tzinfo=timezone.utc),
+            id_factory=lambda: str(UUID(int=event_id)),
+        )
+
+    def test_success_is_one_atomic_increment_and_one_ordered_event(self) -> None:
+        result = self._service().transition(_phase_request(self.state, self.contract))
+        self.assertTrue(result.committed)
+        self.assertEqual(PhaseTransactionalTransitionReasonCode.COMMITTED, result.reason_code)
+        self.assertEqual(
+            (PhaseState.AWAITING_START_APPROVAL, 1),
+            (result.persisted_state.current_state, result.persisted_state.state_version),  # type: ignore[union-attr]
+        )
+        self.assertEqual(result.persisted_state, self.store.get_state("panam", "DL-P2"))
+        history = self.store.get_history("panam", "DL-P2")
+        self.assertEqual(1, len(history))
+        self.assertEqual((1, str(UUID(int=10))), (history[0].state_version, history[0].event_id))
+        self.assertEqual(
+            history,
+            SqlitePhaseStateInspectionRepository(self.path).get_history("panam", "DL-P2"),
+        )
+
+    def test_nonallowed_evaluation_never_opens_persistence(self) -> None:
+        policy = PhaseTransitionPolicy()
+        nonallowed_count = 0
+        with patch.object(
+            self.store,
+            "_connect",
+            side_effect=AssertionError("opened"),
+        ) as persistence:
+            for source_state in PhaseState:
+                for target_state in PhaseState:
+                    request = _phase_matrix_request(
+                        policy,
+                        self.contract,
+                        source_state,
+                        target_state,
+                    )
+                    if (
+                        source_state is PhaseState.DRAFT
+                        and target_state is PhaseState.AWAITING_START_APPROVAL
+                    ):
+                        continue
+                    result = self._service(policy=policy).transition(request)
+                    nonallowed_count += 1
+                    self.assertFalse(result.committed)
+                    self.assertEqual(
+                        PhaseTransactionalTransitionReasonCode.EVALUATION_NOT_ALLOWED,
+                        result.reason_code,
+                    )
+        self.assertEqual(120, nonallowed_count)
+        persistence.assert_not_called()
+
+    def test_missing_and_stale_complete_snapshots_do_not_mutate(self) -> None:
+        missing_contract = _phase_contract("MISSING")
+        SqlitePhaseContractRepository(self.path).create(missing_contract)
+        missing_state = _phase_state(missing_contract)
+        missing = self._service(event_id=11).transition(
+            _phase_request(missing_state, missing_contract)
+        )
+        self.assertEqual(
+            PhaseTransactionalTransitionReasonCode.PHASE_STATE_NOT_FOUND,
+            missing.reason_code,
+        )
+        stale_snapshots = (
+            replace(self.state, state_version=1),
+            replace(self.state, updated_at="2026-09-10T10:00:00.000001Z"),
+        )
+        for index, snapshot in enumerate(stale_snapshots, start=12):
+            with self.subTest(snapshot=snapshot):
+                result = self._service(event_id=index).transition(
+                    _phase_request(snapshot, self.contract)
+                )
+                self.assertEqual(
+                    PhaseTransactionalTransitionReasonCode.STALE_PERSISTED_PHASE_STATE,
+                    result.reason_code,
+                )
+                self.assertEqual(self.state, result.persisted_state)
+        self.assertEqual(self.state, self.store.get_state("panam", "DL-P2"))
+        self.assertEqual([], self.store.get_history("panam", "DL-P2"))
+
+    def test_cas_loss_event_collision_insert_and_commit_failure_roll_back(self) -> None:
+        def proxied(**options: object) -> _ConnectionProxy:
+            connection = sqlite3.connect(self.path)
+            connection.row_factory = sqlite3.Row
+            connection.execute("PRAGMA foreign_keys=ON")
+            return _ConnectionProxy(connection, **options)  # type: ignore[arg-type]
+
+        proxy = proxied(zero_phase_update=True)
+        with patch.object(self.store, "_connect", return_value=proxy):
+            result = self._service(event_id=20).transition(
+                _phase_request(self.state, self.contract)
+            )
+        self.assertEqual(
+            PhaseTransactionalTransitionReasonCode.STALE_PERSISTED_PHASE_STATE,
+            result.reason_code,
+        )
+        self.assertGreaterEqual(proxy.rollback_calls, 1)
+        self.assertEqual(self.state, self.store.get_state("panam", "DL-P2"))
+
+        failing = proxied(fail_statement="INSERT INTO PHASE_STATE_EVENTS")
+        with patch.object(self.store, "_connect", return_value=failing):
+            with self.assertRaises(sqlite3.OperationalError):
+                self._service(event_id=21).transition(_phase_request(self.state, self.contract))
+        self.assertGreaterEqual(failing.rollback_calls, 1)
+        self.assertEqual(self.state, self.store.get_state("panam", "DL-P2"))
+
+        suppressed = proxied(suppress_phase_event_insert=True)
+        with patch.object(self.store, "_connect", return_value=suppressed):
+            with self.assertRaises(RepositoryError) as insertion:
+                self._service(event_id=24).transition(
+                    _phase_request(self.state, self.contract)
+                )
+        self.assertEqual(
+            RepositoryFailureCode.SQLITE_OPERATIONAL_FAILURE,
+            insertion.exception.code,
+        )
+        self.assertGreaterEqual(suppressed.rollback_calls, 1)
+        self.assertEqual(self.state, self.store.get_state("panam", "DL-P2"))
+        self.assertEqual([], self.store.get_history("panam", "DL-P2"))
+
+        commit_failure = proxied(fail_commit=True)
+        with patch.object(self.store, "_connect", return_value=commit_failure):
+            with self.assertRaises(sqlite3.OperationalError):
+                self._service(event_id=22).transition(_phase_request(self.state, self.contract))
+        self.assertGreaterEqual(commit_failure.rollback_calls, 1)
+        self.assertEqual(self.state, self.store.get_state("panam", "DL-P2"))
+        self.assertEqual([], self.store.get_history("panam", "DL-P2"))
+
+        collision_id = str(UUID(int=23))
+        connection = sqlite3.connect(self.path)
+        connection.execute("PRAGMA foreign_keys=ON")
+        try:
+            connection.execute(
+                "INSERT INTO phase_state_events(event_id,project_id,phase_id,"
+                "phase_contract_digest,from_state,to_state,transition_reason,"
+                "occurred_at,state_version) VALUES(?,?,?,?,?,?,?,?,?)",
+                (
+                    collision_id, "panam", "DL-P2", self.contract.sha256_digest(),
+                    "DRAFT", "AWAITING_START_APPROVAL", "RULE_ALLOWED",
+                    "2026-09-10T10:00:00.500000Z", 1,
+                ),
+            )
+            connection.commit()
+        finally:
+            connection.close()
+        with self.assertRaises(sqlite3.IntegrityError):
+            self._service(event_id=23).transition(_phase_request(self.state, self.contract))
+        self.assertEqual(self.state, self.store.get_state("panam", "DL-P2"))
+        connection = sqlite3.connect(self.path)
+        try:
+            self.assertEqual(1, connection.execute("SELECT count(*) FROM phase_state_events").fetchone()[0])
+        finally:
+            connection.close()
+
+    def test_altered_phase_schema_is_rejected_without_partial_mutation(self) -> None:
+        connection = sqlite3.connect(self.path)
+        try:
+            connection.execute(
+                "CREATE TRIGGER suppress_phase_event BEFORE INSERT "
+                "ON phase_state_events BEGIN SELECT RAISE(IGNORE); END"
+            )
+            connection.commit()
+        finally:
+            connection.close()
+
+        with self.assertRaises(RepositoryError) as altered:
+            self._service(event_id=25).transition(
+                _phase_request(self.state, self.contract)
+            )
+        self.assertEqual(RepositoryFailureCode.SCHEMA_MISMATCH, altered.exception.code)
+
+        connection = sqlite3.connect(self.path)
+        try:
+            self.assertEqual(
+                (PhaseState.DRAFT.value, 0),
+                tuple(connection.execute(
+                    "SELECT current_state, state_version FROM phase_states "
+                    "WHERE project_id=? AND phase_id=?",
+                    ("panam", "DL-P2"),
+                ).fetchone()),
+            )
+            self.assertEqual(
+                0,
+                connection.execute("SELECT count(*) FROM phase_state_events").fetchone()[0],
+            )
+        finally:
+            connection.close()
+
+    def test_schema_validation_holds_the_transition_write_lock(self) -> None:
+        trigger_sql = (
+            "CREATE TRIGGER review_remove AFTER INSERT ON phase_state_events "
+            "BEGIN DELETE FROM phase_state_events WHERE event_id=NEW.event_id; END"
+        )
+        connections: list[sqlite3.Connection] = []
+        statements: list[str] = []
+        lock_errors: list[int] = []
+        original_connect = self.store._connect
+        original_validate = self.store._validate_mutation_schema
+
+        def traced_connect(*args: object) -> sqlite3.Connection:
+            connection = original_connect(*args)  # type: ignore[arg-type]
+            connection.set_trace_callback(statements.append)
+            connections.append(connection)
+            return connection
+
+        def validate_with_competing_ddl(
+            connection: sqlite3.Connection,
+            entity_name: str,
+            identity: str,
+        ) -> None:
+            self.assertIs(connections[0], connection)
+            self.assertTrue(connection.in_transaction)
+            self.assertIn("BEGIN IMMEDIATE", statements)
+            original_validate(connection, entity_name, identity)
+            competing = sqlite3.connect(self.path, timeout=0)
+            try:
+                with self.assertRaises(sqlite3.OperationalError) as locked:
+                    competing.execute(trigger_sql)
+                    competing.commit()
+                self.assertEqual(sqlite3.SQLITE_BUSY, locked.exception.sqlite_errorcode)
+                lock_errors.append(locked.exception.sqlite_errorcode)
+            finally:
+                competing.close()
+            self.assertTrue(connection.in_transaction)
+
+        with (
+            patch.object(self.store, "_connect", side_effect=traced_connect),
+            patch.object(
+                self.store,
+                "_validate_mutation_schema",
+                side_effect=validate_with_competing_ddl,
+            ) as validation,
+        ):
+            result = self._service(event_id=26).transition(
+                _phase_request(self.state, self.contract)
+            )
+        validation.assert_called_once()
+        self.assertEqual([sqlite3.SQLITE_BUSY], lock_errors)
+        self.assertEqual(1, statements.count("BEGIN IMMEDIATE"))
+        self.assertEqual(1, statements.count("COMMIT"))
+        self.assertNotIn("ROLLBACK", statements)
+        self.assertTrue(result.committed)
+        self.assertEqual(result.persisted_state, self.store.get_state("panam", "DL-P2"))
+        self.assertEqual(1, result.persisted_state.state_version)  # type: ignore[union-attr]
+        self.assertEqual([result.accepted_event], self.store.get_history("panam", "DL-P2"))
+
+        # The competing DDL becomes possible only after the writer has finished.
+        competing = sqlite3.connect(self.path, timeout=0)
+        try:
+            competing.execute("BEGIN IMMEDIATE")
+            competing.execute(trigger_sql)
+            competing.rollback()
+        finally:
+            competing.close()
+        self.assertEqual([result.accepted_event], self.store.get_history("panam", "DL-P2"))
+
+    def test_schema_change_after_connection_precheck_is_rejected(self) -> None:
+        original_connect = self.store._connect
+
+        def connect_then_change_schema(*args: object) -> sqlite3.Connection:
+            connection = original_connect(*args)  # type: ignore[arg-type]
+            competing = sqlite3.connect(self.path, timeout=0)
+            try:
+                competing.execute(
+                    "CREATE TRIGGER review_remove AFTER INSERT ON phase_state_events "
+                    "BEGIN DELETE FROM phase_state_events WHERE event_id=NEW.event_id; END"
+                )
+                competing.commit()
+            finally:
+                competing.close()
+            return connection
+
+        with patch.object(self.store, "_connect", side_effect=connect_then_change_schema):
+            with self.assertRaises(RepositoryError) as altered:
+                self._service(event_id=27).transition(
+                    _phase_request(self.state, self.contract)
+                )
+        self.assertEqual(RepositoryFailureCode.SCHEMA_MISMATCH, altered.exception.code)
+        connection = sqlite3.connect(self.path, timeout=0)
+        try:
+            self.assertEqual(
+                (PhaseState.DRAFT.value, 0),
+                tuple(connection.execute(
+                    "SELECT current_state, state_version FROM phase_states"
+                ).fetchone()),
+            )
+            self.assertEqual(
+                0, connection.execute("SELECT count(*) FROM phase_state_events").fetchone()[0]
+            )
+            connection.execute("BEGIN IMMEDIATE")
+            connection.rollback()
+        finally:
+            connection.close()
+
+    def test_event_readback_failure_rolls_back_after_one_row_insert(self) -> None:
+        class ReadbackFaultConnection(_ConnectionProxy):
+            inserted_rowcount: int | None = None
+            readback_in_transaction = False
+
+            def execute(
+                self,
+                statement: str,
+                parameters: tuple[object, ...] = (),
+            ) -> object:
+                cursor = super().execute(statement, parameters)
+                normalized = " ".join(statement.upper().split())
+                if normalized.startswith("INSERT INTO PHASE_STATE_EVENTS"):
+                    self.inserted_rowcount = cursor.rowcount  # type: ignore[attr-defined]
+                    if fault == "absent":
+                        self.connection.execute("DELETE FROM phase_state_events")
+                    elif fault == "event_id":
+                        self.connection.execute(
+                            "UPDATE phase_state_events SET event_id=?", (str(UUID(int=99)),)
+                        )
+                    elif fault in {"timestamp", "malformed"}:
+                        timestamp = (
+                            "2026-09-10T10:00:02.000000Z"
+                            if fault == "timestamp"
+                            else "2026-13-10T10:00:01.000000Z"
+                        )
+                        self.connection.execute(
+                            "UPDATE phase_state_events SET occurred_at=?", (timestamp,)
+                        )
+                if normalized.startswith("SELECT EVENT_ID, PROJECT_ID, PHASE_ID"):
+                    self.readback_in_transaction = self.in_transaction
+                    if fault == "duplicate":
+                        rows = cursor.fetchall()  # type: ignore[attr-defined]
+
+                        class DuplicateRows:
+                            def fetchall(self) -> list[sqlite3.Row]:
+                                return rows + rows
+
+                        return DuplicateRows()
+                return cursor
+
+        for fault in ("absent", "event_id", "timestamp", "malformed", "duplicate"):
+            with self.subTest(fault=fault):
+                connection = sqlite3.connect(self.path)
+                connection.row_factory = sqlite3.Row
+                connection.execute("PRAGMA foreign_keys=ON")
+                proxy = ReadbackFaultConnection(connection)
+                with patch.object(self.store, "_connect", return_value=proxy):
+                    with self.assertRaises(RepositoryError) as rejected:
+                        self._service(event_id=28).transition(
+                            _phase_request(self.state, self.contract)
+                        )
+                expected_code = (
+                    RepositoryFailureCode.MALFORMED_PERSISTED_PAYLOAD
+                    if fault == "malformed"
+                    else RepositoryFailureCode.SQLITE_OPERATIONAL_FAILURE
+                )
+                self.assertEqual(expected_code, rejected.exception.code)
+                self.assertEqual(1, proxy.inserted_rowcount)
+                self.assertTrue(proxy.readback_in_transaction)
+                self.assertEqual(0, proxy.commit_calls)
+                self.assertGreaterEqual(proxy.rollback_calls, 1)
+                self.assertEqual(1, proxy.close_calls)
+                self.assertEqual(self.state, self.store.get_state("panam", "DL-P2"))
+                self.assertEqual([], self.store.get_history("panam", "DL-P2"))
+
+    def test_transaction_boundary_failures_close_and_roll_back(self) -> None:
+        cases = (
+            ("BEGIN IMMEDIATE", False),
+            ("SELECT PS.PROJECT_ID", False),
+            ("SELECT EVENT_ID, PROJECT_ID, PHASE_ID", False),
+            ("SELECT EVENT_ID, PROJECT_ID, PHASE_ID", True),
+        )
+        for statement, rollback_failure in cases:
+            with self.subTest(statement=statement, rollback_failure=rollback_failure):
+                connection = sqlite3.connect(self.path)
+                connection.row_factory = sqlite3.Row
+                connection.execute("PRAGMA foreign_keys=ON")
+                proxy = _ConnectionProxy(
+                    connection,
+                    fail_statement=statement,
+                    fail_rollback=rollback_failure,
+                )
+                with patch.object(self.store, "_connect", return_value=proxy):
+                    with self.assertRaises(sqlite3.OperationalError) as failed:
+                        self._service(event_id=29).transition(
+                            _phase_request(self.state, self.contract)
+                        )
+                self.assertEqual(0, proxy.commit_calls)
+                self.assertEqual(1, proxy.close_calls)
+                if statement != "BEGIN IMMEDIATE":
+                    self.assertGreaterEqual(proxy.rollback_calls, 1)
+                if rollback_failure:
+                    self.assertIsInstance(failed.exception.__cause__, sqlite3.OperationalError)
+                self.assertEqual(self.state, self.store.get_state("panam", "DL-P2"))
+                self.assertEqual([], self.store.get_history("panam", "DL-P2"))
+
+    def test_competing_writers_have_at_most_one_success(self) -> None:
+        barrier = threading.Barrier(2)
+        policy = _BarrierPhasePolicy(barrier)
+        results: list[PhaseTransactionalTransitionResult] = []
+        errors: list[BaseException] = []
+
+        def invoke(event_id: int) -> None:
+            try:
+                results.append(
+                    self._service(event_id=event_id, policy=policy).transition(
+                        _phase_request(self.state, self.contract)
+                    )
+                )
+            except BaseException as error:
+                errors.append(error)
+
+        threads = [threading.Thread(target=invoke, args=(30 + index,)) for index in range(2)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(timeout=10)
+        self.assertFalse(any(thread.is_alive() for thread in threads))
+        self.assertEqual([], errors)
+        self.assertEqual(1, sum(result.committed for result in results))
+        self.assertEqual(
+            [
+                PhaseTransactionalTransitionReasonCode.COMMITTED,
+                PhaseTransactionalTransitionReasonCode.STALE_PERSISTED_PHASE_STATE,
+            ],
+            sorted((result.reason_code for result in results), key=lambda code: code.value),
+        )
+        self.assertEqual(1, len(self.store.get_history("panam", "DL-P2")))
 
 
 if __name__ == "__main__":

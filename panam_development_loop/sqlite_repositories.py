@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import NoReturn
 
 from .models import (
+    AcceptedPhaseStateEvent,
     AcceptedStateEvent,
     ApprovalBinding,
     ApprovalValidationCode,
@@ -18,6 +19,8 @@ from .models import (
     DevelopmentRunState,
     MilestoneContract,
     PhaseContract,
+    PhaseState,
+    PhaseStateRecord,
     ProjectPolicy,
     QueueMutationKind,
     QueueResult,
@@ -75,6 +78,8 @@ _REQUIRED_TABLES = frozenset(
         "workflow_command_events",
         "worker_sessions",
         "worker_operations",
+        "phase_states",
+        "phase_state_events",
     }
 )
 
@@ -162,7 +167,7 @@ def _validate_current_schema(
             identity,
             error,
         )
-    if versions != [1, 2, 3, 4, 5]:
+    if versions != [1, 2, 3, 4, 5, 6]:
         raise RepositoryError(RepositoryFailureCode.SCHEMA_MISMATCH, entity_name, identity)
     project_policy_shape = [
         (
@@ -215,6 +220,7 @@ def _validate_current_schema(
         raise RepositoryError(RepositoryFailureCode.SCHEMA_MISMATCH, entity_name, identity)
     _validate_queue_schema(connection, entity_name, identity)
     _validate_worker_schema(connection, entity_name, identity)
+    _validate_phase_schema(connection, entity_name, identity)
 
 
 def _validate_queue_schema(
@@ -607,6 +613,157 @@ def _validate_worker_schema(
         raise RepositoryError(
             RepositoryFailureCode.SCHEMA_MISMATCH, entity_name, identity
         )
+
+
+def _validate_phase_schema(
+    connection: sqlite3.Connection,
+    entity_name: str,
+    identity: str,
+) -> None:
+    expected_states = [
+        ("project_id", "TEXT", 1, None, 1),
+        ("phase_id", "TEXT", 1, None, 2),
+        ("phase_contract_digest", "TEXT", 1, None, 0),
+        ("current_state", "TEXT", 1, None, 0),
+        ("state_version", "INTEGER", 1, None, 0),
+        ("created_at", "TEXT", 1, None, 0),
+        ("updated_at", "TEXT", 1, None, 0),
+    ]
+    expected_events = [
+        ("event_sequence", "INTEGER", 0, None, 1),
+        ("event_id", "TEXT", 1, None, 0),
+        ("project_id", "TEXT", 1, None, 0),
+        ("phase_id", "TEXT", 1, None, 0),
+        ("phase_contract_digest", "TEXT", 1, None, 0),
+        ("from_state", "TEXT", 1, None, 0),
+        ("to_state", "TEXT", 1, None, 0),
+        ("transition_reason", "TEXT", 1, None, 0),
+        ("occurred_at", "TEXT", 1, None, 0),
+        ("state_version", "INTEGER", 1, None, 0),
+    ]
+    try:
+        state_columns = connection.execute("PRAGMA table_xinfo(phase_states)").fetchall()
+        event_columns = connection.execute(
+            "PRAGMA table_xinfo(phase_state_events)"
+        ).fetchall()
+        state_indexes = connection.execute("PRAGMA index_list(phase_states)").fetchall()
+        event_indexes = connection.execute(
+            "PRAGMA index_list(phase_state_events)"
+        ).fetchall()
+        state_fks = connection.execute("PRAGMA foreign_key_list(phase_states)").fetchall()
+        event_fks = connection.execute(
+            "PRAGMA foreign_key_list(phase_state_events)"
+        ).fetchall()
+        triggers = connection.execute(
+            "SELECT name FROM sqlite_master WHERE type='trigger' "
+            "AND tbl_name IN ('phase_states','phase_state_events')"
+        ).fetchall()
+        schema_sql = {
+            row["name"]: row["sql"]
+            for row in connection.execute(
+                "SELECT name, sql FROM sqlite_master WHERE "
+                "name IN ('phase_states','phase_state_events',"
+                "'phases_identity_contract_digest_uq',"
+                "'phase_states_current_state_idx',"
+                "'phase_state_events_phase_sequence_idx')"
+            )
+        }
+    except sqlite3.Error as error:
+        _raise_repository_error(
+            RepositoryFailureCode.SQLITE_OPERATIONAL_FAILURE,
+            entity_name,
+            identity,
+            error,
+        )
+
+    shape = lambda rows: [
+        (row["name"], row["type"].upper(), row["notnull"], row["dflt_value"], row["pk"])
+        for row in rows
+        if row["hidden"] == 0
+    ]
+    if shape(state_columns) != expected_states or shape(event_columns) != expected_events:
+        raise RepositoryError(RepositoryFailureCode.SCHEMA_MISMATCH, entity_name, identity)
+
+    explicit_state = {row["name"]: row for row in state_indexes if row["origin"] == "c"}
+    explicit_event = {row["name"]: row for row in event_indexes if row["origin"] == "c"}
+    if set(explicit_state) != {"phase_states_current_state_idx"} or set(
+        explicit_event
+    ) != {"phase_state_events_phase_sequence_idx"}:
+        raise RepositoryError(RepositoryFailureCode.SCHEMA_MISMATCH, entity_name, identity)
+    if any(
+        row["unique"] != 0 or row["partial"] != 0
+        for row in (*explicit_state.values(), *explicit_event.values())
+    ):
+        raise RepositoryError(RepositoryFailureCode.SCHEMA_MISMATCH, entity_name, identity)
+
+    def index_shape(name: str) -> tuple[tuple[str, int], ...]:
+        rows = connection.execute(
+            "SELECT name, desc, key FROM pragma_index_xinfo(?) ORDER BY seqno",
+            (name,),
+        ).fetchall()
+        return tuple((row["name"], row["desc"]) for row in rows if row["key"] == 1)
+
+    try:
+        if index_shape("phase_states_current_state_idx") != (
+            ("current_state", 0),
+            ("updated_at", 0),
+            ("project_id", 0),
+            ("phase_id", 0),
+        ) or index_shape("phase_state_events_phase_sequence_idx") != (
+            ("project_id", 0),
+            ("phase_id", 0),
+            ("event_sequence", 0),
+        ):
+            raise RepositoryError(
+                RepositoryFailureCode.SCHEMA_MISMATCH,
+                entity_name,
+                identity,
+            )
+    except sqlite3.Error as error:
+        _raise_repository_error(
+            RepositoryFailureCode.SQLITE_OPERATIONAL_FAILURE,
+            entity_name,
+            identity,
+            error,
+        )
+
+    state_fk_shape = sorted(
+        (row["table"], row["from"], row["to"], row["on_update"], row["on_delete"])
+        for row in state_fks
+    )
+    event_fk_shape = sorted(
+        (row["table"], row["from"], row["to"], row["on_update"], row["on_delete"])
+        for row in event_fks
+    )
+    if state_fk_shape != sorted(
+        [
+            ("phases", "project_id", "project_id", "RESTRICT", "RESTRICT"),
+            ("phases", "phase_id", "phase_id", "RESTRICT", "RESTRICT"),
+            ("phases", "phase_contract_digest", "contract_digest", "RESTRICT", "RESTRICT"),
+        ]
+    ) or event_fk_shape != sorted(
+        [
+            ("phase_states", "project_id", "project_id", "RESTRICT", "RESTRICT"),
+            ("phase_states", "phase_id", "phase_id", "RESTRICT", "RESTRICT"),
+            ("phase_states", "phase_contract_digest", "phase_contract_digest", "RESTRICT", "RESTRICT"),
+        ]
+    ):
+        raise RepositoryError(RepositoryFailureCode.SCHEMA_MISMATCH, entity_name, identity)
+    if triggers:
+        raise RepositoryError(RepositoryFailureCode.SCHEMA_MISMATCH, entity_name, identity)
+
+    expected_statements: dict[str, str] = {}
+    for statement in PRODUCTION_MIGRATIONS[5].statements:
+        tokens = statement.split()
+        name_index = 3 if tokens[1] == "UNIQUE" else 2
+        expected_statements[tokens[name_index]] = statement
+    normalize = lambda value: " ".join(value.strip().rstrip(";").split()).lower()
+    if set(schema_sql) != set(expected_statements) or any(
+        not isinstance(schema_sql[name], str)
+        or normalize(schema_sql[name]) != normalize(expected_statements[name])
+        for name in expected_statements
+    ):
+        raise RepositoryError(RepositoryFailureCode.SCHEMA_MISMATCH, entity_name, identity)
 
 
 def _open_connection(
@@ -1212,6 +1369,96 @@ class SqliteDevelopmentRunInspectionRepository:
             _raise_payload_error(error, "AcceptedStateEvent", identity)
 
 
+class SqlitePhaseStateInspectionRepository:
+    """Read-only SQLite adapter for Phase state and accepted events."""
+
+    def __init__(self, database_path: Path) -> None:
+        self._database_path = Path(database_path)
+
+    def get_state(self, project_id: str, phase_id: str) -> PhaseStateRecord | None:
+        project_id = _validate_query_identity(project_id, "PhaseState", "project_id")
+        phase_id = _validate_query_identity(phase_id, "PhaseState", "phase_id")
+        identity = _identity_text(("project_id", project_id), ("phase_id", phase_id))
+        row = _fetch_one(
+            self._database_path,
+            "PhaseState",
+            identity,
+            """
+            SELECT ps.project_id, ps.phase_id, ps.phase_contract_digest,
+                   ps.current_state, ps.state_version, ps.created_at, ps.updated_at,
+                   p.contract_version,
+                   p.contract_digest AS authoritative_contract_digest
+            FROM phase_states AS ps
+            LEFT JOIN phases AS p
+              ON p.project_id = ps.project_id AND p.phase_id = ps.phase_id
+            WHERE ps.project_id = ? AND ps.phase_id = ?
+            """,
+            (project_id, phase_id),
+        )
+        if row is None:
+            return None
+        try:
+            state = _decode_phase_state(row)
+            contract = PhaseContract(
+                project_id=row["project_id"],
+                phase_id=row["phase_id"],
+                contract_version=row["contract_version"],
+            )
+            if (
+                contract.project_id != state.project_id
+                or contract.phase_id != state.phase_id
+                or contract.sha256_digest() != row["authoritative_contract_digest"]
+                or state.phase_contract_digest != row["authoritative_contract_digest"]
+            ):
+                raise ValueError("Phase state contract binding")
+            return state
+        except (ValueError, TypeError, IndexError, KeyError) as error:
+            _raise_payload_error(error, "PhaseState", identity)
+
+    def get_history(
+        self,
+        project_id: str,
+        phase_id: str,
+    ) -> list[AcceptedPhaseStateEvent]:
+        project_id = _validate_query_identity(
+            project_id,
+            "AcceptedPhaseStateEvent",
+            "project_id",
+        )
+        phase_id = _validate_query_identity(
+            phase_id,
+            "AcceptedPhaseStateEvent",
+            "phase_id",
+        )
+        identity = _identity_text(("project_id", project_id), ("phase_id", phase_id))
+        rows = _fetch_all(
+            self._database_path,
+            "AcceptedPhaseStateEvent",
+            identity,
+            """
+            SELECT event_id, project_id, phase_id, phase_contract_digest,
+                   from_state, to_state, transition_reason, occurred_at,
+                   state_version
+            FROM phase_state_events
+            WHERE project_id = ? AND phase_id = ?
+            ORDER BY state_version ASC, event_sequence ASC
+            """,
+            (project_id, phase_id),
+        )
+        try:
+            events = [
+                _decode_phase_state_event(row, project_id, phase_id)
+                for row in rows
+            ]
+            if events and [event.state_version for event in events] != list(
+                range(1, len(events) + 1)
+            ):
+                raise ValueError("state_version")
+            return events
+        except (ValueError, TypeError, IndexError, KeyError) as error:
+            _raise_payload_error(error, "AcceptedPhaseStateEvent", identity)
+
+
 def _required_persisted_text(value: object, field_name: str) -> str:
     if not isinstance(value, str) or not value:
         raise ValueError(field_name)
@@ -1236,6 +1483,39 @@ def _decode_development_run(row: sqlite3.Row) -> DevelopmentRun:
         created_at=_required_persisted_text(row["created_at"], "created_at"),
         updated_at=_required_persisted_text(row["updated_at"], "updated_at"),
     )
+
+
+def _decode_phase_state(row: sqlite3.Row) -> PhaseStateRecord:
+    return PhaseStateRecord(
+        project_id=row["project_id"],
+        phase_id=row["phase_id"],
+        phase_contract_digest=row["phase_contract_digest"],
+        current_state=PhaseState(row["current_state"]),
+        state_version=row["state_version"],
+        created_at=row["created_at"],
+        updated_at=row["updated_at"],
+    )
+
+
+def _decode_phase_state_event(
+    row: sqlite3.Row,
+    expected_project_id: str,
+    expected_phase_id: str,
+) -> AcceptedPhaseStateEvent:
+    event = AcceptedPhaseStateEvent(
+        event_id=row["event_id"],
+        project_id=row["project_id"],
+        phase_id=row["phase_id"],
+        phase_contract_digest=row["phase_contract_digest"],
+        from_state=PhaseState(row["from_state"]),
+        to_state=PhaseState(row["to_state"]),
+        transition_reason=row["transition_reason"],
+        occurred_at=row["occurred_at"],
+        state_version=row["state_version"],
+    )
+    if event.project_id != expected_project_id or event.phase_id != expected_phase_id:
+        raise ValueError("Phase event identity")
+    return event
 
 
 def _decode_accepted_state_event(row: sqlite3.Row, expected_run_id: str) -> AcceptedStateEvent:

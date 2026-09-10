@@ -1,4 +1,4 @@
-"""Internal controlled SQLite migration support through the DL-2.1 schema."""
+"""Internal controlled SQLite migration support through the DL-2.3 schema."""
 
 import re
 import sqlite3
@@ -511,6 +511,107 @@ PRODUCTION_MIGRATIONS = (
         ),
     ),
     Migration(version=5, statements=_migration_five_statements()),
+    Migration(
+        version=6,
+        statements=(
+            """
+            CREATE TABLE phase_states (
+                project_id TEXT NOT NULL
+                    CHECK(length(CAST(project_id AS BLOB)) BETWEEN 1 AND 256),
+                phase_id TEXT NOT NULL
+                    CHECK(length(CAST(phase_id AS BLOB)) BETWEEN 1 AND 256),
+                phase_contract_digest TEXT NOT NULL
+                    CHECK(length(phase_contract_digest) = 64
+                          AND phase_contract_digest NOT GLOB '*[^0-9a-f]*'),
+                current_state TEXT NOT NULL
+                    CHECK(current_state IN (
+                        'DRAFT','AWAITING_START_APPROVAL','CREATING_BRANCH','ACTIVE',
+                        'PREPARING_MERGE','READY_FOR_PR','PR_CREATED','MERGED','CLOSED',
+                        'BLOCKED','CANCELLED'
+                    )),
+                state_version INTEGER NOT NULL
+                    CHECK(typeof(state_version) = 'integer'
+                          AND state_version BETWEEN 0 AND 9223372036854775807),
+                created_at TEXT NOT NULL
+                    CHECK(length(created_at)=27 AND substr(created_at,5,1)='-'
+                          AND substr(created_at,8,1)='-' AND substr(created_at,11,1)='T'
+                          AND substr(created_at,14,1)=':' AND substr(created_at,17,1)=':'
+                          AND substr(created_at,20,1)='.' AND substr(created_at,27,1)='Z'
+                          AND substr(created_at,1,4)||substr(created_at,6,2)||substr(created_at,9,2)||substr(created_at,12,2)||substr(created_at,15,2)||substr(created_at,18,2)||substr(created_at,21,6) NOT GLOB '*[^0-9]*'),
+                updated_at TEXT NOT NULL
+                    CHECK(length(updated_at)=27 AND substr(updated_at,5,1)='-'
+                          AND substr(updated_at,8,1)='-' AND substr(updated_at,11,1)='T'
+                          AND substr(updated_at,14,1)=':' AND substr(updated_at,17,1)=':'
+                          AND substr(updated_at,20,1)='.' AND substr(updated_at,27,1)='Z'
+                          AND substr(updated_at,1,4)||substr(updated_at,6,2)||substr(updated_at,9,2)||substr(updated_at,12,2)||substr(updated_at,15,2)||substr(updated_at,18,2)||substr(updated_at,21,6) NOT GLOB '*[^0-9]*'),
+                PRIMARY KEY(project_id, phase_id),
+                UNIQUE(project_id, phase_id, phase_contract_digest),
+                FOREIGN KEY(project_id, phase_id, phase_contract_digest)
+                    REFERENCES phases(project_id, phase_id, contract_digest)
+                    ON UPDATE RESTRICT ON DELETE RESTRICT,
+                CHECK(updated_at >= created_at)
+            )
+            """,
+            """
+            CREATE TABLE phase_state_events (
+                event_sequence INTEGER PRIMARY KEY AUTOINCREMENT
+                    CHECK(event_sequence > 0),
+                event_id TEXT NOT NULL UNIQUE
+                    CHECK(length(event_id) = 36 AND event_id = lower(event_id)
+                          AND substr(event_id,9,1)='-' AND substr(event_id,14,1)='-'
+                          AND substr(event_id,19,1)='-' AND substr(event_id,24,1)='-'
+                          AND length(replace(event_id,'-','')) = 32
+                          AND replace(event_id,'-','') NOT GLOB '*[^0-9a-f]*'
+                          AND event_id <> '00000000-0000-0000-0000-000000000000'),
+                project_id TEXT NOT NULL,
+                phase_id TEXT NOT NULL,
+                phase_contract_digest TEXT NOT NULL
+                    CHECK(length(phase_contract_digest) = 64
+                          AND phase_contract_digest NOT GLOB '*[^0-9a-f]*'),
+                from_state TEXT NOT NULL
+                    CHECK(from_state IN (
+                        'DRAFT','AWAITING_START_APPROVAL','CREATING_BRANCH','ACTIVE',
+                        'PREPARING_MERGE','READY_FOR_PR','PR_CREATED','MERGED','CLOSED',
+                        'BLOCKED','CANCELLED'
+                    )),
+                to_state TEXT NOT NULL
+                    CHECK(to_state IN (
+                        'DRAFT','AWAITING_START_APPROVAL','CREATING_BRANCH','ACTIVE',
+                        'PREPARING_MERGE','READY_FOR_PR','PR_CREATED','MERGED','CLOSED',
+                        'BLOCKED','CANCELLED'
+                    )),
+                transition_reason TEXT NOT NULL
+                    CHECK(transition_reason = 'RULE_ALLOWED'),
+                occurred_at TEXT NOT NULL
+                    CHECK(length(occurred_at)=27 AND substr(occurred_at,5,1)='-'
+                          AND substr(occurred_at,8,1)='-' AND substr(occurred_at,11,1)='T'
+                          AND substr(occurred_at,14,1)=':' AND substr(occurred_at,17,1)=':'
+                          AND substr(occurred_at,20,1)='.' AND substr(occurred_at,27,1)='Z'
+                          AND substr(occurred_at,1,4)||substr(occurred_at,6,2)||substr(occurred_at,9,2)||substr(occurred_at,12,2)||substr(occurred_at,15,2)||substr(occurred_at,18,2)||substr(occurred_at,21,6) NOT GLOB '*[^0-9]*'),
+                state_version INTEGER NOT NULL
+                    CHECK(typeof(state_version) = 'integer' AND state_version = 1),
+                UNIQUE(project_id, phase_id, state_version),
+                FOREIGN KEY(project_id, phase_id, phase_contract_digest)
+                    REFERENCES phase_states(project_id, phase_id, phase_contract_digest)
+                    ON UPDATE RESTRICT ON DELETE RESTRICT,
+                CHECK(from_state = 'DRAFT'
+                      AND to_state = 'AWAITING_START_APPROVAL')
+            )
+            """,
+            """
+            CREATE UNIQUE INDEX phases_identity_contract_digest_uq
+            ON phases(project_id, phase_id, contract_digest)
+            """,
+            """
+            CREATE INDEX phase_states_current_state_idx
+            ON phase_states(current_state, updated_at, project_id, phase_id)
+            """,
+            """
+            CREATE INDEX phase_state_events_phase_sequence_idx
+            ON phase_state_events(project_id, phase_id, event_sequence)
+            """,
+        ),
+    ),
 )
 
 _FORBIDDEN_OPERATION_TOKENS = frozenset(
@@ -551,13 +652,13 @@ def validate_migration_registry(
         raise MigrationError(MigrationFailureCode.INVALID_REGISTRY, "declared order")
     if versions != list(range(1, len(versions) + 1)):
         raise MigrationError(MigrationFailureCode.INVALID_REGISTRY, "contiguous versions")
-    if require_production_version and versions != [1, 2, 3, 4, 5]:
+    if require_production_version and versions != [1, 2, 3, 4, 5, 6]:
         raise MigrationError(MigrationFailureCode.INVALID_REGISTRY, "production version")
     return registry
 
 
 def initialize_database(database_path: Path, applied_at: str) -> None:
-    """Initialize an explicit production database path through migration version 5."""
+    """Initialize an explicit production database path through migration version 6."""
 
     registry = validate_migration_registry(PRODUCTION_MIGRATIONS, require_production_version=True)
     connection = sqlite3.connect(database_path)

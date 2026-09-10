@@ -4,11 +4,13 @@ from enum import Enum
 from typing import Protocol
 
 from .models import (
+    AcceptedPhaseStateEvent,
     AcceptedStateEvent,
     ApprovalBinding,
     DevelopmentRun,
     MilestoneContract,
     PhaseContract,
+    PhaseStateRecord,
     ProjectPolicy,
     QueueResult,
     ValidatedCommandEnvelope,
@@ -94,6 +96,18 @@ class DevelopmentRunInspectionRepository(Protocol):
     def get_run(self, run_id: str) -> DevelopmentRun | None: ...
 
     def get_history(self, run_id: str) -> list[AcceptedStateEvent]: ...
+
+
+class PhaseStateInspectionRepository(Protocol):
+    """Read-only query port for persisted Phase state and accepted events."""
+
+    def get_state(self, project_id: str, phase_id: str) -> PhaseStateRecord | None: ...
+
+    def get_history(
+        self,
+        project_id: str,
+        phase_id: str,
+    ) -> list[AcceptedPhaseStateEvent]: ...
 
 
 class WorkflowCommandRepository(Protocol):
