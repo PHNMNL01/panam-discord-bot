@@ -116,13 +116,20 @@ and the preceding question that explicitly included local commits. The human the
 explicitly approved `git add` and local `git commit` for all 19 new Companion files
 on this branch as an exception to AGENTS.md, excluding secrets/runtime and push.
 
-Git finalization proceeds under that exact approval. The commit ID and final
-verification will be recorded after committing; the later live-test GO remains
-outstanding.
+Implementation committed under that exact approval:
+`3f9027ce04a08c343ff33463e55f45ff98cb1e06`
+(`Add isolated Discord GPT-Live companion experiment`). Its parent is the fixed
+baseline. The later live-test GO remains outstanding.
 The first staging attempt after the direct exception succeeded, exit0. Its only
 warnings were the expected Windows LF→CRLF conversion notices. The exact staged
 list contains all 19 additions below, with no modifications/deletions, credentials
 or runtime paths; staged whitespace check passed.
+Post-commit `git status --short` was empty and `git diff --check` passed, exit0.
+The complete baseline-to-HEAD diff contains only these19 additions. No existing
+application, requirements, instruction or Development Loop path changed.
+`.env`, `.venv` and runtime budget paths were confirmed ignored. This evidence
+update is a follow-up documentation commit; use `git log -2 --oneline` for its
+identity without attempting to embed its own hash.
 
 Exact proposed added paths, all under `panam_companion/`:
 
