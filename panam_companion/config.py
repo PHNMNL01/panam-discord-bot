@@ -46,23 +46,38 @@ def load_config(path=CONFIG, environ=None):
         raise SafeError("Chybí panam_companion/.env. Vyplňte místní kopii .env.example.")
     try:
         if path.stat().st_size > 8192:
-            raise ValueError
+            raise SafeError("Neplatná konfigurace: config_file_too_large=true.")
         # No load_dotenv, interpolation, discovery or environment mutation.
         data = dotenv_values(path, interpolate=False, encoding="utf-8-sig")
+        problems = []
         if set(data) != FIELDS:
-            raise ValueError
-        values = [data[k] for k in ("PANAM_OPENAI_API_KEY", "PANAM_DISCORD_BOT_TOKEN")]
-        if any(not v or v.startswith("REPLACE_") or any(c.isspace() for c in v) for v in values):
-            raise ValueError
-        ids = [data[k] for k in (
+            # Never echo unknown keys: an accidentally pasted secret may be a key.
+            if set(data) - FIELDS:
+                problems.append("unexpected_fields=true")
+        secret_names = ("PANAM_OPENAI_API_KEY", "PANAM_DISCORD_BOT_TOKEN")
+        values = [data.get(k) for k in secret_names]
+        for name, value in zip(secret_names, values):
+            if not value or value.startswith("REPLACE_"):
+                problems.append(f"{name}=missing")
+            elif any(c.isspace() for c in value):
+                problems.append(f"{name}=invalid")
+        id_names = (
             "PANAM_TEST_BOT_ID", "PANAM_TEST_GUILD_ID", "PANAM_TEST_VOICE_CHANNEL_ID",
-            "PANAM_TEST_CONTROL_CHANNEL_ID", "PANAM_TEST_USER_ID")]
-        if any(not v or not v.isascii() or not v.isdigit() or not 0 < int(v) < 2**64 for v in ids):
-            raise ValueError
+            "PANAM_TEST_CONTROL_CHANNEL_ID", "PANAM_TEST_USER_ID")
+        ids = [data.get(k) for k in id_names]
+        for name, value in zip(id_names, ids):
+            if not value:
+                problems.append(f"{name}=missing")
+            elif not value.isascii() or not value.isdigit() or not 0 < int(value) < 2**64:
+                problems.append(f"{name}=invalid")
+        if problems:
+            raise SafeError("Neúplná nebo neplatná konfigurace: " + "; ".join(problems) + ".")
         numbers = list(map(int, ids))
         if len(set(numbers)) != 5:
-            raise ValueError
+            raise SafeError("Neplatná konfigurace: duplicate_test_ids=true.")
         return Config(*values, *numbers)
+    except SafeError:
+        raise
     except Exception:
         raise SafeError("Neúplná nebo neplatná konfigurace. Hodnoty nebyly vypsány.") from None
 

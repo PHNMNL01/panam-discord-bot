@@ -70,6 +70,40 @@ class ConfigTests(TemporaryTest):
             with self.subTest(suffix=suffix), self.assertRaises(SafeError):
                 load_config(path, {})
 
+    def test_diagnostic_reports_missing_fields_without_secret_values(self):
+        path = self.fixture()
+        path.write_text(path.read_text().replace("PANAM_TEST_BOT_ID=100", "PANAM_TEST_BOT_ID="))
+        with self.assertRaises(SafeError) as error:
+            load_config(path, {})
+        message = str(error.exception)
+        self.assertIn("PANAM_TEST_BOT_ID=missing", message)
+        self.assertNotIn("synthetic_key", message)
+        self.assertNotIn("synthetic_bot", message)
+
+    def test_diagnostic_never_echoes_unknown_keys_or_invalid_values(self):
+        path = self.directory / ".env"
+        path.write_text("private_unknown_key=private_unknown_value\n"
+                        "PANAM_OPENAI_API_KEY=private invalid key\n"
+                        "PANAM_DISCORD_BOT_TOKEN=private invalid token\n"
+                        "PANAM_TEST_BOT_ID=private_invalid_id\n", encoding="utf-8")
+        with self.assertRaises(SafeError) as error:
+            load_config(path, {})
+        message = str(error.exception)
+        self.assertIn("unexpected_fields=true", message)
+        self.assertIn("PANAM_OPENAI_API_KEY=invalid", message)
+        self.assertIn("PANAM_DISCORD_BOT_TOKEN=invalid", message)
+        self.assertIn("PANAM_TEST_BOT_ID=invalid", message)
+        self.assertIn("PANAM_TEST_USER_ID=missing", message)
+        self.assertNotIn("private", message)
+
+    def test_duplicate_ids_have_value_free_diagnostic(self):
+        path = self.fixture()
+        path.write_text(path.read_text().replace("PANAM_TEST_USER_ID=500", "PANAM_TEST_USER_ID=100"))
+        with self.assertRaises(SafeError) as error:
+            load_config(path, {})
+        self.assertIn("duplicate_test_ids=true", str(error.exception))
+        self.assertNotIn("100", str(error.exception))
+
 
 class BudgetTests(TemporaryTest):
     def test_reservation_survives_restart_and_blocks_second_session(self):
