@@ -50,6 +50,25 @@ members privileged intent is used. Enable Discord Developer Mode to copy IDs.
 Do not reuse a production bot token. Bot identity and its entire guild list must
 match the test configuration before guild-only command synchronization.
 
+The five required IDs in `.env.example` and `config.py` are:
+
+| Field | Exact resource | Where to copy it in Discord |
+|---|---|---|
+| `PANAM_TEST_BOT_ID` | The separate test bot's user account | Right-click that bot's profile in the test guild, Copy User ID |
+| `PANAM_TEST_GUILD_ID` | Dedicated test server | Right-click the server icon, Copy Server ID |
+| `PANAM_TEST_VOICE_CHANNEL_ID` | Ordinary test voice channel | Right-click that voice channel, Copy Channel ID |
+| `PANAM_TEST_CONTROL_CHANNEL_ID` | Test text channel for `/panam ovladani` | Right-click that text channel, Copy Channel ID |
+| `PANAM_TEST_USER_ID` | The sole consenting human tester's account | Right-click the tester's profile, Copy User ID |
+
+Enable User Settings → Advanced → Developer Mode to expose those copy actions
+([official instructions](https://support.discord.com/hc/en-us/articles/206346498-Where-can-I-find-my-User-Server-Message-ID)).
+All five must be distinct positive numeric IDs. Names, invitation codes, message
+IDs and tokens are not substitutes. The code checks the bot's actual user ID;
+do not enter an unverified application/client ID merely because it is visible
+in the Developer Portal. Confirm that existing resources are exclusively for
+this POC before selecting them. Application/bot creation, invitations, permission
+changes and key/account operations require separate human approval.
+
 Create/use an experiment OpenAI project key in the
 [API dashboard](https://platform.openai.com/api-keys) with access to Live and
 Responses. Account credit/model access must be checked by the human. No billing
@@ -73,6 +92,8 @@ variables) produce a value-free conflict error; use a clean shell. Do not print
 the environment. `--check` validates local presence/schema/versions and prints
 non-secret destination IDs only; it does not authenticate or test access.
 Both `.env` and nested `runtime/` are already ignored by baseline Git rules.
+During assisted setup, the human confirms that local configuration is ready
+before the agent runs `--check`. A successful offline check is not live GO.
 
 ## Offline checks
 
@@ -99,6 +120,8 @@ Set-Location C:\Panam_APP_astra
 Check the printed destination IDs and type `CONNECT`. This logs in the test bot,
 then registers `/panam ovladani` only in the configured test guild. No voice
 channel or OpenAI connection starts yet. An API key alone never starts a session.
+The proposed batch starts with the short S01 smoke test in `BENCHMARK.md`, then
+the unchanged acceptance sequence using the remaining shared allowance.
 
 Join the configured voice channel as the sole consenting user. Select your
 microphone/output device and preferably headphones in Discord. **Discord can

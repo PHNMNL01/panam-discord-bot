@@ -146,3 +146,84 @@ action performed. No application process or paid session was started. Test child
 processes completed. Only ignored test fixtures/counters may remain under the
 module's runtime directory; they contain synthetic data. There is no unattended
 task or running demonstration to stop.
+
+## Assisted configuration preparation — 2026-09-11
+
+Resumed on `experiment/realtime-voice-discord-poc` at
+`747f9207325953441566aadb360cf9b399d35dca`, clean tracked worktree, no upstream,
+unchanged origin. The human explicitly limited this stage to readiness; live GO
+is outstanding. No additional helpers were started.
+
+Actual browser capability: Codex in-app browser through CUA; no native app or
+other browser surface was exposed. The portal was opened without reading a
+credential screen and handed to the human. The human confirmed return to the
+Applications list and supplied the name PANAM. A stale tab handle failed once;
+browser inventory located the human's current Applications tab and restored
+read-only access. The list shows PANAM, application ID 1508847632498299025.
+The human subsequently identified it as the original application and forbade
+reuse/modification. It was not opened or changed. The human authorized a separate
+Companion application/bot and invitation only to their designated test guild
+1485632710931255406, with voice channel 1485632711367327806 and minimum POC
+permissions. They supplied control channel 1508898355051237578 and consenting
+user 164441949099524096. These four IDs are human-supplied, not API-verified.
+Only the new bot's user ID remains missing.
+
+The agent submitted creation of "Panam Companion POC" once, under that explicit
+approval. The portal remained on the Applications URL without a confirmed new
+application. No duplicate request was made. The browser was handed back for the
+human to resolve any CAPTCHA/MFA or report a non-secret error. The human confirmed
+completion of a human-approval step and return to General Information. The agent
+then verified "Panam Companion POC", application ID 1547935699158827089, with
+zero server/user installations reported by the portal (approximate daily counts).
+No token page was opened or captured. An invite is being prepared for the exact
+test guild with `bot applications.commands`, `integration_type=0`, locked guild
+selection, and permission bitfield 3146752 (View Channel, Connect, Speak), using
+the documented [bot authorization flow](https://docs.discord.com/developers/topics/oauth2)
+and [permission bits](https://docs.discord.com/developers/topics/permissions).
+Invitation completion and effective channel permissions are not yet verified.
+The invite first opened a Discord desktop handoff. Selecting its visible
+"Continue to Discord" control redirected the browser to `/login`. No login DOM
+or screenshot was read; the human was asked to authenticate and return to the
+invite, or report if installation already completed in the desktop app. No second
+installation was attempted.
+
+The actual `.env.example` and configuration implementation were inspected.
+Five ID meanings and official copy paths were explained to the human. A local
+`.env` was created once from the secret-free template using exclusive file
+creation; the operation would preserve an existing file without reading it.
+`git check-ignore -- panam_companion/.env` confirmed exclusion. Subsequent human
+edits are not inspected. The human has not yet confirmed configuration readiness;
+no `--check`, bot login, provider request or microphone capture was run in this
+readiness stage.
+
+S01 was proposed and preregistered before results: short end-to-end speech,
+mute/unmute and Stop, consuming the same USD1 / 600-second proposed live batch.
+The existing 20 questions, scoring, uncertainty requirements and thresholds are
+unchanged. Status is NOT TESTED, not an acceptance substitute.
+
+Additional human assistance: **credentials/account access** — the human completed
+the requested portal handoff and confirmed a safe page (whether login/MFA was
+necessary is not observed); **configuration identification** — identified the
+original PANAM and supplied four test destination IDs; **permission** — authorized
+separate app/bot creation and a test-guild-only invitation; **account verification**
+— completed the human-approval step during app creation. No secret values were
+received or observed. No human code
+repair, physical audio result or budget extension occurred.
+Waiting on account/resource clarification is separate from active preparation;
+elapsed time is not estimated.
+
+Documentation-only verification: `git diff --check` passed (exit0), with the
+existing Windows LF-to-CRLF conversion warnings on the three edited documents.
+The baseline comparison outside `panam_companion/` was empty. Only README.md,
+BENCHMARK.md and EVIDENCE.md changed; no runtime/source logic or test thresholds
+changed, so no unrelated test rerun was performed.
+
+Staging these three documents succeeded. Staged whitespace check passed and the
+exact index contained only their modifications. Automatic approval review then
+rejected the local commit: it treated the earlier permission for 19 new files as
+not covering later modifications to these three documents. No commit occurred
+and no workaround was attempted. The human then explicitly approved staging and
+a local commit of subsequent changes to only README.md, BENCHMARK.md and
+EVIDENCE.md, including this rejection record, without secrets/runtime or push.
+One attempted evidence patch had a nonmatching text anchor and was rejected
+without changing files; correcting the anchor resolved it.

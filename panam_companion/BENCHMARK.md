@@ -5,7 +5,26 @@ is an uninstrumented user report, not a measured baseline. No percentage speedup
 
 ## Fixed sequence and method
 
-Use Q01–Q20 exactly once in order in the first warm session; do not substitute
+### Initial smoke test, proposed before live GO
+
+After explicit live GO, run S01 first in the proposed USD1 / 600-second batch, with a
+target of at most 45 seconds active plus up to 15 seconds for closure. Start
+manually and ask exactly: "Jaký je rozdíl mezi knihou a časopisem?" The human
+confirms whether a relevant Czech answer is audible; record startup separately.
+Briefly exercise mute/unmute, then Stop. Confirm local cleanup and authoritative
+provider finalization before starting the benchmark session. If sound, transport
+or cleanup fails, stop and diagnose before proposing any retry. No smoke result
+exists yet and no live operation is authorized by this document.
+
+S01 is a separate, unscored functional check. It does not replace Q01-Q20, any
+acceptance case, or any latency threshold. Its actual session time and delegated
+calls consume the same persistent batch allowance; a new session does not reset
+that allowance. Continue only with the remaining budget. A successful smoke test
+alone cannot establish acceptance or a VERIFIED outcome.
+
+### Fixed latency trials
+
+Use Q01–Q20 exactly once in order in the first warm benchmark session; do not substitute
 questions after seeing outcomes. Speak naturally, allow each substantive answer,
 and mark a failure if no relevant answer begins within 15 seconds. Stop for the
 duration/budget guard even if this leaves trials NOT TESTED. Retests are extra
@@ -80,10 +99,12 @@ timing leaves B NOT VERIFIED, not PASS.
   participant; environment conflict; no secret logging; baseline isolation.
 - F: reproduce pinned setup, offline checks, then explicit live startup.
 
-Plan two sessions: first Q01–Q20 and brief context/interruptions as time permits;
-second reset and remaining C/D cases. Max 285 s active each + up to 15 s close,
-≤600 s across all attempts. If insufficient, report PARTIAL; request another batch
-before spending more. No avoidable paid provider-error tests.
+After the smoke session, plan a benchmark session with Q01–Q20 and brief context/
+interruptions as time permits, then a reset session for remaining C/D cases.
+Each session allows at most 285 s active plus up to 15 s close, reduced when the
+shared remainder is smaller. The smoke, all starts, retries and cleanup count
+toward ≤600 s across all attempts. If insufficient, report PARTIAL; request another
+batch before spending more. No avoidable paid provider-error tests.
 
 ## Results at offline checkpoint
 
