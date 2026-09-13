@@ -7,6 +7,28 @@ import sys
 from .config import RUNTIME, SafeError, load_config, safe_identity
 
 
+def safe_startup_failure(error):
+    # Fixed labels only. Never print exception messages, args, HTTP bodies or
+    # arbitrary class names, which may contain credentials or provider content.
+    return {
+        "LoginFailure": "discord_token_rejected=true",
+        "Forbidden": "discord_http_forbidden=true",
+        "HTTPException": "discord_http_error=true",
+        "PrivilegedIntentsRequired": "discord_intents_rejected=true",
+        "ClientConnectorCertificateError": "tls_certificate_error=true",
+        "ClientConnectorSSLError": "tls_error=true",
+        "ClientConnectorError": "connection_error=true",
+        "ClientOSError": "connection_error=true",
+        "TimeoutError": "connection_timeout=true",
+        "ConnectionClosed": "discord_gateway_closed=true",
+        "ImportError": "dependency_import_error=true",
+        "ModuleNotFoundError": "dependency_import_error=true",
+        "AttributeError": "local_attribute_error=true",
+        "TypeError": "local_type_error=true",
+        "RuntimeError": "runtime_error=true",
+    }.get(type(error).__name__, "unclassified_startup_error=true")
+
+
 def check_versions():
     expected = {"discord.py": "2.7.1", "discord-ext-voice-recv": "0.5.2a179",
                 "davey": "0.1.6", "audioop-lts": "0.2.2", "websockets": "17.1",
@@ -68,8 +90,9 @@ def main():
     except (KeyboardInterrupt, EOFError):
         print("Ukončeno.")
         return 0
-    except Exception:
-        print("Experiment selhal. Citlivé podrobnosti byly potlačeny; ověřte stav rozpočtu a konfiguraci.",
+    except Exception as error:
+        print("Experiment selhal: " + safe_startup_failure(error) +
+              ". Citlivé podrobnosti byly potlačeny.",
               file=sys.stderr)
         return 2
 

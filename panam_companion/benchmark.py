@@ -32,7 +32,7 @@ def summarize(rows):
                 value = float(row.get("audible_seconds", ""))
                 uncertainty = float(row.get("uncertainty_seconds", ""))
                 if (not math.isfinite(value) or not math.isfinite(uncertainty) or value < 0 or
-                        uncertainty < .3 or row.get("method") != "human_stopwatch" or status != "PASS"):
+                        uncertainty < .3 or row.get("method") not in {"human_stopwatch", "human_monotonic_panel"} or status != "PASS"):
                     raise ValueError
                 latencies.append(value)
                 upper.append(value + uncertainty)

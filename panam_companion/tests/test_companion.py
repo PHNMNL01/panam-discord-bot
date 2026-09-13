@@ -105,6 +105,22 @@ class ConfigTests(TemporaryTest):
         self.assertNotIn("100", str(error.exception))
 
 
+class StartupDiagnosticTests(unittest.TestCase):
+    def test_login_failure_label_excludes_exception_body(self):
+        from discord import LoginFailure
+        from panam_companion.__main__ import safe_startup_failure
+        result = safe_startup_failure(LoginFailure("private_token_or_http_body"))
+        self.assertEqual(result, "discord_token_rejected=true")
+        self.assertNotIn("private", result)
+
+    def test_unknown_exception_type_and_value_are_suppressed(self):
+        from panam_companion.__main__ import safe_startup_failure
+        unusual = type("private_exception_name", (Exception,), {})
+        result = safe_startup_failure(unusual("private_exception_body"))
+        self.assertEqual(result, "unclassified_startup_error=true")
+        self.assertNotIn("private", result)
+
+
 class BudgetTests(TemporaryTest):
     def test_reservation_survives_restart_and_blocks_second_session(self):
         budget = Budget(self.directory)
@@ -609,6 +625,17 @@ class BenchmarkTests(unittest.TestCase):
         rows[-1]["attempt"] = "2"
         with self.assertRaises(ValueError):
             summarize(rows)
+
+    def test_manual_panel_preserves_uncertainty_thresholds_and_failures(self):
+        from panam_companion.benchmark import summarize
+        rows = self.rows()
+        for row in rows:
+            row["method"] = "human_monotonic_panel"
+        self.assertTrue(summarize(rows)["status"].startswith("PASS"))
+        rows[0]["uncertainty_seconds"] = "0.29"
+        self.assertEqual(summarize(rows)["status"], "NOT VERIFIED")
+        rows[0]["status"] = "FAIL"
+        self.assertEqual(summarize(rows)["status"], "FAIL")
 
 
 class IsolationTests(unittest.TestCase):

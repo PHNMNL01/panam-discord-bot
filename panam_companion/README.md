@@ -1,6 +1,13 @@
 # Panam Companion — isolated Discord GPT-Live POC
 
-**Offline implementation; live operation and audible latency NOT VERIFIED.**
+**PARTIAL: the human accepted the real Discord conversation as successful and
+ended the live batch. Numerical latency and full acceptance remain NOT VERIFIED.**
+No demo is running. A new live instruction is needed before further testing.
+See BENCHMARK.md for the final category results and measurement incident.
+Phase closure: technical feasibility **PROVEN for the tested Discord + GPT-Live
+path**; human-observed natural Czech conversation and subjectively immediate
+response **PASS**; formal audible-latency acceptance **NOT PROVEN**. The closure
+made only offline corrections/checks, with no additional Discord/OpenAI live run.
 Read [BENCHMARK.md](BENCHMARK.md) before live tests. Current evidence and activity
 are in [EVIDENCE.md](EVIDENCE.md); protocol/route decisions in [RESEARCH.md](RESEARCH.md).
 
@@ -94,6 +101,17 @@ non-secret destination IDs only; it does not authenticate or test access.
 Both `.env` and nested `runtime/` are already ignored by baseline Git rules.
 During assisted setup, the human confirms that local configuration is ready
 before the agent runs `--check`. A successful offline check is not live GO.
+If the check rejects configuration, it identifies known fields as `missing` or
+`invalid`, or reports `unexpected_fields=true` / `duplicate_test_ids=true`.
+It never echoes unknown field names or values; a pasted secret can itself become
+an unknown key. Fill the five ID lines as well as both secret lines. A secret
+passing this check only has a valid local shape; provider access is unverified.
+During authorized startup, `discord_token_rejected=true` means Discord rejected
+the configured bot token. Correct only the dedicated test bot's token locally;
+an application ID, public key or original Panam token is not a substitute. Other
+startup failures use fixed category flags, never raw exception bodies or tokens.
+Token regeneration/account operations require their own approval and human
+credential-screen handoff. A successful `--check` does not prove token validity.
 
 ## Offline checks
 
@@ -196,6 +214,44 @@ with the human before a code-reviewed recovery; there is intentionally no reset
 command. **Do not delete/edit counters to regain allowance.** Malformed counters
 also fail closed. A process dying cannot prove remote finalization.
 
+## Manual audible-latency panel
+
+After preparing the live batch, run this separate, unpaid measurement aid:
+
+```powershell
+.\.venv\Scripts\python.exe -B -m panam_companion.timing_panel
+```
+
+Open `http://127.0.0.1:8766/` (use `--port` for another free loopback port).
+Practice without speaking. For a separately authorized next measurement phase,
+select **Připravit měřenou sadu Q01–Q20** before any paid Start. The operator must
+verify the visible **MĚŘENÁ SADA · Q01 · připraveno pro E** state, enabled E and
+working local storage; completed practice alone is not measurement readiness.
+Do not speak a test question until the agent confirms the actual bot is listening.
+E marks question completion, A marks the first substantive audible word;
+wait for the answer to end before Next. Flag wrong answers or mistaken marks.
+Only safe timing metadata is stored in this page's own local browser storage and
+shown as CSV. The panel never reads configuration, captures sound, connects to
+providers, or controls Discord. Its Stop-set button does not stop the bot.
+The timing analyzer accepts `human_monotonic_panel` with at least ±0.3 s uncertainty,
+using the original thresholds. Unfinished/failed originals cannot be replaced.
+Leave the page focused while timing. Stop the set if the Live session ends.
+
+In the first live use, the panel remained in practice and the human's E/A presses
+did not produce benchmark rows. The closure fix now shows the measurement mode,
+an explicit ready state and a visible explanation for out-of-order/inactive E/A
+instead of silently discarding them. Twelve deterministic engine/page tests and a
+synthetic local browser check pass; the corrected human handoff is **not live
+validated**. The precise historical key focus is unknown. No audible numbers were
+recovered. Do not treat absent marks as proof that no original questions were
+spoken, or reuse unknown original slots as fresh trials. Keep the closed-phase
+evidence and explicitly identify a later set/retakes before a new live benchmark.
+
+Panel checks: `node panam_companion/tests/test_timing_panel.cjs` (development-only
+Node, no packages) and the existing Python `BenchmarkTests`. Panel runtime needs
+only the recorded Python environment. Ctrl+C in its terminal closes the local
+server. Do not clear its result storage to repeat an original benchmark trial.
+
 ## Known limits
 
 The Discord receive library is prerelease; the adapter uses pinned private DAVE
@@ -204,7 +260,8 @@ hangover. It can misclassify noise; Live audio carries no response generation ID
 so local queue invalidation cannot prove every late provider sample is from the
 correct utterance. These are explicit live acceptance risks. The 300 ms playback
 buffer fails closed on overrun instead of building a long speech backlog. Actual
-DAVE transitions, chunk cadence, sound, Czech quality and latency remain untested.
+DAVE transitions, sustained chunk cadence, broad Czech quality and latency remain
+unverified; S01 confirmed one relevant Czech spoken response through Discord.
 
 No local fallback UI was built: research did not establish Discord infeasibility.
 The core Live module is separable if an evidenced fallback becomes necessary.
