@@ -38,8 +38,25 @@ Concrete lease duration, process supervisor, and artifact-retention settings rem
 
 ## DL-0.5A handoff-evidence recovery
 
-If a handoff, approved diff, Git state, review, verification evidence, approval,
-implementation commit, or branch changes, discard the affected verification
-result and gather fresh deterministic evidence. Never reuse draft evidence after
-commit 1 or final evidence after a handoff-only diff changes. Reconcile any
-ambiguous external effect before retry.
+Relevant handoff, diff, Git, review, authority, policy, implementation commit
+or branch changes invalidate affected readiness and require fresh dependent
+verification. Retain historical result bytes, including failed generations;
+'invalidate' does not mean deleting or rewriting evidence. Draft readiness
+cannot authorize a post-commit effect, and changed final bytes require new
+candidate verification.
+
+For an activated v0.2 manual pilot, classify subject, contract, report and
+baseline defects separately. A wrong binding does not authorize rewriting a
+correct subject. Required missing evidence blocks use; a genuinely optional
+diagnostic is recorded without inventing a subject defect. No required check
+may be downgraded by an output record.
+
+Preserve consumed budgets. Reconcile ambiguous external effects before any
+retry. Failed byte capture retains its reservation and quarantine bytes.
+A separately authorized new capture may retain already completed output;
+it must not repeat a producer, commit, push or Vault effect. Summary repair
+renders a new view from validated stored evidence and never overwrites history.
+
+Current workflow acceptance is external to the immutable as-of handoff.
+Advancing workflow alone does not require a handoff edit or another commit.
+No automatic recovery, new state or effect authority is implemented here.

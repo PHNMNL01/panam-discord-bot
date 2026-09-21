@@ -51,9 +51,28 @@ Exact schema language and artifact encoding are deferred to DL-P1 and later adap
 
 ## DL-0.5A handoff-verification contracts
 
-Verifier accepts `draft-handoff` and `final-handoff` modes and returns `PASSED`,
-`FAILED`, `BLOCKED`, or `NEEDS_HUMAN_DECISION` with evidence digests. Draft mode
-binds baseline, approved diff, paths, handoff, Reviewer/evidence, corrections,
-status, and lifecycle fields. Final mode binds implementation commit/tree,
-message/scope, finalized handoff, handoff-only diff, status, and lifecycle
-fields. Neither contract authorizes a commit or transition.
+Verifier retains draft-handoff and final-handoff with PASSED, FAILED, BLOCKED
+or NEEDS_HUMAN_DECISION. The standard pre-commit order and both gates remain.
+
+The proposed v0.2 manual pilot activates AI_Agents/Engineering/
+handoff-verification-contract-v0.2.md and its co-versioned standalone reference
+package. It separates expected manifest bindings, immutable as-of handoff,
+post-production result, independent verifier observations, exact-candidate
+semantic review, and authorized current workflow state.
+
+Requests bind exact run/mode/generation, records, byte digests, authority,
+current policy, paths and budgets. Strict full schema validation, cross-record
+consistency, independent observation and semantic judgment remain distinct.
+A contradictory PASS or unsupported/missing evidence cannot satisfy a gate.
+
+Implementation Reviewer APPROVED remains unchanged and does not cover a
+subsequently created handoff. After each handoff-mode deterministic PASS,
+a separately authorized Reviewer assesses that exact candidate. The advisory
+semantic result and deterministic evidence may establish content readiness
+for Human consideration; neither authorizes a Git effect or transition.
+
+Verifier and Reviewer return bytes through the approved output channel.
+Only a separately authorized recorder persists artifacts under an exact
+approved evidence root. No source role gains cross-repository write scope.
+These are proposed manual-pilot contracts, not implemented runtime adapters,
+database migrations, durable evidence services or workflow transitions.

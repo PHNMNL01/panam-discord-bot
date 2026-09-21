@@ -86,3 +86,14 @@ The human then creates implementation commit 1. Handoff Finalizer modifies only
 the handoff; fresh final verification is required before the human creates the
 handoff-only finalization commit. Both commits may be pushed only by a human to
 the approved source phase branch.
+
+## Proposed v0.2 manual pilot refinement
+
+When explicitly activated, the standard two-commit sequence retains both
+named deterministic gates. After each handoff-mode PASSED result and before
+the corresponding Human content acceptance/Git decision, a separately
+authorized Reviewer supplies advisory semantic review of that exact handoff
+generation. Earlier implementation review is not reused for this later artifact.
+A matching content-readiness assessment remains evidence only. The existing
+diagram describes runtime architecture; this addition does not implement
+a new state, automate a gate, merge approvals or generalize R12's exception.

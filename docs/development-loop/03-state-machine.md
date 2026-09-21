@@ -83,3 +83,13 @@ the State Machine may evaluate the gate.
 synchronization evidence confirms that local `HEAD` equals the approved remote
 branch `HEAD`, divergence is `0 0`, the worktree and index are clean, both
 expected commits exist, and no unexpected path or commit exists.
+
+## Proposed v0.2 manual-pilot evidence boundary
+
+The standalone handoff reference tooling cannot evaluate or persist a Panam
+workflow transition. In an explicitly activated manual pilot, Human authority
+consumes current deterministic evidence and separately bound exact-candidate
+semantic review before considering the next authorized effect. A readiness
+boolean is not a State Machine state or Git permission. No new states,
+transition implementation, SQLite change or retroactive R12 migration is
+introduced by this documentation package.
