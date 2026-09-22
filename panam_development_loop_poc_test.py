@@ -13265,5 +13265,632 @@ class PhaseTransactionalServiceTest(unittest.TestCase):
         self.assertEqual(1, len(self.store.get_history("panam", "DL-P2")))
 
 
+
+# DL-2.4 bounded inspector tests; all write-capable fixtures stay in the caller's scratch root.
+class DL24ContractsTest(unittest.TestCase):
+    def setUp(self):
+        from panam_development_loop import git_inspection_models as gm
+        from panam_development_loop.git_inspector import GitInspector
+        self.gm = gm
+        self.policy = ProjectPolicy("panam", "1", r"C:\synthetic\panam")
+        self.context = gm.TrustedGitInspectionContext(
+            "fixture-context", "1", "HUMAN-SYNTHETIC-AUTHORITY", "panam", "1",
+            self.policy.project_root, gm.RepositoryExpectation(self.policy.project_root + r"\.git", "sha1"),
+            (), "FORBIDDEN", "main", gm.BaselineConstraint("NOT_REQUIRED_FOR_THIS_PROFILE", None),
+            (), ("excluded.txt",), gm.PROFILE)
+        self.repository = Mock()
+        self.repository.get.return_value = self.policy
+        self.adapter = Mock()
+        self.adapter.observe.return_value = ((), (), gm.InspectionReason.OBSERVED)
+        self.GitInspector = GitInspector
+
+    def _service(self, context=None, endorsed=True):
+        ctx = context or self.context
+        identity = ctx.identity()
+        endorsement = self.gm.InspectionEndorsement(
+            ctx.authority_or_policy_binding, self.gm.CONTRACT_SHA256, ctx.project_id,
+            ctx.context_id, identity.sha256, identity.byte_length) if endorsed else None
+        return self.GitInspector(ProjectPolicyReader(self.repository), endorsement, self.adapter)
+
+    def test_context_identity_deep_immutability_and_no_self_digest(self):
+        from dataclasses import replace
+        ctx = self.context
+        self.assertEqual(ctx.identity(), replace(ctx).identity())
+        with self.assertRaises(FrozenInstanceError):
+            ctx.project_id = "other"
+        with self.assertRaises(ValueError):
+            replace(ctx, approved_read_path_scope=["x"])
+        with self.assertRaises(ValueError):
+            replace(ctx, expected_configured_remote_bindings=[])
+        self.assertNotIn("context_sha256", ctx.canonical_bytes().decode())
+        self.assertNotEqual(ctx.identity(), replace(ctx, authority_or_policy_binding="OTHER").identity())
+
+    def test_absent_and_unendorsed_context_fail_before_git(self):
+        gm = self.gm
+        result = self._service().inspect(gm.GitInspectionRequest("panam", None))
+        self.assertEqual(gm.InspectionReason.INVALID_CONTEXT, result.reason)
+        result = self._service(endorsed=False).inspect(gm.GitInspectionRequest("panam", self.context))
+        self.assertEqual(gm.InspectionReason.UNENDORSED_CONTEXT, result.reason)
+        self.adapter.observe.assert_not_called()
+
+    def test_request_has_no_root_executable_argv_environment_or_endorsement(self):
+        for key in ("root", "executable", "argv", "env", "endorsement", "limits"):
+            with self.subTest(key=key), self.assertRaises(TypeError):
+                self.gm.GitInspectionRequest("panam", self.context, **{key: "untrusted"})
+        with self.assertRaises(ValueError):
+            self.gm.GitInspectionRequest("panam", {"trusted": True})
+        self.assertEqual(self.gm.InspectionReason.INVALID_REQUEST, self._service().inspect({}).reason)
+
+    def test_unsupported_version_profile_and_malformed_context(self):
+        from dataclasses import replace
+        gm = self.gm
+        for field, value, reason in (
+                ("context_version", "999", gm.InspectionReason.UNSUPPORTED_CONTEXT_VERSION),
+                ("inspection_profile_id", "arbitrary", gm.InspectionReason.UNSUPPORTED_PROFILE)):
+            ctx = replace(self.context, **{field: value})
+            self.assertEqual(reason, self._service(ctx).inspect(gm.GitInspectionRequest("panam", ctx)).reason)
+        malformed = replace(self.context)
+        object.__setattr__(malformed, "approved_read_path_scope", [])
+        self.assertEqual(gm.InspectionReason.INVALID_CONTEXT,
+                         self._service().inspect(gm.GitInspectionRequest("panam", malformed)).reason)
+        self.adapter.observe.assert_not_called()
+
+    def test_project_root_and_policy_mismatch(self):
+        from dataclasses import replace
+        gm = self.gm
+        for field, value, reason in (
+                ("project_id", "other", gm.InspectionReason.PROJECT_MISMATCH),
+                ("registered_project_root_binding", r"C:\other", gm.InspectionReason.ROOT_MISMATCH),
+                ("project_policy_version", "9", gm.InspectionReason.POLICY_VERSION_MISMATCH)):
+            ctx = replace(self.context, **{field: value})
+            self.assertEqual(reason, self._service(ctx).inspect(gm.GitInspectionRequest("panam", ctx)).reason)
+        self.adapter.observe.assert_not_called()
+
+    def test_endorsement_is_independent_and_exact(self):
+        from dataclasses import replace
+        gm = self.gm
+        service = self._service()
+        ctx = replace(self.context, approved_read_path_scope=("added.txt",))
+        self.assertEqual(gm.InspectionReason.UNENDORSED_CONTEXT,
+                         service.inspect(gm.GitInspectionRequest("panam", ctx)).reason)
+        service._endorsement = replace(service._endorsement, context_byte_length=1)
+        self.assertEqual(gm.InspectionReason.UNENDORSED_CONTEXT,
+                         service.inspect(gm.GitInspectionRequest("panam", self.context)).reason)
+        self.adapter.observe.assert_not_called()
+
+    def test_registry_absent_invalid_and_storage_failure(self):
+        from panam_development_loop.repositories import RepositoryError, RepositoryFailureCode
+        gm = self.gm
+        service = self._service()
+        self.repository.get.return_value = None
+        self.assertEqual(gm.InspectionReason.PROJECT_NOT_REGISTERED,
+                         service.inspect(gm.GitInspectionRequest("panam", self.context)).reason)
+        self.repository.get.return_value = object()
+        self.assertEqual(gm.InspectionReason.STORAGE_FAILURE,
+                         service.inspect(gm.GitInspectionRequest("panam", self.context)).reason)
+        # Use the existing Registry failure constructor, preserving its taxonomy.
+        self.repository.get.side_effect = RepositoryError(
+            RepositoryFailureCode.MALFORMED_PERSISTED_PAYLOAD, "ProjectPolicy", "fixture")
+        self.assertEqual(gm.InspectionReason.INVALID_POLICY,
+                         service.inspect(gm.GitInspectionRequest("panam", self.context)).reason)
+        self.adapter.observe.assert_not_called()
+
+    def test_registry_drift_invalidates_complete_observation(self):
+        gm = self.gm
+        self.repository.get.side_effect = [self.policy, None]
+        result = self._service().inspect(gm.GitInspectionRequest("panam", self.context))
+        self.assertEqual(gm.InspectionStatus.DRIFT, result.status)
+        self.assertEqual(gm.InspectionReason.STATE_DRIFT, result.reason)
+        self.assertFalse(result.authority_granted)
+
+    def test_scope_branch_and_baseline_shapes_fail_closed(self):
+        from dataclasses import replace
+        gm = self.gm
+        for path in ("../escape", "/absolute", "x:*", "nul.txt", "dir/../x", "dir\\x", "a[0]", "trailing."):
+            with self.subTest(path=path), self.assertRaises(ValueError):
+                replace(self.context, approved_read_path_scope=(path,))
+        for paths in (("excluded.txt",), ("excluded.txt/child",), ("x", "X"), (".git/config",)):
+            with self.subTest(paths=paths), self.assertRaises(ValueError):
+                replace(self.context, approved_read_path_scope=paths)
+        for branch in ("HEAD~1", "-option", "../branch", "x@{0}", "main.lock"):
+            with self.subTest(branch=branch), self.assertRaises(ValueError):
+                replace(self.context, expected_branch_constraint=branch)
+        with self.assertRaises(ValueError):
+            gm.BaselineConstraint("REQUIRED", None)
+        with self.assertRaises(ValueError):
+            gm.BaselineConstraint("IMPLICIT", None)
+        with self.assertRaises(ValueError):
+            gm.GitObjectIdentity("sha1", "commit", "z" * 40)
+
+    def test_parsers_reject_truncation_and_path_injection(self):
+        from panam_development_loop import git_read_only_adapter as ga
+        for parser, payload in ((ga._index, b"100644 " + b"a"*40 + b" 0\tx"),
+                                (ga._index, b"bad\0"),
+                                (ga._changes, b":100644 100644 " + b"a"*40 + b" " + b"b"*40 + b" R100\0a\0b\0")):
+            with self.assertRaises(ga._Unavailable):
+                parser(payload, "sha1")
+        self.assertEqual((), ga._changes(b"", "sha1"))
+        with self.assertRaises(ga._Unavailable):
+            ga._line(b"two\nlines\n")
+        with self.assertRaises(ga._Unavailable):
+            ga._line(b"\xff\n")
+
+
+class DL24NativeInspectorTest(unittest.TestCase):
+    def setUp(self):
+        from panam_development_loop import git_inspection_models as gm
+        from panam_development_loop import git_read_only_adapter as ga
+        from panam_development_loop.git_inspector import GitInspector
+        self.assertEqual("nt", os.name, "native Windows evidence is required; no skip")
+        bound = Path(os.environ["PANAM_DL24_TEST_WORKSPACE"]).resolve()
+        self.temporary = tempfile.TemporaryDirectory(prefix="dl24-fixture-", dir=bound)
+        self.addCleanup(self.temporary.cleanup)
+        self.directory = Path(self.temporary.name)
+        self.root = self.directory / "repo"
+        self.root.mkdir()
+        self.gm, self.ga, self.GitInspector = gm, ga, GitInspector
+        self.git("init", "-b", "main")
+        self.git("config", "user.name", "Synthetic Inspector Test")
+        self.git("config", "user.email", "synthetic@example.invalid")
+        self.git("config", "core.autocrlf", "false")
+        (self.root / "allowed.txt").write_bytes(b"approved base\n")
+        (self.root / "excluded.txt").write_bytes(b"synthetic excluded content\n")
+        self.git("add", "--", "allowed.txt", "excluded.txt")
+        self.git("commit", "-m", "synthetic baseline")
+        self.head = self.git("rev-parse", "HEAD").strip().decode()
+        self.db = self.directory / "registry.sqlite3"
+        SqliteRunStore(self.db).initialize("synthetic-initialization")
+        ProjectPolicyReadOnlyFoundationTest._insert(self.db, "panam", "1", str(self.root))
+        self.reader = ProjectPolicyReader(SqliteProjectPolicyRepository(self.db))
+        self.context = gm.TrustedGitInspectionContext(
+            "native-fixture", "1", "HUMAN-SYNTHETIC-AUTHORITY", "panam", "1", str(self.root),
+            gm.RepositoryExpectation(str(self.root / ".git"), "sha1"), (), "FORBIDDEN", "main",
+            gm.BaselineConstraint("REQUIRED", gm.GitObjectIdentity("sha1", "commit", self.head)),
+            ("allowed.txt",), ("excluded.txt",), gm.PROFILE)
+
+    def git(self, *args, expected=0):
+        env = dict(os.environ)
+        env.update(GIT_CONFIG_NOSYSTEM="1", GIT_CONFIG_GLOBAL=os.devnull,
+                   GIT_TERMINAL_PROMPT="0", GIT_OPTIONAL_LOCKS="0")
+        result = subprocess.run([r"C:\Program Files\Git\cmd\git.exe", *args],
+                                cwd=self.root, env=env, shell=False, capture_output=True, timeout=10)
+        self.assertEqual(expected, result.returncode, (args, result.stdout, result.stderr))
+        return result.stdout
+
+    def inspect(self, ctx=None):
+        ctx = ctx or self.context
+        identity = ctx.identity()
+        endorsement = self.gm.InspectionEndorsement(
+            ctx.authority_or_policy_binding, self.gm.CONTRACT_SHA256, "panam",
+            ctx.context_id, identity.sha256, identity.byte_length)
+        result = self.GitInspector(self.reader, endorsement).inspect(
+            self.gm.GitInspectionRequest("panam", ctx))
+        evidence = os.environ.get("PANAM_DL24_NATIVE_EVIDENCE")
+        if evidence:
+            # Authorized test recorder, separate from inspector's return-only implementation.
+            from dataclasses import asdict
+            def encode(value):
+                if isinstance(value, bytes):
+                    return {"sha256": hashlib.sha256(value).hexdigest(), "byte_length": len(value)}
+                raise TypeError(type(value).__name__)
+            with open(evidence, "a", encoding="utf-8") as stream:
+                stream.write(json.dumps({"test": self.id(), "result": asdict(result)}, default=encode) + "\n")
+        return result
+
+    def snapshot(self):
+        rows = []
+        for path in sorted(self.root.rglob("*")):
+            if path.is_file():
+                st = path.stat()
+                rows.append((str(path.relative_to(self.root)), st.st_mtime_ns, st.st_size,
+                             hashlib.sha256(path.read_bytes()).hexdigest()))
+        return tuple(rows)
+
+    def complete(self, result):
+        self.assertEqual(self.gm.InspectionStatus.COMPLETE, result.status,
+                         (result.reason, [(r.operation, r.reason, r.exit_code, r.stderr) for r in result.commands]))
+        self.assertFalse(result.authority_granted)
+        self.assertLessEqual(len(result.commands), 32)
+        self.assertTrue(all(r.cleanup == "OWNED_JOB_EMPTY" and r.complete_capture for r in result.commands))
+        return result.observations[0]
+
+    def test_clean_registered_repo_and_zero_inspector_git_or_db_writes(self):
+        before, db_before = self.snapshot(), self.db.read_bytes()
+        result = self.inspect()
+        observation = self.complete(result)
+        self.assertEqual("main", observation.branch)
+        self.assertEqual(self.head, observation.head.oid)
+        self.assertEqual((), observation.staged)
+        self.assertEqual((), observation.unstaged_in_scope)
+        self.assertEqual((), observation.untracked_names)
+        self.assertIsNone(observation.upstream)
+        self.assertIsNone(observation.local_divergence)
+        self.assertEqual(("excluded.txt",), observation.content_unassessed_paths)
+        self.assertEqual(before, self.snapshot())
+        self.assertEqual(db_before, self.db.read_bytes())
+        self.assertFalse((self.root / ".git" / "index.lock").exists())
+
+    def test_staged_unstaged_untracked_and_confined_diff(self):
+        (self.root / "allowed.txt").write_bytes(b"approved staged\n")
+        self.git("add", "--", "allowed.txt")
+        (self.root / "allowed.txt").write_bytes(b"approved unstaged\n")
+        (self.root / "untracked.txt").write_bytes(b"untracked not authorized\n")
+        (self.root / "excluded.txt").write_bytes(b"NEVER_CAPTURE_EXCLUDED_MARKER\n")
+        before = self.snapshot()
+        observation = self.complete(self.inspect())
+        self.assertIn("allowed.txt", tuple(row.path for row in observation.staged))
+        self.assertIn("allowed.txt", tuple(row.path for row in observation.unstaged_in_scope))
+        self.assertIn("untracked.txt", observation.untracked_names)
+        self.assertIn(b"approved staged", observation.staged_diff)
+        self.assertIn(b"approved unstaged", observation.unstaged_diff)
+        self.assertNotIn(b"NEVER_CAPTURE_EXCLUDED_MARKER", observation.unstaged_diff)
+        self.assertEqual(before, self.snapshot())
+
+    def test_excluded_content_unread_under_native_exclusive_handle(self):
+        import ctypes
+        from ctypes import wintypes
+        k = ctypes.WinDLL("kernel32", use_last_error=True)
+        k.CreateFileW.argtypes = (wintypes.LPCWSTR, wintypes.DWORD, wintypes.DWORD,
+                                ctypes.c_void_p, wintypes.DWORD, wintypes.DWORD, wintypes.HANDLE)
+        k.CreateFileW.restype = wintypes.HANDLE
+        k.CloseHandle.argtypes = (wintypes.HANDLE,)
+        handle = k.CreateFileW(str(self.root / "excluded.txt"), 0x80000000, 0, None, 3, 0, None)
+        self.assertNotEqual(ctypes.c_void_p(-1).value, handle)
+        try:
+            with self.assertRaises(OSError):
+                (self.root / "excluded.txt").read_bytes()
+            self.complete(self.inspect())
+        finally:
+            k.CloseHandle(handle)
+
+    def test_context_remote_branch_baseline_mismatch_is_diagnostic_only(self):
+        from dataclasses import replace
+        gm = self.gm
+        for ctx, reason in (
+                (replace(self.context, expected_branch_constraint="other"), gm.InspectionReason.BRANCH_MISMATCH),
+                (replace(self.context, expected_baseline_constraint=gm.BaselineConstraint(
+                    "REQUIRED", gm.GitObjectIdentity("sha1", "commit", "a"*40))), gm.InspectionReason.BASELINE_MISMATCH),
+                (replace(self.context, expected_configured_remote_bindings=(
+                    gm.RemoteBinding("origin", ("https://example.invalid/expected.git",)),)), gm.InspectionReason.REMOTE_MISMATCH)):
+            with self.subTest(reason=reason):
+                result = self.inspect(ctx)
+                self.assertEqual(reason, result.reason)
+                self.assertNotEqual(gm.InspectionStatus.COMPLETE, result.status)
+                self.assertEqual(2, len(result.observations))
+
+    def test_matching_remote_and_explicit_additional_remote_policy(self):
+        from dataclasses import replace
+        gm = self.gm
+        self.git("config", "remote.origin.url", "https://example.invalid/local-metadata.git")
+        expected = gm.RemoteBinding("origin", ("https://example.invalid/local-metadata.git",))
+        ctx = replace(self.context, expected_configured_remote_bindings=(expected,))
+        self.assertEqual((expected,), self.complete(self.inspect(ctx)).remotes)
+        self.assertEqual(gm.InspectionReason.REMOTE_MISMATCH, self.inspect().reason)
+        self.complete(self.inspect(replace(self.context, additional_remotes="REPORT_ONLY")))
+
+    def test_explicit_no_baseline_and_empty_scope_do_not_read_all(self):
+        from dataclasses import replace
+        ctx = replace(self.context, expected_baseline_constraint=self.gm.BaselineConstraint(
+            "NOT_REQUIRED_FOR_THIS_PROFILE", None), approved_read_path_scope=())
+        (self.root / "allowed.txt").write_bytes(b"changed outside empty scope\n")
+        observation = self.complete(self.inspect(ctx))
+        self.assertEqual(b"", observation.unstaged_diff)
+        self.assertEqual((), observation.approved_file_identities)
+        self.assertEqual(("allowed.txt", "excluded.txt"), observation.content_unassessed_paths)
+
+    def test_scope_cannot_read_untracked_path(self):
+        from dataclasses import replace
+        (self.root / "untracked.txt").write_bytes(b"never read")
+        result = self.inspect(replace(self.context, approved_read_path_scope=("untracked.txt",)))
+        self.assertEqual(self.gm.InspectionReason.SCOPE_MISMATCH, result.reason)
+        self.assertFalse(any(r.operation in ("STAGED_DIFF", "UNSTAGED_DIFF") for r in result.commands))
+
+    def test_local_tracking_divergence_without_transport(self):
+        self.git("branch", "tracking-base")
+        self.git("config", "branch.main.remote", ".")
+        self.git("config", "branch.main.merge", "refs/heads/tracking-base")
+        (self.root / "allowed.txt").write_bytes(b"local ahead commit\n")
+        self.git("add", "--", "allowed.txt")
+        self.git("commit", "-m", "local only")
+        from dataclasses import replace
+        ctx = replace(self.context, expected_baseline_constraint=self.gm.BaselineConstraint(
+            "NOT_REQUIRED_FOR_THIS_PROFILE", None))
+        observation = self.complete(self.inspect(ctx))
+        self.assertEqual("refs/heads/tracking-base", observation.upstream)
+        self.assertEqual((1, 0), observation.local_divergence)
+        self.assertEqual("LOCAL_REFS_ONLY_NOT_REMOTE_FRESHNESS", observation.tracking_scope)
+
+    def test_configured_but_missing_tracking_ref_is_unavailable(self):
+        self.git("config", "branch.main.remote", ".")
+        self.git("config", "branch.main.merge", "refs/heads/missing")
+        self.assertEqual(self.gm.InspectionReason.REQUIRED_EVIDENCE_UNAVAILABLE, self.inspect().reason)
+
+    def test_detached_diagnostic_has_no_compliant_completion(self):
+        self.git("checkout", "--detach", self.head)
+        result = self.inspect()
+        self.assertEqual(self.gm.InspectionReason.DETACHED, result.reason)
+        self.assertIsNone(result.observations[0].branch)
+        self.assertEqual(self.head, result.observations[0].head.oid)
+
+    def test_unborn_is_explicit_without_fabricated_head(self):
+        from dataclasses import replace
+        self.git("checkout", "--orphan", "unborn")
+        # Orphan index contains the previous files; only HEAD is absent.
+        ctx = replace(self.context, expected_branch_constraint="unborn")
+        result = self.inspect(ctx)
+        self.assertEqual(self.gm.InspectionReason.UNBORN, result.reason)
+        self.assertIsNone(result.observations[0].head)
+        self.assertIsNone(result.observations[0].tree)
+
+    def test_conflict_metadata_preserved(self):
+        from dataclasses import replace
+        self.git("checkout", "-b", "other")
+        (self.root / "allowed.txt").write_bytes(b"other branch\n")
+        self.git("add", "--", "allowed.txt")
+        self.git("commit", "-m", "other")
+        self.git("checkout", "main")
+        (self.root / "allowed.txt").write_bytes(b"main branch\n")
+        self.git("add", "--", "allowed.txt")
+        self.git("commit", "-m", "main")
+        self.git("merge", "other", expected=1)
+        ctx = replace(self.context, expected_baseline_constraint=self.gm.BaselineConstraint(
+            "NOT_REQUIRED_FOR_THIS_PROFILE", None))
+        observation = self.complete(self.inspect(ctx))
+        self.assertEqual(("allowed.txt",), observation.conflicts)
+        self.assertTrue(any(row.stage != 0 for row in observation.index))
+
+    def test_unsafe_configuration_never_launches_helpers(self):
+        marker = self.directory / "helper-ran"
+        script = self.directory / "helper.cmd"
+        script.write_text("@echo bad>" + str(marker), encoding="ascii")
+        for key in ("core.fsmonitor", "diff.external", "filter.attack.clean",
+                    "credential.helper", "include.path"):
+            original = (self.root / ".git" / "config").read_bytes()
+            self.git("config", key, str(script).replace("\\", "/"))
+            before = self.snapshot()
+            result = self.inspect()
+            self.assertEqual(self.gm.InspectionReason.UNSUPPORTED_CONFIGURATION, result.reason)
+            self.assertEqual((), result.commands)
+            self.assertFalse(marker.exists())
+            self.assertEqual(before, self.snapshot())
+            (self.root / ".git" / "config").write_bytes(original)
+
+    def test_lazy_fetch_and_alternate_layout_rejected_without_git(self):
+        promisor = self.root / ".git" / "objects" / "pack" / "fixture.promisor"
+        promisor.write_bytes(b"")
+        result = self.inspect()
+        self.assertEqual(self.gm.InspectionReason.UNSUPPORTED_LAYOUT, result.reason)
+        self.assertEqual((), result.commands)
+        promisor.unlink()
+        alternates = self.root / ".git" / "objects" / "info" / "alternates"
+        alternates.parent.mkdir(exist_ok=True)
+        alternates.write_text(str(self.directory / "outside"), encoding="utf-8")
+        self.assertEqual(self.gm.InspectionReason.UNSUPPORTED_LAYOUT, self.inspect().reason)
+
+    def test_attributes_and_nested_repository_are_rejected_by_name(self):
+        attributes = self.root / ".gitattributes"
+        attributes.write_bytes(b"* filter=attack\n")
+        self.assertEqual(self.gm.InspectionReason.UNSUPPORTED_CONFIGURATION, self.inspect().reason)
+        attributes.unlink()
+        nested = self.root / "nested"
+        nested.mkdir()
+        (nested / ".git").mkdir()
+        self.assertEqual(self.gm.InspectionReason.UNSUPPORTED_LAYOUT, self.inspect().reason)
+
+    def test_index_only_attributes_are_rejected_before_content_commands(self):
+        attributes = self.root / ".gitattributes"
+        attributes.write_bytes(b"* filter=attack\n")
+        self.git("add", "--", ".gitattributes")
+        attributes.unlink()
+        result = self.inspect()
+        self.assertEqual(self.gm.InspectionReason.UNSUPPORTED_CONFIGURATION, result.reason)
+        self.assertFalse(any(r.operation in ("STAGED_DIFF", "UNSTAGED_DIFF") for r in result.commands))
+
+    def test_native_junction_cannot_escape_root(self):
+        outside = self.directory / "outside"
+        outside.mkdir()
+        (outside / "do-not-read.txt").write_bytes(b"outside scope")
+        junction = self.root / "junction"
+        command = "New-Item -ItemType Junction -Path '" + str(junction) + "' -Target '" + str(outside) + "' | Out-Null"
+        result = subprocess.run([r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe",
+                                 "-NoProfile", "-NonInteractive", "-Command", command],
+                                capture_output=True, timeout=10)
+        self.assertEqual(0, result.returncode, result.stderr)
+        try:
+            observed = self.inspect()
+            self.assertEqual(self.gm.InspectionReason.UNSUPPORTED_LAYOUT, observed.reason)
+            self.assertEqual((), observed.commands)
+            self.assertEqual(b"outside scope", (outside / "do-not-read.txt").read_bytes())
+        finally:
+            # Remove only the known scratch junction itself, never recurse into its target.
+            junction.rmdir()
+
+    def test_hardlink_and_linked_worktree_marker_rejected(self):
+        os.link(self.root / "allowed.txt", self.root / "hardlink.txt")
+        self.assertEqual(self.gm.InspectionReason.UNSUPPORTED_LAYOUT, self.inspect().reason)
+        (self.root / "hardlink.txt").unlink()
+        (self.root / ".git" / "commondir").write_text("../outside", encoding="ascii")
+        self.assertEqual(self.gm.InspectionReason.UNSUPPORTED_LAYOUT, self.inspect().reason)
+
+    def test_physical_root_refuses_unc_device_and_nested_roots(self):
+        for root in (r"\\server\share", r"\\?\C:\repo", r"C:relative"):
+            with self.subTest(root=root), self.assertRaises(self.ga._Unavailable):
+                self.ga._safe_root(root)
+        nested = self.root / "nested"
+        nested.mkdir()
+        (nested / ".git").mkdir()
+        with self.assertRaises(self.ga._Unavailable):
+            self.ga._safe_root(str(nested))
+
+    def test_head_index_and_path_drift_invalidate_observation(self):
+        original = self.ga._Session.snapshot
+        for mutation in ("path", "index", "head"):
+            count = [0]
+            def snapshot(session):
+                value = original(session)
+                count[0] += 1
+                if count[0] == 1:
+                    (self.root / "allowed.txt").write_bytes(("drift-" + mutation).encode())
+                    if mutation in ("index", "head"):
+                        self.git("add", "--", "allowed.txt")
+                    if mutation == "head":
+                        self.git("commit", "-m", "external fixture drift")
+                return value
+            with self.subTest(mutation=mutation), patch.object(self.ga._Session, "snapshot", snapshot):
+                result = self.inspect()
+                self.assertEqual(self.gm.InspectionReason.STATE_DRIFT, result.reason)
+
+    def test_malformed_native_command_output_cannot_complete(self):
+        from dataclasses import replace
+        original = self.ga._capture
+        def capture(operation, *args):
+            result = original(operation, *args)
+            return replace(result, stdout=b"garbled-root-without-newline") if operation == "ROOT" else result
+        with patch.object(self.ga, "_capture", capture):
+            self.assertEqual(self.gm.InspectionReason.MALFORMED_OUTPUT, self.inspect().reason)
+
+    def test_missing_tool_and_closed_environment(self):
+        with patch.object(self.ga, "_GIT", str(self.directory / "missing-git.exe")):
+            self.assertEqual(self.gm.InspectionReason.GIT_UNAVAILABLE, self.inspect().reason)
+        with patch.dict(os.environ, {"GIT_CONFIG_COUNT": "1", "GIT_CONFIG_KEY_0": "core.fsmonitor",
+                                     "GIT_CONFIG_VALUE_0": "evil", "GIT_SSH_COMMAND": "evil"}):
+            self.complete(self.inspect())
+        self.assertNotIn("GIT_CONFIG_COUNT", self.ga._environment())
+        self.assertNotIn("GIT_SSH_COMMAND", self.ga._environment())
+
+    def test_process_count_and_overall_deadline_enforced(self):
+        session = self.ga._Session(str(self.root), self.context)
+        session.commands = [None] * 32
+        with self.assertRaises(self.ga._Unavailable) as caught:
+            session.command("ROOT")
+        self.assertEqual(self.gm.InspectionReason.PROCESS_LIMIT, caught.exception.reason)
+        session.commands = []
+        session.deadline = 0.0
+        with self.assertRaises(self.ga._Unavailable) as caught:
+            session.command("ROOT")
+        self.assertEqual(self.gm.InspectionReason.INSPECTION_DEADLINE, caught.exception.reason)
+
+    def test_no_state_machine_queue_worker_or_persistence_calls(self):
+        import panam_development_loop.git_inspector as service_module
+        for module in (service_module, self.ga):
+            source = inspect.getsource(module)
+            self.assertFalse(any(token in source for token in (
+                "PhaseTransitionService", "RunTransitionService", "sqlite3", ".enqueue(",
+                "run_iteration(", "SqliteRunStore", "initialize(")))
+        before = ProjectPolicyReadOnlyFoundationTest._snapshot(self.db)
+        self.complete(self.inspect())
+        self.assertEqual(before, ProjectPolicyReadOnlyFoundationTest._snapshot(self.db))
+
+
+class DL24ProcessContainmentTest(unittest.TestCase):
+    def setUp(self):
+        from panam_development_loop import git_read_only_adapter as ga
+        from panam_development_loop import git_inspection_models as gm
+        self.ga, self.gm = ga, gm
+        self.assertEqual("nt", os.name, "native process tests cannot be skipped")
+        self.directory = Path(os.environ["PANAM_DL24_TEST_WORKSPACE"])
+
+    def capture_python(self, code, seconds=2.0, cap=2097152):
+        import time
+        import sys
+        with patch.object(self.ga, "_argv", return_value=(sys.executable, "-B", "-c", code)), \
+                patch.object(self.ga, "_PROCESS_SECONDS", seconds), \
+                patch.object(self.ga, "_CAPTURE_MAX", cap):
+            result = self.ga._capture("ROOT", (), str(self.directory), time.monotonic() + 10)
+        evidence = os.environ.get("PANAM_DL24_NATIVE_EVIDENCE")
+        if evidence:
+            with open(evidence, "a", encoding="utf-8") as stream:
+                stream.write(json.dumps({"test": self.id(), "native_process": {
+                    "argv": result.argv, "started": result.started_at, "ended": result.ended_at,
+                    "reason": result.reason.value, "primary_reason": result.primary_reason.value,
+                    "cleanup": result.cleanup, "exit_code": result.exit_code,
+                    "stdout_length": len(result.stdout), "stderr_length": len(result.stderr),
+                    "stdout": result.stdout[:1024].decode("ascii", "replace")}}) + "\n")
+        return result
+
+    def assert_dead(self, pid):
+        import ctypes
+        from ctypes import wintypes
+        k = ctypes.WinDLL("kernel32", use_last_error=True)
+        k.OpenProcess.argtypes = (wintypes.DWORD, wintypes.BOOL, wintypes.DWORD)
+        k.OpenProcess.restype = wintypes.HANDLE
+        k.GetExitCodeProcess.argtypes = (wintypes.HANDLE, ctypes.POINTER(wintypes.DWORD))
+        k.CloseHandle.argtypes = (wintypes.HANDLE,)
+        handle = k.OpenProcess(0x1000, False, pid)
+        if handle:
+            try:
+                code = wintypes.DWORD()
+                self.assertTrue(k.GetExitCodeProcess(handle, ctypes.byref(code)))
+                self.assertNotEqual(259, code.value, "owned descendant still alive")
+            finally:
+                k.CloseHandle(handle)
+        else:
+            self.assertEqual(87, ctypes.get_last_error(), "unexpected process query failure")
+
+    def test_native_timeout_terminates_owned_descendant(self):
+        code = ("import subprocess,sys,time; "
+                "p=subprocess.Popen([sys.executable,'-B','-c','import time;time.sleep(30)']); "
+                "print(p.pid,flush=True); time.sleep(30)")
+        result = self.capture_python(code)
+        self.assertEqual(self.gm.InspectionReason.COMMAND_TIMEOUT, result.reason)
+        self.assertEqual("OWNED_JOB_EMPTY", result.cleanup)
+        self.assertFalse(result.complete_capture)
+        self.assert_dead(int(result.stdout.strip()))
+
+    def test_native_parent_exit_cleanup_race(self):
+        code = ("import subprocess,sys; "
+                "p=subprocess.Popen([sys.executable,'-B','-c','import time;time.sleep(30)']); "
+                "print(p.pid,flush=True)")
+        result = self.capture_python(code)
+        self.assertEqual(self.gm.InspectionReason.REQUIRED_EVIDENCE_UNAVAILABLE, result.reason)
+        self.assertEqual("OWNED_JOB_EMPTY", result.cleanup)
+        self.assert_dead(int(result.stdout.strip()))
+
+    def test_native_stdout_and_stderr_overflow_are_bounded(self):
+        for fd in (1, 2):
+            with self.subTest(fd=fd):
+                result = self.capture_python("import os,time;os.write(" + str(fd) +
+                                             ",b'x'*200000);time.sleep(30)", cap=4096)
+                self.assertEqual(self.gm.InspectionReason.OUTPUT_OVERFLOW, result.reason)
+                self.assertLessEqual(len(result.stdout), 4096)
+                self.assertLessEqual(len(result.stderr), 4096)
+                self.assertEqual("OWNED_JOB_EMPTY", result.cleanup)
+
+    def test_success_is_complete_after_job_and_pipe_completion(self):
+        result = self.capture_python("import sys;sys.stdout.buffer.write(b'exact\\x00bytes')")
+        self.assertEqual(self.gm.InspectionReason.OBSERVED, result.reason)
+        self.assertEqual(b"exact\x00bytes", result.stdout)
+        self.assertEqual("OWNED_JOB_EMPTY", result.cleanup)
+        self.assertTrue(result.complete_capture)
+
+
+    def test_native_job_accounting_quiescence_and_short_lived_descendant(self):
+        for iteration in range(12):
+            result = self.capture_python("print('complete')")
+            self.assertEqual(self.gm.InspectionReason.OBSERVED, result.reason, iteration)
+            self.assertEqual("OWNED_JOB_EMPTY", result.cleanup)
+            self.assertEqual(b"complete\r\n" if os.name == "nt" else b"complete\\n", result.stdout)
+        code = ("import subprocess,sys; "
+                "p=subprocess.Popen([sys.executable,'-B','-c','pass']); "
+                "print(p.pid,flush=True);p.wait()")
+        result = self.capture_python(code)
+        self.assertEqual(self.gm.InspectionReason.OBSERVED, result.reason)
+        self.assertEqual("OWNED_JOB_EMPTY", result.cleanup)
+        self.assert_dead(int(result.stdout.strip()))
+
+    def test_cleanup_failure_preserves_original_timeout(self):
+        original = self.ga._Job.active
+        def active(job):
+            count = original(job)
+            # Actual termination remains native; only the cleanup acknowledgment fails.
+            if not count:
+                raise OSError("injected QueryInformationJobObject failure")
+            return count
+        with patch.object(self.ga._Job, "active", active):
+            result = self.capture_python("import time;time.sleep(30)")
+        self.assertEqual(self.gm.InspectionReason.CLEANUP_FAILURE, result.reason)
+        self.assertEqual(self.gm.InspectionReason.COMMAND_TIMEOUT, result.primary_reason)
+
+
 if __name__ == "__main__":
     unittest.main()
