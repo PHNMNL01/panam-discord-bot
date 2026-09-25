@@ -2,6 +2,8 @@
 
 from enum import Enum
 from typing import Protocol
+from typing import Callable
+from datetime import datetime
 
 from .models import (
     AcceptedPhaseStateEvent,
@@ -22,6 +24,9 @@ from .models import (
     WorkflowCommand,
     WorkflowCommandEvent,
     WorkflowCommandState,
+    LockConfiguration,
+    LockRequest,
+    LockResult,
 )
 
 
@@ -88,6 +93,13 @@ class ProjectPolicyRepository(Protocol):
     """Get-only authoritative Project Registry port for DL-P1.8."""
 
     def get(self, project_id: str) -> ProjectPolicy | None: ...
+
+
+class ProjectLockRepository(Protocol):
+    """A closed request is evaluated on one snapshot/transaction, with no retry."""
+
+    def execute(self, request: LockRequest, configuration: LockConfiguration,
+                clock: Callable[[], datetime]) -> LockResult: ...
 
 
 class DevelopmentRunInspectionRepository(Protocol):

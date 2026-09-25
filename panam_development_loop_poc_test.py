@@ -1318,7 +1318,7 @@ class SqliteMigrationTest(unittest.TestCase):
         SqliteRunStore(path).initialize("first-at")
         connection = self._connection(path)
         try:
-            self.assertEqual([(1, "first-at"), (2, "first-at"), (3, "first-at"), (4, "first-at"), (5, "first-at"), (6, "first-at")], self._ledger_snapshot(connection))
+            self.assertEqual([(1, "first-at"), (2, "first-at"), (3, "first-at"), (4, "first-at"), (5, "first-at"), (6, "first-at"), (7, "first-at")], self._ledger_snapshot(connection))
             self.assertEqual(
                 [
                     "approvals",
@@ -1327,6 +1327,9 @@ class SqliteMigrationTest(unittest.TestCase):
                     "phase_state_events",
                     "phase_states",
                     "phases",
+                    "project_branch_locks",
+                    "project_lock_events",
+                    "project_locks",
                     "project_policies",
                     "schema_migrations",
                     "state_events",
@@ -1385,7 +1388,7 @@ class SqliteMigrationTest(unittest.TestCase):
             for table_name, table_sql in before_schema.items():
                 self.assertEqual(table_sql, after_schema[table_name])
             self.assertEqual(
-                [(1, "legacy-applied-at"), (2, "new-at"), (3, "new-at"), (4, "new-at"), (5, "new-at"), (6, "new-at")],
+                [(1, "legacy-applied-at"), (2, "new-at"), (3, "new-at"), (4, "new-at"), (5, "new-at"), (6, "new-at"), (7, "new-at")],
                 self._ledger_snapshot(connection),
             )
             self.assertEqual(before_runs, [tuple(row) for row in connection.execute("SELECT * FROM development_runs")])
@@ -1507,7 +1510,7 @@ class SqliteMigrationTest(unittest.TestCase):
             malformed.commit()
             self.assertEqual(MigrationFailureCode.INVALID_APPLIED_HISTORY, self._assert_history_rejected_without_mutation(malformed).code)
             future.execute("CREATE TABLE schema_migrations (version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL)")
-            future.execute("INSERT INTO schema_migrations VALUES(7, 'future-at')")
+            future.execute("INSERT INTO schema_migrations VALUES(8, 'future-at')")
             future.commit()
             self.assertEqual(MigrationFailureCode.UNKNOWN_FUTURE_VERSION, self._assert_history_rejected_without_mutation(future).code)
         finally:
@@ -1818,7 +1821,7 @@ class SqliteRepositoryTest(unittest.TestCase):
         SqliteRunStore(future).initialize("at")
         connection = sqlite3.connect(future)
         try:
-            connection.execute("INSERT INTO schema_migrations VALUES(7, 'future')")
+            connection.execute("INSERT INTO schema_migrations VALUES(8, 'future')")
             connection.commit()
         finally:
             connection.close()
@@ -1917,7 +1920,7 @@ class SqliteMigrationTwoTest(unittest.TestCase):
             PRODUCTION_MIGRATIONS,
             require_production_version=True,
         )
-        self.assertEqual([1, 2, 3, 4, 5, 6], [migration.version for migration in validated])
+        self.assertEqual([1, 2, 3, 4, 5, 6, 7], [migration.version for migration in validated])
         self.assertIn("base_commit", PRODUCTION_MIGRATIONS[1].statements[2])
         for identifier in ("base_commit", "commit_hash", "rollback_reason"):
             with self.subTest(identifier=identifier):
@@ -1957,7 +1960,7 @@ class SqliteMigrationTwoTest(unittest.TestCase):
                 )
             ]
             self.assertEqual(
-                ["approvals", "development_runs", "milestone_contracts", "phase_state_events", "phase_states", "phases", "project_policies", "schema_migrations", "state_events", "worker_operations", "worker_sessions", "workflow_command_events", "workflow_commands"],
+                ["approvals", "development_runs", "milestone_contracts", "phase_state_events", "phase_states", "phases", "project_branch_locks", "project_lock_events", "project_locks", "project_policies", "schema_migrations", "state_events", "worker_operations", "worker_sessions", "workflow_command_events", "workflow_commands"],
                 tables,
             )
             foreign_keys = connection.execute("PRAGMA foreign_key_list(milestone_contracts)").fetchall()
@@ -2155,7 +2158,7 @@ class ProjectPolicyReadOnlyFoundationTest(unittest.TestCase):
         connection = sqlite3.connect(self.database_path)
         try:
             self.assertEqual(
-                [(1, "initialized-at"), (2, "initialized-at"), (3, "initialized-at"), (4, "initialized-at"), (5, "initialized-at"), (6, "initialized-at")],
+                [(1, "initialized-at"), (2, "initialized-at"), (3, "initialized-at"), (4, "initialized-at"), (5, "initialized-at"), (6, "initialized-at"), (7, "initialized-at")],
                 connection.execute(
                     "SELECT version, applied_at FROM schema_migrations ORDER BY version"
                 ).fetchall(),
@@ -2246,7 +2249,7 @@ class ProjectPolicyReadOnlyFoundationTest(unittest.TestCase):
             )
             self.assertEqual(0, connection.execute("SELECT COUNT(*) FROM project_policies").fetchone()[0])
             self.assertEqual(
-                [(1,), (2,), (3,), (4,), (5,), (6,)],
+                [(1,), (2,), (3,), (4,), (5,), (6,), (7,)],
                 [tuple(row) for row in connection.execute("SELECT version FROM schema_migrations ORDER BY version")],
             )
         finally:
@@ -2387,7 +2390,7 @@ class ProjectPolicyReadOnlyFoundationTest(unittest.TestCase):
         SqliteRunStore(future_path).initialize("at")
         connection = sqlite3.connect(future_path)
         try:
-            connection.execute("INSERT INTO schema_migrations VALUES(7, 'future-at')")
+            connection.execute("INSERT INTO schema_migrations VALUES(8, 'future-at')")
             connection.commit()
         finally:
             connection.close()
@@ -5122,8 +5125,8 @@ class Dl21OperationMatrixCompatibilityTest(unittest.TestCase):
             "SqlitePhaseStateInspectionRepository", "SqlitePhaseStore",
             "PhaseTransitionPolicy", "PhaseTransitionService",
         }
-        self.assertEqual(p1 | expected | worker_exports | phase_exports, set(package.__all__))
-        self.assertEqual(120, len(package.__all__))
+        self.assertEqual(p1 | expected | worker_exports | phase_exports, set(package.__all__[:120]))
+        self.assertEqual(135, len(package.__all__))
         self.assertEqual(13, len(expected))
         for forbidden in ("Worker", "OperationJournal", "QueueQueryKind", "Executor"):
             self.assertNotIn(forbidden, package.__all__)
@@ -5533,9 +5536,9 @@ class SqliteMigrationFourTest(unittest.TestCase):
         connection = sqlite3.connect(self.path)
         connection.row_factory = sqlite3.Row
         try:
-            self.assertEqual([1, 2, 3, 4, 5, 6], [row[0] for row in connection.execute("SELECT version FROM schema_migrations ORDER BY version")])
+            self.assertEqual([1, 2, 3, 4, 5, 6, 7], [row[0] for row in connection.execute("SELECT version FROM schema_migrations ORDER BY version")])
             tables = {row[0] for row in connection.execute("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'")}
-            self.assertEqual({"workflow_commands", "workflow_command_events", "worker_sessions", "worker_operations"}, tables - {"schema_migrations", "development_runs", "state_events", "phases", "milestone_contracts", "approvals", "project_policies", "phase_states", "phase_state_events"})
+            self.assertEqual({"workflow_commands", "workflow_command_events", "worker_sessions", "worker_operations"}, tables - {"schema_migrations", "development_runs", "state_events", "phases", "milestone_contracts", "approvals", "project_policies", "phase_states", "phase_state_events", "project_locks", "project_branch_locks", "project_lock_events"})
             self.assertEqual(
                 ["workflow_commands_claim_order_idx", "workflow_commands_lease_expiry_idx", "workflow_commands_project_sequence_idx"],
                 sorted(row[0] for row in connection.execute("SELECT name FROM sqlite_master WHERE type='index' AND name LIKE 'workflow_commands_%_idx'")),
@@ -5651,7 +5654,7 @@ class SqliteMigrationFourTest(unittest.TestCase):
             for table in before:
                 expected = before[table]
                 if table == "schema_migrations":
-                    expected = expected + [(4, "v4-at"), (5, "v4-at"), (6, "v4-at")]
+                    expected = expected + [(4, "v4-at"), (5, "v4-at"), (6, "v4-at"), (7, "v4-at")]
                 self.assertEqual(expected, [tuple(row) for row in connection.execute(f"SELECT * FROM {table}")])
             self.assertEqual(0, connection.execute("SELECT count(*) FROM workflow_commands").fetchone()[0])
             self.assertEqual(0, connection.execute("SELECT count(*) FROM workflow_command_events").fetchone()[0])
@@ -7311,10 +7314,10 @@ class Dl21Ca001CompatibilityTest(unittest.TestCase):
         self.assertEqual(("TEST_COMMAND", 1), parameters)
 
     def test_migration_version_advances_to_six(self) -> None:
-        self.assertEqual([1, 2, 3, 4, 5, 6], [migration.version for migration in PRODUCTION_MIGRATIONS])
+        self.assertEqual([1, 2, 3, 4, 5, 6, 7], [migration.version for migration in PRODUCTION_MIGRATIONS])
         connection = sqlite3.connect(self.path)
         try:
-            self.assertEqual([1, 2, 3, 4, 5, 6], [row[0] for row in connection.execute("SELECT version FROM schema_migrations ORDER BY version")])
+            self.assertEqual([1, 2, 3, 4, 5, 6, 7], [row[0] for row in connection.execute("SELECT version FROM schema_migrations ORDER BY version")])
         finally:
             connection.close()
 
@@ -7407,7 +7410,7 @@ class Dl21Ca001CompatibilityTest(unittest.TestCase):
             self.assertEqual(expected_hints, get_type_hints(method))
         service_operations = tuple(name for name, value in DurableCommandQueueService.__dict__.items() if not name.startswith("_") and callable(value))
         repository_operations = tuple(name for name, value in WorkflowCommandRepository.__dict__.items() if not name.startswith("_") and callable(value))
-        self.assertEqual((13, 13, 10, 17, 6, 9, 120), (len(service_operations), len(repository_operations), len(QueueMutationKind), len(QueueResultCode), len(WorkflowCommandState), len(WorkflowCommandEventKind), len(package.__all__)))
+        self.assertEqual((13, 13, 10, 17, 6, 9, 120), (len(service_operations), len(repository_operations), len(QueueMutationKind), len(QueueResultCode), len(WorkflowCommandState), len(WorkflowCommandEventKind), len(package.__all__[:120])))
         self.assertNotIn("MAX_ELIGIBLE_DEFINITION_KEYS", package.__all__)
 
 
@@ -8859,7 +8862,7 @@ class Dl22WorkerFoundationTest(unittest.TestCase):
         SqliteRunStore(self.path).initialize("2026-08-24T12:00:01.000000Z")
         connection = sqlite3.connect(self.path)
         try:
-            self.assertEqual([1, 2, 3, 4, 5, 6], [row[0] for row in connection.execute("SELECT version FROM schema_migrations ORDER BY version")])
+            self.assertEqual([1, 2, 3, 4, 5, 6, 7], [row[0] for row in connection.execute("SELECT version FROM schema_migrations ORDER BY version")])
         finally:
             connection.close()
 
@@ -9936,9 +9939,9 @@ class Dl22WorkerFoundationTest(unittest.TestCase):
                 "SqlitePhaseStateInspectionRepository", "SqlitePhaseStore",
                 "PhaseTransitionPolicy", "PhaseTransitionService",
             ),
-            tuple(package.__all__[105:]),
+            tuple(package.__all__[105:120]),
         )
-        self.assertEqual(120, len(set(package.__all__)))
+        self.assertEqual(135, len(set(package.__all__)))
 
     def test_handler_validation_failure_and_baseexception(self) -> None:
         self.assertEqual(
@@ -12614,7 +12617,7 @@ class PhaseMigrationAndStoreTest(unittest.TestCase):
         connection = sqlite3.connect(self.path)
         try:
             self.assertEqual(
-                [1, 2, 3, 4, 5, 6],
+                [1, 2, 3, 4, 5, 6, 7],
                 [row[0] for row in connection.execute(
                     "SELECT version FROM schema_migrations ORDER BY version"
                 )],

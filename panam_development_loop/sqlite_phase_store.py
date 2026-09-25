@@ -35,6 +35,9 @@ _CURRENT_TABLES = frozenset(
         "worker_operations",
         "phase_states",
         "phase_state_events",
+        "project_locks",
+        "project_branch_locks",
+        "project_lock_events",
     }
 )
 
@@ -245,7 +248,7 @@ class SqlitePhaseStore:
                     "SELECT version FROM schema_migrations ORDER BY version"
                 )
             ]
-            if tables != _CURRENT_TABLES or versions != [1, 2, 3, 4, 5, 6]:
+            if tables != _CURRENT_TABLES or versions != [1, 2, 3, 4, 5, 6, 7]:
                 raise RepositoryError(
                     RepositoryFailureCode.SCHEMA_MISMATCH,
                     entity_name,

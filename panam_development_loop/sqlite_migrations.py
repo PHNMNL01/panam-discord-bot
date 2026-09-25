@@ -614,6 +614,66 @@ PRODUCTION_MIGRATIONS = (
     ),
 )
 
+# DL-2.5 is an offline upgrade. Definitions 1-6 above are immutable.
+PRODUCTION_MIGRATIONS += (
+    Migration(7, (
+        """CREATE TABLE project_locks (
+            project_id TEXT NOT NULL PRIMARY KEY REFERENCES project_policies(project_id) ON DELETE RESTRICT ON UPDATE RESTRICT,
+            project_root TEXT NOT NULL,
+            normalized_root TEXT NOT NULL UNIQUE,
+            state TEXT NOT NULL CHECK(state IN ('HELD','EFFECT_RESERVED','RELEASED','RECONCILIATION_REQUIRED')),
+            worker_id TEXT NOT NULL,
+            session_id TEXT NOT NULL REFERENCES worker_sessions(session_id) ON DELETE RESTRICT ON UPDATE RESTRICT,
+            queue_owner_id TEXT NOT NULL CHECK(queue_owner_id=worker_id||'@'||session_id),
+            command_id TEXT NOT NULL REFERENCES workflow_commands(command_id) ON DELETE RESTRICT ON UPDATE RESTRICT,
+            claim_count INTEGER NOT NULL CHECK(typeof(claim_count)='integer' AND claim_count>0),
+            acquisition_id TEXT NOT NULL,
+            fence_high_water INTEGER NOT NULL CHECK(typeof(fence_high_water)='integer' AND fence_high_water>0),
+            fencing_token INTEGER NOT NULL CHECK(typeof(fencing_token)='integer' AND fencing_token=fence_high_water),
+            revision INTEGER NOT NULL CHECK(typeof(revision)='integer' AND revision>0),
+            acquired_at TEXT NOT NULL,
+            renewed_at TEXT NOT NULL,
+            lease_expires_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            reserved_at TEXT,
+            terminal_outcome TEXT,
+            evidence_reference TEXT,
+            UNIQUE(project_id, acquisition_id, fencing_token),
+            CHECK(acquired_at<=renewed_at AND renewed_at<lease_expires_at AND renewed_at<=updated_at),
+            CHECK(reserved_at IS NULL OR (acquired_at<=reserved_at AND reserved_at<=updated_at)),
+            CHECK((state='HELD' AND reserved_at IS NULL AND terminal_outcome IS NULL AND evidence_reference IS NULL)
+               OR (state='EFFECT_RESERVED' AND reserved_at IS NOT NULL AND terminal_outcome IS NULL AND evidence_reference IS NULL)
+               OR (state='RELEASED' AND terminal_outcome IS NOT NULL AND terminal_outcome IN ('RELEASED','VERIFIED_SUCCESS','PROVEN_NO_EFFECT'))
+               OR (state='RECONCILIATION_REQUIRED' AND terminal_outcome IS NOT NULL AND terminal_outcome IN ('UNKNOWN','LEASE_EXPIRED','OWNER_LOST')))
+        )""",
+        """CREATE TABLE project_branch_locks (
+            project_id TEXT NOT NULL PRIMARY KEY,
+            branch_ref TEXT NOT NULL,
+            conflict_key TEXT NOT NULL,
+            acquisition_id TEXT NOT NULL,
+            fencing_token INTEGER NOT NULL,
+            revision INTEGER NOT NULL CHECK(typeof(revision)='integer' AND revision>0),
+            updated_at TEXT NOT NULL,
+            FOREIGN KEY(project_id, acquisition_id, fencing_token)
+                REFERENCES project_locks(project_id, acquisition_id, fencing_token) ON DELETE RESTRICT ON UPDATE RESTRICT,
+            UNIQUE(project_id, conflict_key)
+        )""",
+        """CREATE TABLE project_lock_events (
+            event_sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+            project_id TEXT NOT NULL REFERENCES project_locks(project_id) ON DELETE RESTRICT ON UPDATE RESTRICT,
+            acquisition_id TEXT NOT NULL,
+            fencing_token INTEGER NOT NULL CHECK(typeof(fencing_token)='integer' AND fencing_token>0),
+            revision INTEGER NOT NULL CHECK(typeof(revision)='integer' AND revision>0),
+            kind TEXT NOT NULL CHECK(kind IN ('ACQUIRED','RENEWED','RELEASED','EFFECT_RESERVED','TERMINALIZED','RECONCILIATION_REQUIRED')),
+            occurred_at TEXT NOT NULL,
+            snapshot_json TEXT NOT NULL,
+            UNIQUE(project_id, revision)
+        )""",
+        "CREATE UNIQUE INDEX project_lock_acquisition_id_uq ON project_lock_events(acquisition_id) WHERE kind='ACQUIRED'",
+        "CREATE INDEX project_lock_history_idx ON project_lock_events(project_id, event_sequence)",
+    )),
+)
+
 _FORBIDDEN_OPERATION_TOKENS = frozenset(
     {"BEGIN", "COMMIT", "ROLLBACK", "SAVEPOINT", "RELEASE", "VACUUM", "ATTACH", "DETACH"}
 )
@@ -652,13 +712,13 @@ def validate_migration_registry(
         raise MigrationError(MigrationFailureCode.INVALID_REGISTRY, "declared order")
     if versions != list(range(1, len(versions) + 1)):
         raise MigrationError(MigrationFailureCode.INVALID_REGISTRY, "contiguous versions")
-    if require_production_version and versions != [1, 2, 3, 4, 5, 6]:
+    if require_production_version and versions != [1, 2, 3, 4, 5, 6, 7]:
         raise MigrationError(MigrationFailureCode.INVALID_REGISTRY, "production version")
     return registry
 
 
 def initialize_database(database_path: Path, applied_at: str) -> None:
-    """Initialize an explicit production database path through migration version 6."""
+    """Initialize through version 7; requires coordinated offline binary upgrade."""
 
     registry = validate_migration_registry(PRODUCTION_MIGRATIONS, require_production_version=True)
     connection = sqlite3.connect(database_path)

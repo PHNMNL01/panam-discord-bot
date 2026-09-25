@@ -3175,3 +3175,220 @@ class WorkerHandlerResult:
             valid = result_code not in {"SUCCESS", "CANCELLED"}
         if not valid:
             raise ValueError("result_code")
+
+
+# DL-2.5 values are additive; existing queue/worker contracts remain unchanged.
+class LockState(str, Enum):
+    HELD = "HELD"
+    EFFECT_RESERVED = "EFFECT_RESERVED"
+    RELEASED = "RELEASED"
+    RECONCILIATION_REQUIRED = "RECONCILIATION_REQUIRED"
+
+
+class LockOperation(str, Enum):
+    ACQUIRE = "ACQUIRE"
+    RENEW = "RENEW"
+    RELEASE = "RELEASE"
+    CHECK = "CHECK"
+    OBSERVE = "OBSERVE"
+    RESERVE = "RESERVE"
+    TERMINALIZE = "TERMINALIZE"
+
+
+class LockResultCode(str, Enum):
+    ACQUIRED = "ACQUIRED"
+    EXISTING = "EXISTING"
+    RENEWED = "RENEWED"
+    RELEASED = "RELEASED"
+    ALREADY_RELEASED = "ALREADY_RELEASED"
+    CURRENT = "CURRENT"
+    OBSERVED = "OBSERVED"
+    NOT_FOUND = "NOT_FOUND"
+    EFFECT_RESERVED = "EFFECT_RESERVED"
+    CONFLICT = "CONFLICT"
+    RESOURCE_ALIAS_CONFLICT = "RESOURCE_ALIAS_CONFLICT"
+    BRANCH_COLLISION = "BRANCH_COLLISION"
+    INVALID_RESOURCE = "INVALID_RESOURCE"
+    RESOURCE_CHANGED = "RESOURCE_CHANGED"
+    INVALID_OWNER = "INVALID_OWNER"
+    ACQUISITION_CONFLICT = "ACQUISITION_CONFLICT"
+    STALE_FENCE = "STALE_FENCE"
+    CAS_CONFLICT = "CAS_CONFLICT"
+    CURRENT_LEASE_LOST = "CURRENT_LEASE_LOST"
+    RECONCILIATION_REQUIRED = "RECONCILIATION_REQUIRED"
+    INVALID_STATE = "INVALID_STATE"
+    TRANSIENT_CONTENTION = "TRANSIENT_CONTENTION"
+    UNSUPPORTED_SCHEMA = "UNSUPPORTED_SCHEMA"
+    UNAVAILABLE = "UNAVAILABLE"
+    FENCE_EXHAUSTED = "FENCE_EXHAUSTED"
+    CLOCK_INVALID = "CLOCK_INVALID"
+
+
+class LockTerminalOutcome(str, Enum):
+    VERIFIED_SUCCESS = "VERIFIED_SUCCESS"
+    PROVEN_NO_EFFECT = "PROVEN_NO_EFFECT"
+    UNKNOWN = "UNKNOWN"
+
+
+def _lock_branch_ref(value: object) -> str:
+    ref = _queue_text(value, "branch_ref")
+    if not ref.startswith("refs/heads/") or len(ref.encode("utf-8")) > 1024:
+        raise ValueError("branch_ref")
+    name = ref[len("refs/heads/"):]
+    if (not name or name == "@" or name.startswith("-") or name.endswith(".")
+            or ".." in name or "@{" in name
+            or any(c in ref for c in ' ~^:?*[\\')
+            or any(not p or p.startswith(".") or p.endswith(".lock")
+                   for p in name.split("/"))):
+        raise ValueError("branch_ref")
+    return ref
+
+
+@dataclass(frozen=True)
+class LockResource:
+    project_id: str
+    project_root: str
+    branch_ref: str | None = None
+
+    def __post_init__(self) -> None:
+        _queue_identity(self.project_id, "project_id")
+        _validate_project_root(self.project_root)
+        if self.branch_ref is not None:
+            _lock_branch_ref(self.branch_ref)
+
+
+@dataclass(frozen=True)
+class LockOwner:
+    worker_id: str
+    session_id: str
+    queue_owner_id: str
+    command_id: str
+    claim_count: int
+
+    def __post_init__(self) -> None:
+        _worker_id(self.worker_id)
+        _worker_uuid(self.session_id, "session_id")
+        _worker_queue_owner(self.queue_owner_id, self.worker_id, self.session_id)
+        _queue_uuid(self.command_id, "command_id")
+        _queue_integer(self.claim_count, "claim_count", 1, _SIGNED_64_MAX)
+
+
+@dataclass(frozen=True)
+class LockConfiguration:
+    lock_lease_seconds: int = 60
+    lock_renewal_margin_seconds: int = 5
+    heartbeat_stale_after_seconds: float = 30.0
+
+    def __post_init__(self) -> None:
+        _queue_integer(self.lock_lease_seconds, "lock_lease_seconds", 1, 86400)
+        _queue_integer(self.lock_renewal_margin_seconds, "lock_renewal_margin_seconds", 0, 86399)
+        if not 0 < self.lock_renewal_margin_seconds < self.lock_lease_seconds:
+            raise ValueError("lock_renewal_margin_seconds")
+        _worker_float(self.heartbeat_stale_after_seconds, "heartbeat_stale_after_seconds", 0.1, 3600.0)
+
+
+@dataclass(frozen=True)
+class LockTerminalEvidence:
+    """Externally verified input from the trusted consumer, not self-approval."""
+    outcome: LockTerminalOutcome
+    evidence_reference: str
+
+    def __post_init__(self) -> None:
+        if type(self.outcome) is not LockTerminalOutcome:
+            raise TypeError("outcome")
+        _queue_identity(self.evidence_reference, "evidence_reference")
+
+
+@dataclass(frozen=True)
+class LockRequest:
+    operation: LockOperation
+    resource: LockResource
+    owner: LockOwner | None = None
+    acquisition_id: str | None = None
+    fencing_token: int | None = None
+    expected_revision: int | None = None
+    evidence: LockTerminalEvidence | None = None
+
+    def __post_init__(self) -> None:
+        if type(self.operation) is not LockOperation or type(self.resource) is not LockResource:
+            raise TypeError("operation/resource")
+        self.resource.__post_init__()
+        if self.operation is LockOperation.OBSERVE:
+            if any(v is not None for v in (self.owner, self.acquisition_id,
+                    self.fencing_token, self.expected_revision, self.evidence)):
+                raise ValueError("observation inputs")
+            return
+        if type(self.owner) is not LockOwner:
+            raise TypeError("owner")
+        self.owner.__post_init__()
+        _worker_uuid(self.acquisition_id, "acquisition_id")
+        if self.operation is LockOperation.ACQUIRE:
+            if self.fencing_token is not None or self.expected_revision is not None:
+                raise ValueError("acquisition preconditions")
+        else:
+            _queue_integer(self.fencing_token, "fencing_token", 1, _SIGNED_64_MAX)
+            _queue_integer(self.expected_revision, "expected_revision", 1, _SIGNED_64_MAX)
+        if self.operation is LockOperation.TERMINALIZE:
+            if type(self.evidence) is not LockTerminalEvidence:
+                raise TypeError("evidence")
+            self.evidence.__post_init__()
+        elif self.evidence is not None:
+            raise ValueError("unexpected evidence")
+
+
+@dataclass(frozen=True)
+class LockGrant:
+    resource: LockResource
+    owner: LockOwner
+    acquisition_id: str
+    fencing_token: int
+    revision: int
+    state: LockState
+    acquired_at: str
+    renewed_at: str
+    lease_expires_at: str
+    updated_at: str
+    reserved_at: str | None = None
+    terminal_outcome: str | None = None
+    evidence_reference: str | None = None
+
+    def __post_init__(self) -> None:
+        if type(self.resource) is not LockResource or type(self.owner) is not LockOwner:
+            raise TypeError("resource/owner")
+        self.resource.__post_init__()
+        self.owner.__post_init__()
+        _worker_uuid(self.acquisition_id, "acquisition_id")
+        _queue_integer(self.fencing_token, "fencing_token", 1, _SIGNED_64_MAX)
+        _queue_integer(self.revision, "revision", 1, _SIGNED_64_MAX)
+        if type(self.state) is not LockState:
+            raise TypeError("state")
+        for key in ("acquired_at", "renewed_at", "lease_expires_at", "updated_at"):
+            _parse_queue_timestamp(getattr(self, key), key)
+        if not self.acquired_at <= self.renewed_at < self.lease_expires_at or self.updated_at < self.renewed_at:
+            raise ValueError("lock timestamps")
+        if self.reserved_at is not None:
+            _parse_queue_timestamp(self.reserved_at, "reserved_at")
+            if not self.acquired_at <= self.reserved_at <= self.updated_at:
+                raise ValueError("reserved_at")
+        if self.state is LockState.EFFECT_RESERVED and self.reserved_at is None:
+            raise ValueError("reservation missing")
+        if self.terminal_outcome not in (None, "VERIFIED_SUCCESS", "PROVEN_NO_EFFECT", "UNKNOWN", "RELEASED", "LEASE_EXPIRED", "OWNER_LOST"):
+            raise ValueError("terminal_outcome")
+        if self.evidence_reference is not None:
+            _queue_identity(self.evidence_reference, "evidence_reference")
+
+
+@dataclass(frozen=True)
+class LockEvent:
+    event_sequence: int
+    kind: str
+    grant: LockGrant
+
+
+@dataclass(frozen=True)
+class LockResult:
+    code: LockResultCode
+    observed_at: str | None = None
+    grant: LockGrant | None = None
+    events: tuple[LockEvent, ...] = ()
+    effective_state: LockState | None = None

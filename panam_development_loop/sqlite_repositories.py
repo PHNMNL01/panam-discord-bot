@@ -4,6 +4,10 @@ import json
 import os
 import sqlite3
 import sys
+import ntpath
+import re
+from dataclasses import asdict, replace
+from datetime import timedelta
 from pathlib import Path
 from typing import NoReturn
 
@@ -56,6 +60,9 @@ from .models import (
     _worker_queue_owner,
     _worker_receipt_code_diagnostic_valid,
     _worker_uuid,
+    LockConfiguration, LockEvent, LockGrant, LockOperation, LockOwner,
+    LockRequest, LockResource, LockResult, LockResultCode, LockState,
+    LockTerminalOutcome,
 )
 from .repositories import (
     RepositoryError,
@@ -63,6 +70,7 @@ from .repositories import (
     _validate_query_identity,
 )
 from .sqlite_migrations import PRODUCTION_MIGRATIONS
+from .command_queue import _format_queue_timestamp
 
 
 _REQUIRED_TABLES = frozenset(
@@ -80,6 +88,9 @@ _REQUIRED_TABLES = frozenset(
         "worker_operations",
         "phase_states",
         "phase_state_events",
+        "project_locks",
+        "project_branch_locks",
+        "project_lock_events",
     }
 )
 
@@ -167,7 +178,7 @@ def _validate_current_schema(
             identity,
             error,
         )
-    if versions != [1, 2, 3, 4, 5, 6]:
+    if versions != [1, 2, 3, 4, 5, 6, 7]:
         raise RepositoryError(RepositoryFailureCode.SCHEMA_MISMATCH, entity_name, identity)
     project_policy_shape = [
         (
@@ -221,6 +232,7 @@ def _validate_current_schema(
     _validate_queue_schema(connection, entity_name, identity)
     _validate_worker_schema(connection, entity_name, identity)
     _validate_phase_schema(connection, entity_name, identity)
+    _validate_lock_schema(connection, entity_name, identity)
 
 
 def _validate_queue_schema(
@@ -4744,3 +4756,367 @@ class SqliteWorkerJournalRepository:
             )
 
         return self._read_result("WorkflowCommand", identity, operation)
+
+
+def _validate_lock_schema(connection, entity_name, identity):
+    """Check exact v7 DDL, including constraints, indexes and absence of triggers."""
+    def normalized(sql):
+        return ' '.join(sql.strip().rstrip(';').split())
+    expected = {}
+    for sql in PRODUCTION_MIGRATIONS[6].statements:
+        match = re.match(r'CREATE (?:UNIQUE )?(TABLE|INDEX) (\w+)', sql.strip())
+        expected[match[2]] = (match[1].lower(), normalized(sql))
+    rows = connection.execute(
+        "SELECT name,type,sql FROM sqlite_master WHERE tbl_name IN "
+        "('project_locks','project_branch_locks','project_lock_events')"
+    ).fetchall()
+    actual = {r['name']: (r['type'], normalized(r['sql'])) for r in rows if r['sql'] is not None}
+    if actual != expected:
+        raise RepositoryError(RepositoryFailureCode.SCHEMA_MISMATCH, entity_name, identity)
+
+
+def _lock_root(root):
+    return ntpath.normcase(ntpath.normpath(root))
+
+
+def _lock_snapshot(grant):
+    return json.dumps(asdict(grant), sort_keys=True, separators=(',', ':'), ensure_ascii=True)
+
+
+def _lock_decode_snapshot(payload):
+    value = json.loads(payload)
+    value['resource'] = LockResource(**value['resource'])
+    value['owner'] = LockOwner(**value['owner'])
+    value['state'] = LockState(value['state'])
+    return LockGrant(**value)
+
+
+class SqliteProjectLockRepository:
+    """One project writer, short transactions, no retries or external effects.
+
+    Registry/session/queue facts are inspected on the same connection as the
+    mutation. All prior acquisitions remain in the append-only event history.
+    There is deliberately no method that clears reconciliation-required work.
+    """
+
+    def __init__(self, database_path: Path):
+        self._database_path, self._database_identity = _canonical_database_path(database_path)
+
+    def execute(self, request, configuration, clock):
+        if type(request) is not LockRequest or type(configuration) is not LockConfiguration or not callable(clock):
+            raise TypeError('request/configuration/clock')
+        request.__post_init__()
+        configuration.__post_init__()
+        read_only = request.operation in {LockOperation.CHECK, LockOperation.OBSERVE}
+        connection = None
+        try:
+            opener = _open_read_only_connection if read_only else _open_connection
+            connection = opener(self._database_path, 'ProjectLock', request.resource.project_id)
+            connection.execute('BEGIN' if read_only else 'BEGIN IMMEDIATE')
+            _validate_current_schema(connection, 'ProjectLock', request.resource.project_id)
+            # Call the trusted clock only after the transaction and schema check.
+            try:
+                now = _format_queue_timestamp(clock())
+                instant = _parse_queue_timestamp(now, 'observed_at')
+                expiry = _format_queue_timestamp(instant + timedelta(seconds=configuration.lock_lease_seconds))
+                stale = _format_queue_timestamp(instant - timedelta(seconds=configuration.heartbeat_stale_after_seconds))
+            except (TypeError, ValueError, OverflowError):
+                connection.rollback()
+                return LockResult(LockResultCode.CLOCK_INVALID)
+            result = self._execute_in_transaction(connection, request, now, expiry, stale)
+            if read_only:
+                connection.rollback()
+            else:
+                connection.commit()
+            return result
+        except RepositoryError as error:
+            if connection is not None:
+                _rollback_if_active(connection)
+            cause = error.__cause__
+            if isinstance(cause, sqlite3.Error) and SqliteWorkflowCommandRepository._is_busy(cause):
+                return LockResult(LockResultCode.TRANSIENT_CONTENTION)
+            return LockResult(LockResultCode.UNSUPPORTED_SCHEMA if error.code is RepositoryFailureCode.SCHEMA_MISMATCH else LockResultCode.UNAVAILABLE)
+        except sqlite3.Error as error:
+            if connection is not None:
+                _rollback_if_active(connection)
+            return LockResult(LockResultCode.TRANSIENT_CONTENTION if SqliteWorkflowCommandRepository._is_busy(error) else LockResultCode.UNAVAILABLE)
+        except (TypeError, ValueError, KeyError, IndexError, OverflowError):
+            if connection is not None:
+                _rollback_if_active(connection)
+            return LockResult(LockResultCode.UNAVAILABLE)
+        finally:
+            if connection is not None:
+                connection.close()
+
+    def _load(self, connection, project):
+        row = connection.execute('SELECT * FROM project_locks WHERE project_id=?', (project,)).fetchone()
+        branches = connection.execute('SELECT * FROM project_branch_locks WHERE project_id=?', (project,)).fetchall()
+        history = connection.execute('SELECT * FROM project_lock_events WHERE project_id=? ORDER BY revision', (project,)).fetchall()
+        if row is None:
+            if branches or history:
+                raise ValueError('orphan coordination evidence')
+            return None, ()
+        branch = branches[0] if branches else None
+        grant = LockGrant(
+            LockResource(project, row['project_root'], None if branch is None else branch['branch_ref']),
+            LockOwner(row['worker_id'], row['session_id'], row['queue_owner_id'], row['command_id'], row['claim_count']),
+            row['acquisition_id'], row['fencing_token'], row['revision'], LockState(row['state']),
+            row['acquired_at'], row['renewed_at'], row['lease_expires_at'], row['updated_at'],
+            row['reserved_at'], row['terminal_outcome'], row['evidence_reference'])
+        if row['normalized_root'] != _lock_root(grant.resource.project_root) or row['fence_high_water'] != grant.fencing_token:
+            raise ValueError('root/fence integrity')
+        if branch is not None and (
+            len(branches) != 1 or branch['conflict_key'] != grant.resource.branch_ref.casefold()
+            or (branch['acquisition_id'], branch['fencing_token'], branch['revision'], branch['updated_at']) !=
+            (grant.acquisition_id, grant.fencing_token, grant.revision, grant.updated_at)):
+            raise ValueError('subordinate binding integrity')
+        events = []
+        previous = None
+        expected_fence = 0
+        for revision, event in enumerate(history, 1):
+            snapshot = _lock_decode_snapshot(event['snapshot_json'])
+            if (snapshot.resource.project_id != project or snapshot.revision != revision
+                    or event['revision'] != revision or event['acquisition_id'] != snapshot.acquisition_id
+                    or event['fencing_token'] != snapshot.fencing_token or event['occurred_at'] != snapshot.updated_at):
+                raise ValueError('event binding')
+            if previous is not None and (snapshot.updated_at < previous.updated_at
+                    or _lock_root(snapshot.resource.project_root) != _lock_root(previous.resource.project_root)):
+                raise ValueError('event chronology/root')
+            kind = event['kind']
+            if kind == 'ACQUIRED':
+                expected_fence += 1
+                if snapshot.state is not LockState.HELD or (previous is not None and previous.state is not LockState.RELEASED):
+                    raise ValueError('acquisition history')
+            else:
+                if previous is None or (snapshot.acquisition_id, snapshot.owner, snapshot.resource, snapshot.acquired_at) != (
+                        previous.acquisition_id, previous.owner, previous.resource, previous.acquired_at):
+                    raise ValueError('ownership continuity')
+                allowed = {
+                    'RENEWED': (LockState.HELD, LockState.HELD),
+                    'RELEASED': (LockState.HELD, LockState.RELEASED),
+                    'EFFECT_RESERVED': (LockState.HELD, LockState.EFFECT_RESERVED),
+                }
+                if kind in allowed and (previous.state, snapshot.state) != allowed[kind]:
+                    raise ValueError('event transition')
+                if kind == 'TERMINALIZED' and (previous.state is not LockState.EFFECT_RESERVED or snapshot.state not in {LockState.RELEASED, LockState.RECONCILIATION_REQUIRED}):
+                    raise ValueError('terminalization history')
+                if kind == 'RECONCILIATION_REQUIRED' and (previous.state is not LockState.HELD or snapshot.state is not LockState.RECONCILIATION_REQUIRED):
+                    raise ValueError('expiry history')
+            if snapshot.fencing_token != expected_fence:
+                raise ValueError('fence continuity')
+            events.append(LockEvent(event['event_sequence'], kind, snapshot))
+            previous = snapshot
+        if not events or events[-1].grant != grant:
+            raise ValueError('missing/current history mismatch')
+        return grant, tuple(events)
+
+    def _resource_valid(self, connection, resource):
+        # Existing project_policies is the authority; inspect every registered
+        # root so aliases cannot create independently keyed writer domains.
+        rows = connection.execute('SELECT project_id,policy_version,project_root FROM project_policies').fetchall()
+        policies = tuple(ProjectPolicy(**dict(row)) for row in rows)
+        selected = next((p for p in policies if p.project_id == resource.project_id), None)
+        if selected is None:
+            return LockResultCode.INVALID_RESOURCE
+        root = _lock_root(selected.project_root)
+        if root != _lock_root(resource.project_root):
+            return LockResultCode.RESOURCE_CHANGED
+        if sum(_lock_root(p.project_root) == root for p in policies) != 1:
+            return LockResultCode.RESOURCE_ALIAS_CONFLICT
+        # Retained root bindings prevent a registration change from bypassing
+        # earlier ownership even if the old registration is no longer present.
+        for row in connection.execute('SELECT project_id,normalized_root FROM project_locks'):
+            if row['project_id'] == resource.project_id and row['normalized_root'] != root:
+                return LockResultCode.RESOURCE_CHANGED
+            if row['project_id'] != resource.project_id and row['normalized_root'] == root:
+                return LockResultCode.RESOURCE_ALIAS_CONFLICT
+        return None
+
+    def _owner_valid(self, connection, owner, project, now, stale, *, stopping=False, terminal=False):
+        row = connection.execute('SELECT * FROM worker_sessions WHERE session_id=?', (owner.session_id,)).fetchone()
+        if row is None:
+            return False
+        session = _decode_worker_session(row)
+        if (session.worker_id, session.queue_owner_id) != (owner.worker_id, owner.queue_owner_id):
+            return False
+        command = SqliteWorkflowCommandRepository(self._database_path)._load_command(connection, owner.command_id)
+        if command is None or command.project_id != project or command.claim_count != owner.claim_count:
+            return False
+        # Prove this claim was granted to this session even if terminal queue
+        # state has cleared the live lease columns.
+        claimed = connection.execute("SELECT lease_owner FROM workflow_command_events WHERE command_id=? AND claim_count=? AND event_kind='CLAIMED'",
+                                     (owner.command_id, owner.claim_count)).fetchall()
+        if len(claimed) != 1 or claimed[0]['lease_owner'] != owner.queue_owner_id:
+            return False
+        if terminal:
+            return True  # terminal evidence is separately verified by the consumer
+        states = {WorkerSessionState.ACTIVE, WorkerSessionState.STOPPING} if stopping else {WorkerSessionState.ACTIVE}
+        return (session.state in states and stale < session.last_heartbeat_at <= now
+                and command.state in {WorkflowCommandState.CLAIMED, WorkflowCommandState.RUNNING}
+                and command.lease_owner == owner.queue_owner_id and command.updated_at <= now
+                and command.lease_expires_at is not None and now < command.lease_expires_at
+                and (stopping or command.cancellation_requested_at is None))
+
+    @staticmethod
+    def _matches(grant, request):
+        if grant.resource.branch_ref != request.resource.branch_ref:
+            if (grant.resource.branch_ref is not None and request.resource.branch_ref is not None
+                    and grant.resource.branch_ref.casefold() == request.resource.branch_ref.casefold()):
+                return LockResultCode.BRANCH_COLLISION
+            return LockResultCode.INVALID_RESOURCE
+        if grant.owner != request.owner:
+            return LockResultCode.INVALID_OWNER
+        if grant.acquisition_id != request.acquisition_id or grant.fencing_token != request.fencing_token:
+            return LockResultCode.STALE_FENCE
+        if grant.revision != request.expected_revision:
+            return LockResultCode.CAS_CONFLICT
+        return None
+
+    def _persist(self, connection, grant, kind, previous):
+        # Removing an old subordinate *coordination row* never touches work;
+        # the old exact binding remains immutable in project_lock_events.
+        if kind == 'ACQUIRED' and previous is not None:
+            connection.execute('DELETE FROM project_branch_locks WHERE project_id=?', (grant.resource.project_id,))
+        values = (grant.resource.project_root, _lock_root(grant.resource.project_root), grant.state.value,
+                  grant.owner.worker_id, grant.owner.session_id, grant.owner.queue_owner_id,
+                  grant.owner.command_id, grant.owner.claim_count, grant.acquisition_id,
+                  grant.fencing_token, grant.fencing_token, grant.revision, grant.acquired_at,
+                  grant.renewed_at, grant.lease_expires_at, grant.updated_at, grant.reserved_at,
+                  grant.terminal_outcome, grant.evidence_reference)
+        columns = ('project_root','normalized_root','state','worker_id','session_id','queue_owner_id',
+                   'command_id','claim_count','acquisition_id','fence_high_water','fencing_token','revision',
+                   'acquired_at','renewed_at','lease_expires_at','updated_at','reserved_at','terminal_outcome','evidence_reference')
+        if previous is None:
+            connection.execute('INSERT INTO project_locks(project_id,' + ','.join(columns) + ') VALUES(' + ','.join('?' for _ in range(20)) + ')',
+                               (grant.resource.project_id,) + values)
+        else:
+            cursor = connection.execute('UPDATE project_locks SET ' + ','.join(c+'=?' for c in columns)
+                + ' WHERE project_id=? AND acquisition_id=? AND fencing_token=? AND revision=? AND state=?',
+                values + (grant.resource.project_id, previous.acquisition_id, previous.fencing_token, previous.revision, previous.state.value))
+            if cursor.rowcount != 1:
+                raise ValueError('coordination CAS lost')
+        if grant.resource.branch_ref is not None:
+            connection.execute('INSERT INTO project_branch_locks VALUES(?,?,?,?,?,?,?) ON CONFLICT(project_id) DO UPDATE SET '
+                'branch_ref=excluded.branch_ref,conflict_key=excluded.conflict_key,acquisition_id=excluded.acquisition_id,'
+                'fencing_token=excluded.fencing_token,revision=excluded.revision,updated_at=excluded.updated_at',
+                (grant.resource.project_id, grant.resource.branch_ref, grant.resource.branch_ref.casefold(),
+                 grant.acquisition_id, grant.fencing_token, grant.revision, grant.updated_at))
+        connection.execute('INSERT INTO project_lock_events(project_id,acquisition_id,fencing_token,revision,kind,occurred_at,snapshot_json) VALUES(?,?,?,?,?,?,?)',
+            (grant.resource.project_id, grant.acquisition_id, grant.fencing_token, grant.revision, kind, grant.updated_at, _lock_snapshot(grant)))
+        # Validate the committed candidate, including state/event agreement.
+        return self._load(connection, grant.resource.project_id)
+
+    def _execute_in_transaction(self, connection, request, now, expiry, stale):
+        op, resource = request.operation, request.resource
+        invalid = self._resource_valid(connection, resource)
+        if invalid:
+            return LockResult(invalid, now)
+        current, events = self._load(connection, resource.project_id)
+        def result(code, grant=current, history=events, effective=None):
+            return LockResult(code, now, grant, history, effective or (grant.state if grant else None))
+        if current is not None and now < current.updated_at:
+            return result(LockResultCode.CLOCK_INVALID)
+        if op is LockOperation.OBSERVE:
+            effective = current.state if current else None
+            if current and current.state in {LockState.HELD, LockState.EFFECT_RESERVED}:
+                if (current.state is LockState.HELD and now >= current.lease_expires_at) or not self._owner_valid(
+                        connection, current.owner, resource.project_id, now, stale, stopping=True):
+                    effective = LockState.RECONCILIATION_REQUIRED
+            return result(LockResultCode.OBSERVED if current else LockResultCode.NOT_FOUND, effective=effective)
+        if op is LockOperation.ACQUIRE:
+            if resource.branch_ref is not None and any(
+                e.grant.resource.branch_ref is not None
+                and e.grant.resource.branch_ref != resource.branch_ref
+                and e.grant.resource.branch_ref.casefold() == resource.branch_ref.casefold()
+                for e in events
+            ):
+                return result(LockResultCode.BRANCH_COLLISION)
+            prior_id = connection.execute("SELECT snapshot_json FROM project_lock_events WHERE acquisition_id=? AND kind='ACQUIRED'", (request.acquisition_id,)).fetchone()
+            if prior_id is not None:
+                old = _lock_decode_snapshot(prior_id['snapshot_json'])
+                if (old.resource.project_id != resource.project_id or _lock_root(old.resource.project_root) != _lock_root(resource.project_root)
+                        or old.resource.branch_ref != resource.branch_ref or old.owner != request.owner):
+                    return result(LockResultCode.ACQUISITION_CONFLICT)
+                if current is None or current.acquisition_id != request.acquisition_id or current.state is LockState.RELEASED:
+                    return result(LockResultCode.ACQUISITION_CONFLICT)
+            if not self._owner_valid(connection, request.owner, resource.project_id, now, stale):
+                return result(LockResultCode.INVALID_OWNER)
+            if current is not None and current.state is not LockState.RELEASED:
+                if current.state is LockState.HELD and now >= current.lease_expires_at:
+                    return self._expire(connection, current, now)
+                if current.state is LockState.RECONCILIATION_REQUIRED:
+                    return result(LockResultCode.RECONCILIATION_REQUIRED)
+                if current.acquisition_id == request.acquisition_id:
+                    return result(LockResultCode.EXISTING)
+                if (resource.branch_ref and current.resource.branch_ref and resource.branch_ref != current.resource.branch_ref
+                        and resource.branch_ref.casefold() == current.resource.branch_ref.casefold()):
+                    return result(LockResultCode.BRANCH_COLLISION)
+                return result(LockResultCode.CONFLICT)
+            fence = 1 if current is None else current.fencing_token + 1
+            revision = 1 if current is None else current.revision + 1
+            if fence > _SIGNED_64_MAX or revision > _SIGNED_64_MAX:
+                return result(LockResultCode.FENCE_EXHAUSTED)
+            grant = LockGrant(resource, request.owner, request.acquisition_id, fence, revision,
+                              LockState.HELD, now, now, expiry, now)
+            grant, history = self._persist(connection, grant, 'ACQUIRED', current)
+            return result(LockResultCode.ACQUIRED, grant, history)
+        if current is None:
+            return result(LockResultCode.NOT_FOUND)
+        mismatch = self._matches(current, request)
+        if mismatch:
+            return result(mismatch)
+        if current.state is LockState.RECONCILIATION_REQUIRED:
+            return result(LockResultCode.RECONCILIATION_REQUIRED)
+        if current.state is LockState.RELEASED:
+            return result(LockResultCode.ALREADY_RELEASED if op is LockOperation.RELEASE else LockResultCode.INVALID_STATE)
+        if op is LockOperation.TERMINALIZE:
+            if current.state is not LockState.EFFECT_RESERVED:
+                return result(LockResultCode.INVALID_STATE)
+            if not self._owner_valid(connection, request.owner, resource.project_id, now, stale, terminal=True):
+                return result(LockResultCode.INVALID_OWNER)
+            if current.revision == _SIGNED_64_MAX:
+                return result(LockResultCode.FENCE_EXHAUSTED)
+            unknown = request.evidence.outcome is LockTerminalOutcome.UNKNOWN
+            grant = replace(current, state=LockState.RECONCILIATION_REQUIRED if unknown else LockState.RELEASED,
+                revision=current.revision+1, updated_at=now, terminal_outcome=request.evidence.outcome.value,
+                evidence_reference=request.evidence.evidence_reference)
+            grant, history = self._persist(connection, grant, 'TERMINALIZED', current)
+            return result(LockResultCode.RECONCILIATION_REQUIRED if unknown else LockResultCode.RELEASED, grant, history)
+        if current.state is LockState.EFFECT_RESERVED and op is not LockOperation.CHECK:
+            return result(LockResultCode.INVALID_STATE)
+        if now >= current.lease_expires_at:
+            if op is LockOperation.CHECK:
+                return result(LockResultCode.CURRENT_LEASE_LOST, effective=LockState.RECONCILIATION_REQUIRED)
+            return self._expire(connection, current, now)
+        if not self._owner_valid(connection, request.owner, resource.project_id, now, stale, stopping=op is LockOperation.RELEASE):
+            return result(LockResultCode.INVALID_OWNER)
+        if op is LockOperation.CHECK:
+            return result(LockResultCode.CURRENT)
+        if current.revision == _SIGNED_64_MAX:
+            return result(LockResultCode.FENCE_EXHAUSTED)
+        changes = dict(revision=current.revision+1, updated_at=now)
+        if op is LockOperation.RENEW:
+            if expiry <= current.lease_expires_at:
+                return result(LockResultCode.CLOCK_INVALID)
+            changes.update(renewed_at=now, lease_expires_at=expiry)
+            kind, code = 'RENEWED', LockResultCode.RENEWED
+        elif op is LockOperation.RELEASE:
+            changes.update(state=LockState.RELEASED, terminal_outcome='RELEASED')
+            kind, code = 'RELEASED', LockResultCode.RELEASED
+        elif op is LockOperation.RESERVE:
+            if resource.branch_ref is None:
+                return result(LockResultCode.INVALID_RESOURCE)
+            changes.update(state=LockState.EFFECT_RESERVED, reserved_at=now)
+            kind, code = 'EFFECT_RESERVED', LockResultCode.EFFECT_RESERVED
+        else:
+            return result(LockResultCode.INVALID_STATE)
+        grant, history = self._persist(connection, replace(current, **changes), kind, current)
+        return result(code, grant, history)
+
+    def _expire(self, connection, current, now):
+        if current.revision == _SIGNED_64_MAX:
+            return LockResult(LockResultCode.FENCE_EXHAUSTED, now, current)
+        grant = replace(current, state=LockState.RECONCILIATION_REQUIRED,
+                        revision=current.revision+1, updated_at=now, terminal_outcome='LEASE_EXPIRED')
+        grant, events = self._persist(connection, grant, 'RECONCILIATION_REQUIRED', current)
+        return LockResult(LockResultCode.CURRENT_LEASE_LOST, now, grant, events, grant.state)

@@ -255,3 +255,20 @@ __all__ = [
     "PhaseTransitionPolicy",
     "PhaseTransitionService",
 ]
+
+# Additive DL-2.5 API; the historical export prefix is intentionally unchanged.
+from .models import (
+    LockState, LockOperation, LockResultCode, LockTerminalOutcome, LockResource,
+    LockOwner, LockConfiguration, LockTerminalEvidence, LockRequest, LockGrant,
+    LockEvent, LockResult,
+)
+from .repositories import ProjectLockRepository
+from .project_locks import ProjectLockService
+from .sqlite_repositories import SqliteProjectLockRepository
+
+__all__ += [
+    'LockState', 'LockOperation', 'LockResultCode', 'LockTerminalOutcome',
+    'LockResource', 'LockOwner', 'LockConfiguration', 'LockTerminalEvidence',
+    'LockRequest', 'LockGrant', 'LockEvent', 'LockResult',
+    'ProjectLockRepository', 'ProjectLockService', 'SqliteProjectLockRepository',
+]
