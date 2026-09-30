@@ -91,6 +91,8 @@ _REQUIRED_TABLES = frozenset(
         "project_locks",
         "project_branch_locks",
         "project_lock_events",
+        "phase_branch_operations",
+        "phase_branch_operation_events",
     }
 )
 
@@ -147,7 +149,10 @@ def _validate_current_schema(
     connection: sqlite3.Connection,
     entity_name: str,
     identity: str,
+    *, _version: int = 8,
 ) -> None:
+    if _version not in (7, 8):
+        raise RepositoryError(RepositoryFailureCode.SCHEMA_MISMATCH, entity_name, identity)
     try:
         tables = {
             row["name"]
@@ -155,7 +160,9 @@ def _validate_current_schema(
                 "SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%'"
             )
         }
-        if tables != _REQUIRED_TABLES:
+        expected_tables = _REQUIRED_TABLES if _version == 8 else _REQUIRED_TABLES - {
+            "phase_branch_operations", "phase_branch_operation_events"}
+        if tables != expected_tables:
             raise RepositoryError(RepositoryFailureCode.SCHEMA_MISMATCH, entity_name, identity)
         versions = [
             row["version"]
@@ -178,7 +185,7 @@ def _validate_current_schema(
             identity,
             error,
         )
-    if versions != [1, 2, 3, 4, 5, 6, 7]:
+    if versions != list(range(1, _version + 1)):
         raise RepositoryError(RepositoryFailureCode.SCHEMA_MISMATCH, entity_name, identity)
     project_policy_shape = [
         (
@@ -233,6 +240,17 @@ def _validate_current_schema(
     _validate_worker_schema(connection, entity_name, identity)
     _validate_phase_schema(connection, entity_name, identity)
     _validate_lock_schema(connection, entity_name, identity)
+    if _version == 8:
+        expected = {}
+        for sql in PRODUCTION_MIGRATIONS[7].statements:
+            match = re.match(r'CREATE (?:UNIQUE )?(TABLE|INDEX) (\w+)', sql.strip())
+            expected[match[2]] = (match[1].lower(), ' '.join(sql.strip().rstrip(';').split()))
+        rows = connection.execute("SELECT name,type,sql FROM sqlite_master WHERE tbl_name IN "
+            "('phase_branch_operations','phase_branch_operation_events')").fetchall()
+        actual = {r['name']: (r['type'], ' '.join(r['sql'].strip().rstrip(';').split()))
+                  for r in rows if r['sql'] is not None}
+        if actual != expected:
+            raise RepositoryError(RepositoryFailureCode.SCHEMA_MISMATCH, entity_name, identity)
 
 
 def _validate_queue_schema(

@@ -672,6 +672,27 @@ PRODUCTION_MIGRATIONS += (
         "CREATE UNIQUE INDEX project_lock_acquisition_id_uq ON project_lock_events(acquisition_id) WHERE kind='ACQUIRED'",
         "CREATE INDEX project_lock_history_idx ON project_lock_events(project_id, event_sequence)",
     )),
+    Migration(8, (
+        """CREATE TABLE phase_branch_operations (
+            effect_id TEXT NOT NULL PRIMARY KEY CHECK(length(effect_id)=36),
+            command_id TEXT NOT NULL UNIQUE REFERENCES workflow_commands(command_id) ON DELETE RESTRICT ON UPDATE RESTRICT,
+            intent_digest TEXT NOT NULL CHECK(length(intent_digest)=64),
+            authorization_json TEXT NOT NULL CHECK(length(authorization_json) BETWEEN 1 AND 8388608),
+            grant_json TEXT NOT NULL CHECK(length(grant_json) BETWEEN 1 AND 8388608),
+            pre_json TEXT NOT NULL CHECK(length(pre_json) BETWEEN 1 AND 8388608),
+            created_at TEXT NOT NULL
+        )""",
+        """CREATE TABLE phase_branch_operation_events (
+            effect_id TEXT NOT NULL REFERENCES phase_branch_operations(effect_id) ON DELETE RESTRICT ON UPDATE RESTRICT,
+            revision INTEGER NOT NULL CHECK(typeof(revision)='integer' AND revision BETWEEN 1 AND 4),
+            kind TEXT NOT NULL CHECK(kind IN ('RESERVATION','DISPATCH','OUTCOME','TERMINAL')),
+            payload_json TEXT NOT NULL CHECK(length(payload_json) BETWEEN 1 AND 8388608),
+            payload_digest TEXT NOT NULL CHECK(length(payload_digest)=64),
+            occurred_at TEXT NOT NULL,
+            PRIMARY KEY(effect_id, revision),
+            UNIQUE(effect_id, kind)
+        )""",
+    )),
 )
 
 _FORBIDDEN_OPERATION_TOKENS = frozenset(
@@ -712,13 +733,13 @@ def validate_migration_registry(
         raise MigrationError(MigrationFailureCode.INVALID_REGISTRY, "declared order")
     if versions != list(range(1, len(versions) + 1)):
         raise MigrationError(MigrationFailureCode.INVALID_REGISTRY, "contiguous versions")
-    if require_production_version and versions != [1, 2, 3, 4, 5, 6, 7]:
+    if require_production_version and versions != [1, 2, 3, 4, 5, 6, 7, 8]:
         raise MigrationError(MigrationFailureCode.INVALID_REGISTRY, "production version")
     return registry
 
 
 def initialize_database(database_path: Path, applied_at: str) -> None:
-    """Initialize through version 7; requires coordinated offline binary upgrade."""
+    """Initialize through version 8; requires coordinated offline binary upgrade."""
 
     registry = validate_migration_registry(PRODUCTION_MIGRATIONS, require_production_version=True)
     connection = sqlite3.connect(database_path)
@@ -726,6 +747,8 @@ def initialize_database(database_path: Path, applied_at: str) -> None:
     try:
         connection.execute("PRAGMA foreign_keys = ON")
         _apply_validated_migrations(connection, applied_at, registry)
+        from .sqlite_repositories import _validate_current_schema
+        _validate_current_schema(connection, "Migration8", "initialized")
     finally:
         connection.close()
 
@@ -753,12 +776,19 @@ def _apply_validated_migrations(
     for migration in registry[len(applied_versions) :]:
         try:
             connection.execute("BEGIN IMMEDIATE")
+            if migration.version == 8 and registry[:7] == PRODUCTION_MIGRATIONS[:7]:
+                # Validate the v7 base under the migration write lock. This is
+                # an offline upgrade, not mixed-version runtime compatibility.
+                from .sqlite_repositories import _validate_current_schema
+                _validate_current_schema(connection, "Migration8", "base", _version=7)
             for statement in migration.statements:
                 connection.execute(statement)
             connection.execute(
                 "INSERT INTO schema_migrations(version, applied_at) VALUES(?, ?)",
                 (migration.version, applied_at),
             )
+            if migration.version == 8 and registry == PRODUCTION_MIGRATIONS:
+                _validate_current_schema(connection, "Migration8", "candidate")
             connection.commit()
         except Exception as error:
             if connection.in_transaction:

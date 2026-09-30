@@ -670,7 +670,7 @@ class ProjectLockMigrationTest(unittest.TestCase):
     def test_fresh_exact_schema_and_idempotence(self):
         initialize_database(self.path,'first')
         with closing(self.connection()) as c, c:
-            self.assertEqual(list(range(1,8)),[r[0] for r in c.execute('SELECT version FROM schema_migrations ORDER BY version')])
+            self.assertEqual(list(range(1,9)),[r[0] for r in c.execute('SELECT version FROM schema_migrations ORDER BY version')])
             sr._validate_current_schema(c,'test','test')
             before=tuple(c.iterdump())
         initialize_database(self.path,'second')
@@ -714,10 +714,10 @@ class ProjectLockMigrationTest(unittest.TestCase):
     def test_malformed_future_and_schema_rejected(self):
         initialize_database(self.path,'first')
         with closing(self.connection()) as c, c:
-            c.execute('UPDATE schema_migrations SET version=8 WHERE version=7')
+            c.execute('UPDATE schema_migrations SET version=9 WHERE version=8')
             c.commit()
             with self.assertRaises(MigrationError): apply_migrations(c,'later',PRODUCTION_MIGRATIONS)
-            c.execute('DELETE FROM schema_migrations WHERE version=8')
+            c.execute('DELETE FROM schema_migrations WHERE version=9')
             c.execute('DELETE FROM schema_migrations WHERE version=3')
             c.commit()
             with self.assertRaises(MigrationError): apply_migrations(c,'later',PRODUCTION_MIGRATIONS)
