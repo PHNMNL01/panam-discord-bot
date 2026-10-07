@@ -380,7 +380,9 @@ class LifecycleTests(unittest.IsolatedAsyncioTestCase):
         async def backend(key, context):
             return "Patnáct.", {"input_tokens": 10, "output_tokens": 3}
 
-        self.session = LiveSession(CONFIG, self.budget, connect=connect, backend=backend)
+        self.input = InputBuffer()
+        self.session = LiveSession(CONFIG, self.budget, input_buffer=self.input,
+                                   connect=connect, backend=backend)
 
     async def asyncTearDown(self):
         if self.session.began is not None:

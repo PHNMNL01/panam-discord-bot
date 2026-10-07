@@ -11,7 +11,7 @@ import discord
 from discord import app_commands
 from discord.ext import voice_recv
 
-from .audio import DISCORD_FRAME
+from .audio import DISCORD_FRAME, InputBuffer
 from .config import SafeError
 from .live import LiveSession
 
@@ -138,6 +138,7 @@ class Controller:
         self.metadata = metadata
         self.lock = asyncio.Lock()
         self.session = None
+        self.input = None  # Controller-owned validated PCM; independent of Live ownership.
         self.voice = None
         self.sink = None
         self.watch = None
@@ -194,11 +195,13 @@ class Controller:
                     raise SafeError("Discord DAVE nebo členství kanálu není připraveno.")
                 if self.stop_requested:
                     raise SafeError("Start byl zastaven.")
-                self.session = LiveSession(self.config, self.budget, caption=self.caption)
+                self.input = InputBuffer()
+                self.session = LiveSession(self.config, self.budget, input_buffer=self.input,
+                                           caption=self.caption)
                 await self.session.start()
                 if self.stop_requested or not allowed_members(self.config, channel):
                     raise SafeError("Start byl zastaven.")
-                self.sink = ReceiveSink(self.config, self.voice, self.session.input)
+                self.sink = ReceiveSink(self.config, self.voice, self.input)
                 loop = asyncio.get_running_loop()
 
                 def transport_done(error):
@@ -237,8 +240,9 @@ class Controller:
 
     async def stop(self):
         self.stop_requested = True
+        if self.input is not None:
+            self.input.enable(False)
         if self.session:
-            self.session.input.enable(False)
             self.session.output.close()
         start = self.start_task
         if start and start is not asyncio.current_task() and not start.done():
@@ -260,8 +264,9 @@ class Controller:
         if reader:
             threads.extend(getattr(reader, attr, None) for attr in
                            ("packet_router", "event_router", "speaking_timer", "keepalive"))
+        if self.input is not None:
+            self.input.enable(False)
         if session:
-            session.input.enable(False)
             session.output.close()
         if voice:
             voice.companion_enabled = False
@@ -296,6 +301,7 @@ class Controller:
                 if thread.is_alive():
                     self.cleanup_failed = True
         self.session, self.voice, self.sink = None, None, None
+        self.input = None
         self.state = "chyba úklidu" if self.cleanup_failed else "odpojeno"
 
 

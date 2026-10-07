@@ -9,6 +9,13 @@ LIVE_FRAME = 960      # 20 ms, 24 kHz, mono, signed 16-bit LE
 
 
 class InputBuffer:
+    """Adapter-owned admission queue for validated 48 kHz stereo PCM16 LE.
+
+    Producers supply 3,840-byte / 20 ms frames after their trust checks. A Live
+    session borrows this queue and enables/disables admission; it does not own
+    the producer's lifetime. Disabling clears frames, so this is not pre-roll.
+    """
+
     def __init__(self, max_frames=10, clock=time.monotonic):
         self.lock = threading.Lock()
         self.frames = deque()

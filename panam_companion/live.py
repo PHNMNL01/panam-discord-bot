@@ -7,7 +7,7 @@ import logging
 import math
 import time
 
-from .audio import Converter, InputBuffer, OutputBuffer, SpeechGate
+from .audio import Converter, OutputBuffer, SpeechGate
 from .budget import CLOSE_MARGIN
 from .config import BACKEND_MODEL, LIVE_MODEL, LIVE_URL, RESPONSES_URL, VOICE, SafeError
 
@@ -109,7 +109,15 @@ async def request_backend(api_key, transcript):
 
 
 class LiveSession:
-    def __init__(self, config, budget, *, connect=open_socket, backend=request_backend,
+    """Own provider work and playback buffering; borrow adapter-owned PCM input.
+
+    input_buffer uses the InputBuffer admission contract: validated 48 kHz
+    stereo PCM16 LE, 20 ms frames. Start/mute/failure/close still gate and clear
+    admission, but never start or stop the audio source. Only one session may
+    borrow a queue at a time; the caller must close it before reusing the queue.
+    """
+
+    def __init__(self, config, budget, *, input_buffer, connect=open_socket, backend=request_backend,
                  clock=time.monotonic, caption=None):
         self.config = config
         self.budget = budget
@@ -117,7 +125,7 @@ class LiveSession:
         self.backend = backend
         self.clock = clock
         self.caption = caption
-        self.input = InputBuffer(clock=clock)
+        self.input = input_buffer
         self.output = OutputBuffer(clock=clock)
         self.converter = Converter()
         self.gate = SpeechGate()
