@@ -7,7 +7,7 @@ import asyncio
 
 from .audio import InputBuffer
 from .config import SafeError
-from .live import LiveSession
+from .live import LiveSession, NOT_OBSERVED, safe_failure_record
 from .local_audio import Microphone, Playback, get_backend, validate_device
 
 LISTENING_OFF = "LISTENING_OFF"
@@ -51,6 +51,7 @@ class LocalController:
         self.muted = False
         self.closed = self.cleanup_failed = False
         self.fault = None
+        self.last_call = None
         self.lock = asyncio.Lock()
 
     def status(self):
@@ -58,7 +59,44 @@ class LocalController:
                 "microphone_open": self.microphone is not None and self.microphone.stream is not None,
                 "cloud_session_owned": self.session is not None and not self.session.closed,
                 "playback_open": self.output is not None and self.output.stream is not None,
-                "cleanup_failed": self.cleanup_failed, "fault": self.fault}
+                "cleanup_failed": self.cleanup_failed, "fault": self.fault,
+                "last_call": self.last_call_status()}
+
+    def last_call_status(self):
+        """Return independent primitives, never a released session or audio object."""
+        if self.last_call is None:
+            return None
+        try:
+            summary = dict(self.last_call)
+            summary["first_failure"] = safe_failure_record(summary["first_failure"])
+            return summary
+        except Exception:
+            return {"status": "UNKNOWN", "first_failure": None}
+
+    def retain_call(self, session):
+        """Called under the lifecycle lock; stale sessions cannot replace status."""
+        if session is not self.session:
+            return
+        try:
+            fault = session.fault
+            finalized = session.finalized.is_set()
+            confirmed = session.closed and (finalized or not session.start_sent) and not session.backend_uncertain
+            uncertain = self.budget.data.get("uncertain", NOT_OBSERVED)
+            uncertain = uncertain if type(uncertain) is bool else NOT_OBSERVED
+            status = "FAILED" if fault is not None or session.failed.is_set() else (
+                "CLOSED" if confirmed and uncertain is False else "UNCERTAIN")
+            self.last_call = {
+                "status": status,
+                "fault": safe_failure_record({"fault_label": fault})["fault_label"] if fault is not None else None,
+                "session_closed": bool(session.closed), "provider_finalized": bool(finalized),
+                "closure_confirmed": bool(confirmed), "budget_uncertain": uncertain,
+                "first_failure": safe_failure_record(session.first_failure),
+            }
+        except Exception:
+            self.last_call = {"status": "UNKNOWN", "fault": NOT_OBSERVED,
+                              "session_closed": NOT_OBSERVED, "provider_finalized": NOT_OBSERVED,
+                              "closure_confirmed": NOT_OBSERVED, "budget_uncertain": NOT_OBSERVED,
+                              "first_failure": None}
 
     def ensure_ready(self):
         if self.closed or self.cleanup_failed:
@@ -96,6 +134,7 @@ class LocalController:
                 device = await audio_operation(lambda: validate_device(
                     get_backend(self.backend), self.output_device, 2, "output"))
                 self.session = self.session_factory(self.config, self.budget, input_buffer=self.input)
+                self.last_call = None
                 await self.session.start()
                 self.output = Playback(self.session.output, backend=self.backend, device=device)
                 await audio_operation(self.output.start)
@@ -136,9 +175,11 @@ class LocalController:
         if self.session:
             try:
                 await self.session.close()
+                self.retain_call(self.session)
                 self.session = None
             except Exception:
                 failed = self.cleanup_failed = True
+                self.retain_call(self.session)
         self.state = LOCAL_LISTENING if self.microphone else LISTENING_OFF
         if failed:
             raise SafeError("Local call cleanup unconfirmed; restart blocked.")

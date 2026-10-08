@@ -1,6 +1,8 @@
 """Documented GPT-Live WebSocket bridge, with explicit lifecycle and owned work."""
 import asyncio
+import audioop
 import base64
+import binascii
 from collections import deque
 import json
 import logging
@@ -10,6 +12,74 @@ import time
 from .audio import Converter, OutputBuffer, SpeechGate
 from .budget import CLOSE_MARGIN
 from .config import BACKEND_MODEL, LIVE_MODEL, LIVE_URL, RESPONSES_URL, VOICE, SafeError
+
+SANITIZED = "SANITIZED"
+NOT_OBSERVED = "NOT_OBSERVED"
+FAULT_LABELS = frozenset({
+    "provider_protocol_or_audio_error", "provider_transport_or_protocol_error",
+    "provider_error", "provider_closed", "provider_disconnected", "duration_limit",
+    "delegation_limit", "audio_send_failed", "transcript_not_ready", "backend_rejected",
+    "backend_empty_result", "backend_failed", "mute_ack_failed",
+})
+FAILURE_STRINGS = {
+    "fault_label": FAULT_LABELS,
+    "component": frozenset({"live_receiver", "live_session"}),
+    "processing_stage": frozenset({
+        "incoming_event_parsing", "session_startup_validation", "output_audio_validation",
+        "output_audio_observation", "output_audio_conversion", "output_buffer_append",
+        "transcript_processing", "delegation_processing", "session_usage_finalization",
+        "receive_event_processing", "receive_transport", "session_failure",
+    }),
+    "provider_event_type": frozenset({
+        "session.started", "session.closed", "error", "session.usage.updated",
+        "session.input_audio.muted", "session.input_audio.unmuted", "session.output_audio.delta",
+        "session.input_transcript.delta", "session.output_transcript.delta", "session.delegation.created",
+    }),
+    "exception_class": frozenset({
+        "JSONDecodeError", "AttributeError", "TypeError", "ValueError", "KeyError",
+        "BufferError", "RuntimeError", "binascii.Error", "audioop.error",
+    }),
+    "safe_reason_code": frozenset({
+        "malformed_provider_event", "invalid_session_startup", "invalid_output_audio_payload",
+        "invalid_pcm_alignment", "output_audio_chunk_limit", "playback_buffer_overflow",
+        "audio_conversion_error", "transcript_processing_error", "delegation_processing_error",
+        "invalid_session_usage", "unknown_receive_exception", "receive_transport_error",
+        "session_failure", "diagnostic_collection_failed",
+    }),
+}
+FAILURE_NUMBERS = {"output_audio_bytes": 262144, "output_queue_frames_before": 1000000,
+                   "output_queue_capacity": 1000000}
+EXCEPTION_CLASSES = {
+    json.JSONDecodeError: "JSONDecodeError", AttributeError: "AttributeError", TypeError: "TypeError",
+    ValueError: "ValueError", KeyError: "KeyError", BufferError: "BufferError", RuntimeError: "RuntimeError",
+    binascii.Error: "binascii.Error", audioop.error: "audioop.error",
+}
+
+
+def safe_failure_record(record):
+    """Copy a fixed schema of primitives; never copy event bodies or exception text.
+
+    Exact types and enum membership matter: regex-valid provider strings can still
+    be secrets. Correlation IDs/provider codes are deliberately not retained.
+    """
+    if record is None:
+        return None
+    try:
+        source = record if type(record) is dict else {}
+        result = {}
+        for field, allowed in FAILURE_STRINGS.items():
+            value = source.get(field, NOT_OBSERVED)
+            result[field] = value if type(value) is str and value in allowed | {NOT_OBSERVED, SANITIZED} else SANITIZED
+        for field, maximum in FAILURE_NUMBERS.items():
+            value = source.get(field, NOT_OBSERVED)
+            result[field] = value if type(value) is int and 0 <= value <= maximum else NOT_OBSERVED
+        value = source.get("monotonic_seconds", NOT_OBSERVED)
+        result["monotonic_seconds"] = (value if type(value) in (int, float) and
+                                       math.isfinite(value) and 0 <= value <= 1e12 else NOT_OBSERVED)
+        return result
+    except Exception:
+        return {field: NOT_OBSERVED for field in (*FAILURE_STRINGS, *FAILURE_NUMBERS, "monotonic_seconds")}
+
 
 LIVE_INSTRUCTIONS = """You are Panam, a friendly Czech voice companion. Speak Czech by default,
 refer to yourself in the feminine grammatical gender, and answer briefly and naturally.
@@ -148,6 +218,7 @@ class LiveSession:
         self.muted = False
         self.expected_mute = None
         self.fault = None
+        self.first_failure = None
         self.backend_uncertain = False
         self.backend_busy = False
         self.provider_seconds = 0.0
@@ -163,12 +234,64 @@ class LiveSession:
 
     def fail(self, code):
         if self.fault is None:
+            self.capture_failure(code)
             self.fault = code
             self.mark(code)
         self.input.enable(False)
         self.output.invalidate()
         self.failed.set()
         self.ready.set()
+
+    def capture_failure(self, fault_label, *, stage="session_failure", kind=NOT_OBSERVED,
+                        reason="session_failure", exception=None, audio_bytes=NOT_OBSERVED,
+                        queue_frames=NOT_OBSERVED, queue_capacity=NOT_OBSERVED):
+        """Best-effort first fault only; collection failure cannot replace cleanup."""
+        if self.first_failure is not None or self.fault is not None:
+            return
+        try:
+            self.first_failure = self._failure_record(
+                fault_label, stage, kind, reason, exception, audio_bytes, queue_frames, queue_capacity)
+        except Exception:
+            # Do not depend on the failing collector/sanitizer for the fallback.
+            self.first_failure = {field: NOT_OBSERVED for field in
+                                  (*FAILURE_STRINGS, *FAILURE_NUMBERS, "monotonic_seconds")}
+            self.first_failure["safe_reason_code"] = "diagnostic_collection_failed"
+
+    def _failure_record(self, fault_label, stage, kind, reason, exception,
+                        audio_bytes, queue_frames, queue_capacity):
+        # Inspect code identity transiently, never retain/serialize a traceback.
+        # Conversion occurs inside OutputBuffer.append; no converter wrapper or
+        # audio buffering changes are needed to identify this nested boundary.
+        if stage == "output_buffer_append" and exception is not None:
+            trace = exception.__traceback__
+            for _ in range(32):
+                if trace is None:
+                    break
+                if trace.tb_frame.f_code is Converter.to_discord.__code__:
+                    stage, reason = "output_audio_conversion", "audio_conversion_error"
+                    break
+                trace = trace.tb_next
+            else:
+                stage, reason = "output_buffer_append", "unknown_receive_exception"
+            if stage == "output_buffer_append" and type(exception) is BufferError:
+                reason = "playback_buffer_overflow"
+        return safe_failure_record({
+            "fault_label": fault_label,
+            "component": "live_session" if stage == "session_failure" else "live_receiver",
+            "processing_stage": stage, "provider_event_type": kind,
+            "exception_class": EXCEPTION_CLASSES.get(type(exception), SANITIZED) if exception is not None else NOT_OBSERVED,
+            "safe_reason_code": reason, "monotonic_seconds": self.clock(),
+            "output_audio_bytes": audio_bytes, "output_queue_frames_before": queue_frames,
+            "output_queue_capacity": queue_capacity,
+        })
+
+    def output_queue_metrics(self):
+        """Pre-append snapshot only; a playback read may follow this measurement."""
+        try:
+            with self.output.lock:
+                return len(self.output.frames), self.output.max_frames
+        except Exception:
+            return NOT_OBSERVED, NOT_OBSERVED
 
     async def send(self, payload):
         async with self.send_lock:
@@ -200,10 +323,14 @@ class LiveSession:
     async def receive(self):
         try:
             async for raw in self.ws:
+                stage, kind, reason = "incoming_event_parsing", NOT_OBSERVED, "malformed_provider_event"
+                audio_bytes = queue_frames = queue_capacity = NOT_OBSERVED
                 try:
                     event = json.loads(raw)
                     kind = event.get("type")
+                    stage, reason = "receive_event_processing", "unknown_receive_exception"
                     if kind == "session.closed":
+                        stage, reason = "session_usage_finalization", "invalid_session_usage"
                         seconds = event.get("usage", {}).get("seconds")
                         if type(seconds) not in (float, int) or not math.isfinite(seconds) or seconds < 0:
                             raise ValueError("Invalid final usage")
@@ -213,6 +340,7 @@ class LiveSession:
                             self.fail("provider_closed")
                         break
                     if kind == "session.started":
+                        stage, reason = "session_startup_validation", "invalid_session_startup"
                         resolved = event.get("session", {})
                         if (self.started or resolved.get("model") != LIVE_MODEL or
                                 resolved.get("delegation", {}).get("type") != "client" or
@@ -221,11 +349,14 @@ class LiveSession:
                                 resolved.get("store") is not False):
                             raise ValueError("Unexpected resolved session")
                         self.started = True
+                        reason = "unknown_receive_exception"
                         self.mark("session_started")
                         self.ready.set()
                     elif kind == "error":
+                        self.capture_failure("provider_error", stage=stage, kind=kind)
                         self.fail("provider_error")  # never log provider message, request or body
                     elif kind == "session.usage.updated":
+                        stage, reason = "session_usage_finalization", "invalid_session_usage"
                         seconds = event.get("usage", {}).get("seconds")
                         if type(seconds) in (float, int) and math.isfinite(seconds) and seconds >= 0:
                             self.provider_seconds = max(self.provider_seconds, seconds)
@@ -236,16 +367,23 @@ class LiveSession:
                             self.mute_ack.set()
                     elif self.started and not self.closing and not self.failed.is_set():
                         if kind == "session.output_audio.delta":
+                            stage, reason = "output_audio_validation", "invalid_output_audio_payload"
                             pcm = base64.b64decode(event["delta"], validate=True)
+                            audio_bytes = len(pcm)
                             if len(pcm) % 2 or len(pcm) > 48000:
+                                reason = "invalid_pcm_alignment" if len(pcm) % 2 else "output_audio_chunk_limit"
                                 raise ValueError("Invalid audio")
+                            stage, reason = "output_audio_observation", "unknown_receive_exception"
                             if self.awaiting_audio_proxy:
                                 if self.first_provider_audio is None:
                                     self.first_provider_audio = self.clock()
                                 self.mark("first_provider_audio_not_audible")
                                 self.awaiting_audio_proxy = False
+                            queue_frames, queue_capacity = self.output_queue_metrics()
+                            stage = "output_buffer_append"
                             self.output.append(pcm, self.output.generation)
                         elif kind in {"session.input_transcript.delta", "session.output_transcript.delta"}:
+                            stage, reason = "transcript_processing", "transcript_processing_error"
                             role = "user" if kind == "session.input_transcript.delta" else "assistant"
                             self.transcript.append(role, event)
                             if role == "user":
@@ -253,13 +391,19 @@ class LiveSession:
                             if self.caption:
                                 self.caption(role, event["delta"])
                         elif kind == "session.delegation.created":
+                            stage, reason = "delegation_processing", "delegation_processing_error"
                             await self.queue_delegation(event)
-                except Exception:
+                except Exception as exception:
                     # Keep receiving the final event after a local protocol/audio failure.
+                    self.capture_failure("provider_protocol_or_audio_error", stage=stage, kind=kind,
+                                         reason=reason, exception=exception, audio_bytes=audio_bytes,
+                                         queue_frames=queue_frames, queue_capacity=queue_capacity)
                     self.fail("provider_protocol_or_audio_error")
         except asyncio.CancelledError:
             raise
-        except Exception:
+        except Exception as exception:
+            self.capture_failure("provider_transport_or_protocol_error", stage="receive_transport",
+                                 reason="receive_transport_error", exception=exception)
             self.fail("provider_transport_or_protocol_error")
         finally:
             if not self.finalized.is_set() and not self.closing:
