@@ -1,0 +1,37 @@
+<!doctype html>
+<html lang="cs">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Panam Companion / Voice Deck</title>
+  <link rel="stylesheet" href="/voice-deck.css">
+  <script src="/voice-deck.js" defer></script>
+</head>
+<body>
+  <main class="deck">
+    <header><div><p class="eyebrow">PANAM COMPANION</p><h1>Voice Deck</h1></div><span class="local-badge">Pouze tento počítač</span></header>
+    <section class="companion" aria-label="Prostor pro kanonický portrét Panam">
+      <div class="portrait-slot"><span class="portrait-mark" aria-hidden="true">P</span><p>Prostor pro portrét Panam</p></div>
+      <p id="state" role="status" aria-live="polite">Runtime status unavailable</p>
+      <p id="description">Čekám na stav Python runtime.</p>
+    </section>
+    <section class="indicators" aria-label="Stav prostředků">
+      <div><span>Mikrofon</span><strong id="microphone">Neznámý stav</strong></div>
+      <div><span>Cloud</span><strong id="cloud">Neznámý stav</strong></div>
+      <div><span>Výstup</span><strong id="output">Neznámý stav</strong></div>
+      <div><span>Čas od zahájení relace</span><strong id="elapsed">—</strong></div>
+    </section>
+    <section class="controls" aria-label="Ovládání runtime">
+      <button data-action="listen" class="primary" disabled>Start Listening</button>
+      <button data-action="start" class="primary" disabled>Start Call · placená relace</button>
+      <button data-action="mute" disabled>Mute</button>
+      <button data-action="unmute" disabled>Unmute</button>
+      <button data-action="end" class="end" disabled>End Call</button>
+      <button data-action="stop-listening" disabled>Stop Listening</button>
+    </section>
+    <p id="feedback" class="feedback" role="status" aria-live="polite"></p>
+    <details><summary>Poslední hovor a bezpečná diagnostika</summary><pre id="last-call">Zatím žádný záznam.</pre></details>
+    <footer>Zvuk obsluhuje Python a váš headset. Obnovení nebo zavření této karty hovor neukončí. End Call zachová lokální poslech; Stop Listening uvolní mikrofon.</footer>
+  </main>
+</body>
+</html>

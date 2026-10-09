@@ -12,10 +12,11 @@ import json
 from pathlib import Path
 import sys
 
-from .budget import Budget, ProcessLock
+from .budget import Budget
 from .config import RUNTIME, SafeError, load_config
 from .local_audio import devices
 from .local_runtime import LocalController, audio_operation
+from .local_owner import LocalOwnership
 
 
 async def read_command():
@@ -99,7 +100,7 @@ def main():
         if directory is None or not directory.is_relative_to(RUNTIME.resolve()) or not (directory / "budget.json").is_file():
             raise SafeError("Select an existing approved budget directory; no new counter will be initialized.")
         config = load_config()
-        with ProcessLock(directory):
+        with LocalOwnership(directory):
             budget = Budget(directory)
             if budget.data["uncertain"]:
                 raise SafeError("Budget finalization is uncertain; no automatic recovery.")
