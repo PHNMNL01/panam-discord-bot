@@ -7,31 +7,57 @@
   <link rel="stylesheet" href="/voice-deck.css">
   <script src="/voice-deck.js" defer></script>
 </head>
-<body>
-  <main class="deck">
-    <header><div><p class="eyebrow">PANAM COMPANION</p><h1>Voice Deck</h1></div><span class="local-badge">Pouze tento počítač</span></header>
-    <section class="companion" aria-label="Prostor pro kanonický portrét Panam">
-      <div class="portrait-slot"><span class="portrait-mark" aria-hidden="true">P</span><p>Prostor pro portrét Panam</p></div>
-      <p id="state" role="status" aria-live="polite">Runtime status unavailable</p>
-      <p id="description">Čekám na stav Python runtime.</p>
+<body data-surface="companion">
+  <main id="deck" class="deck" data-state="disconnected">
+    <header class="deck-header">
+      <div><p class="eyebrow">PANAM COMPANION</p><h1>Voice Deck<span class="title-dot" aria-hidden="true">.</span></h1></div>
+      <span class="local-badge"><span aria-hidden="true"></span>Pouze tento počítač</span>
+    </header>
+    <section class="companion" aria-label="Panam">
+      <div class="portrait-stage">
+        <div class="portrait-halo" aria-hidden="true"></div>
+        <img class="portrait" src="/static/panam-selfie.png" alt="Portrét Panam" width="1254" height="1254" fetchpriority="high">
+      </div>
+      <div class="companion-summary">
+        <h2>Panam</h2>
+        <p id="state" class="state-pill" role="status" aria-live="polite">Runtime status unavailable</p>
+        <p id="description">Čekám na aktuální stav. Hovor může pokračovat i bez této karty.</p>
+      </div>
     </section>
-    <section class="indicators" aria-label="Stav prostředků">
-      <div><span>Mikrofon</span><strong id="microphone">Neznámý stav</strong></div>
-      <div><span>Cloud</span><strong id="cloud">Neznámý stav</strong></div>
-      <div><span>Výstup</span><strong id="output">Neznámý stav</strong></div>
-      <div><span>Čas od zahájení relace</span><strong id="elapsed">—</strong></div>
-    </section>
-    <section class="controls" aria-label="Ovládání runtime">
-      <button data-action="listen" class="primary" disabled>Start Listening</button>
-      <button data-action="start" class="primary" disabled>Start Call · placená relace</button>
-      <button data-action="mute" disabled>Mute</button>
-      <button data-action="unmute" disabled>Unmute</button>
-      <button data-action="end" class="end" disabled>End Call</button>
-      <button data-action="stop-listening" disabled>Stop Listening</button>
+    <section class="controls" aria-label="Ovládání hovoru">
+      <button data-action="listen" class="control listen" aria-label="Start Listening" title="Start Listening" disabled>
+        <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><rect x="9" y="3" width="6" height="12" rx="3"/><path d="M5 10v2a7 7 0 0 0 14 0v-2M12 19v3M9 22h6"/></svg>
+        <span class="control-label">Listen</span><span class="control-tooltip" aria-hidden="true">Start Listening</span>
+      </button>
+      <button data-action="start" class="control call" aria-label="Start Call · placená relace" title="Start Call · placená relace" disabled>
+        <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M7 3H4a1 1 0 0 0-1 1c0 9.4 7.6 17 17 17a1 1 0 0 0 1-1v-3l-5-2-2 2a13 13 0 0 1-7-7l2-2-2-5Z"/><path d="M15 3h6v6M14 10l7-7"/></svg>
+        <span class="control-label">Call <span class="paid-mark">placený</span></span><span class="control-tooltip" aria-hidden="true">Start Call · placená relace</span>
+      </button>
+      <button data-action="mute" class="control" aria-label="Mute" title="Mute" disabled>
+        <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M9 9v3a3 3 0 0 0 5.1 2.1M15 9V6a3 3 0 0 0-5.8-1M5 10v2a7 7 0 0 0 12 4.9M19 10v2M12 19v3M9 22h6M3 3l18 18"/></svg>
+        <span class="control-label">Mute</span><span class="control-tooltip" aria-hidden="true">Mute</span>
+      </button>
+      <button data-action="unmute" class="control" aria-label="Unmute" title="Unmute" disabled>
+        <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><rect x="9" y="3" width="6" height="12" rx="3"/><path d="M5 10v2a7 7 0 0 0 14 0v-2M12 19v3M9 22h6M20 3v4M18 5h4"/></svg>
+        <span class="control-label">Unmute</span><span class="control-tooltip" aria-hidden="true">Unmute</span>
+      </button>
+      <button data-action="end" class="control end" aria-label="End Call" title="End Call" disabled>
+        <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M3 15a15 15 0 0 1 18 0v4h-5v-4a15 15 0 0 0-8 0v4H3v-4Z"/><path d="M9 4l6 6M15 4l-6 6"/></svg>
+        <span class="control-label">End</span><span class="control-tooltip" aria-hidden="true">End Call</span>
+      </button>
+      <button data-action="stop-listening" class="control stop" aria-label="Stop Listening" title="Stop Listening" disabled>
+        <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><rect x="5" y="5" width="14" height="14" rx="3"/></svg>
+        <span class="control-label">Stop</span><span class="control-tooltip" aria-hidden="true">Stop Listening · uvolnit mikrofon</span>
+      </button>
     </section>
     <p id="feedback" class="feedback" role="status" aria-live="polite"></p>
-    <details><summary>Poslední hovor a bezpečná diagnostika</summary><pre id="last-call">Zatím žádný záznam.</pre></details>
-    <footer>Zvuk obsluhuje Python a váš headset. Obnovení nebo zavření této karty hovor neukončí. End Call zachová lokální poslech; Stop Listening uvolní mikrofon.</footer>
+    <section class="status-strip" aria-label="Stav zvuku a hovoru">
+      <div><span class="indicator-dot" aria-hidden="true"></span><span>Mikrofon</span><strong id="microphone">Neznámý stav</strong></div>
+      <div><span>Hovor</span><strong id="cloud">Neznámý stav</strong></div>
+      <div><span>Výstup</span><strong id="output">Neznámý stav</strong></div>
+      <div><span>Čas</span><strong id="elapsed">—</strong></div>
+    </section>
+    <footer class="deck-footer"><p>Vaše tempo. Váš prostor. Zavření karty hovor neukončí.</p><a href="/admin">Technické informace <span aria-hidden="true">↗</span></a></footer>
   </main>
 </body>
 </html>

@@ -11,11 +11,13 @@ function status(extra = {}) {
     lifecycle_state: "LISTENING_OFF", allowed_commands: ["listen"], last_call: null,
     current_operation: null, ...extra};
 }
-function harness(fetch, confirm = () => true) {
-  const elements = Object.fromEntries(["state", "description", "microphone", "cloud", "output", "elapsed", "last-call", "feedback"].map(id => [id, {textContent: ""}]));
-  const buttons = actions.map(action => ({dataset: {action}, addEventListener: () => {}, disabled: true}));
+function harness(fetch, confirm = () => true, admin = false) {
+  const ids = ["deck", "state", "description", "microphone", "cloud", "output", "elapsed", "feedback"];
+  if (admin) ids.push("last-call", "runtime-details");
+  const elements = Object.fromEntries(ids.map(id => [id, {textContent: "", dataset: {}}]));
+  const buttons = admin ? [] : actions.map(action => ({dataset: {action}, addEventListener: () => {}, disabled: true}));
   const scheduled = [], calls = [];
-  const document = {getElementById: id => elements[id], querySelectorAll: () => buttons};
+  const document = {body: {dataset: {surface: admin ? "admin" : "companion"}}, getElementById: id => elements[id], querySelectorAll: () => buttons};
   const api = attach(document, {fetch: (...args) => {calls.push(args); return fetch(...args);}, confirm,
     uuid: () => "00000000-0000-4000-8000-000000000002", setTimeout: (fn, delay) => {scheduled.push({fn, delay}); return scheduled.length;}, clearTimeout: () => {}});
   return {api, elements, buttons, scheduled, calls};
@@ -41,8 +43,8 @@ test("starting closing and pending submissions disable controls", () => {
   assert.deepEqual(view(status({shutting_down: true})).allowed, []);
 });
 test("fault and uncertain cleanup show warning without inventing voice success", () => {
-  for (const extra of [{fault: "local_call_failed"}, {cleanup_failed: true}, {last_call: {closure_confirmed: false}}]) assert.equal(view(status(extra)).title, "FAULT / UNCERTAIN CLEANUP");
-  assert.ok(!view(status({last_call: {closure_confirmed: true}})).title.includes("FAULT"));
+  for (const extra of [{fault: "local_call_failed"}, {cleanup_failed: true}, {last_call: {closure_confirmed: false}}]) assert.equal(view(status(extra)).title, "Fault");
+  assert.ok(!view(status({last_call: {closure_confirmed: true}})).title.includes("Fault"));
 });
 test("page load and refresh only read status", async () => {
   const h = harness(async () => ok(status()));
@@ -148,7 +150,7 @@ test("cloud ownership and timer render actual supported observations", async () 
 });
 test("diagnostic strings are rendered with textContent", async () => {
   const malicious = "<img src=x onerror=alert(1)>";
-  const h = harness(async () => ok(status({last_call: {closure_confirmed: false, synthetic: malicious}})));
+  const h = harness(async () => ok(status({last_call: {closure_confirmed: false, synthetic: malicious}})), () => true, true);
   await tick();
   assert.ok(h.elements["last-call"].textContent.includes(malicious));
   assert.equal(h.elements["last-call"].innerHTML, undefined);
@@ -160,5 +162,76 @@ test("frontend has no browser capture provider connection remote assets or unloa
   const html = fs.readFileSync(path.join(directory, "index.html"), "utf8");
   assert.doesNotMatch(js, /getUserMedia|AudioContext|MediaRecorder|WebSocket|EventSource|sendBeacon|beforeunload|innerHTML|api\.openai|wss:\/\//);
   assert.doesNotMatch(html, /https?:\/\/|panam_avatar|<audio|<video|onclick=/);
-  assert.ok(html.includes("Prostor pro portrét Panam"));
+  assert.ok(html.includes('src="/static/panam-selfie.png"'));
+});
+
+test("icon controls retain exact actions accessible names icons and hover focus labels", () => {
+  const html = fs.readFileSync(path.join(__dirname, "../web/index.html"), "utf8");
+  const css = fs.readFileSync(path.join(__dirname, "../web/voice-deck.css"), "utf8");
+  const controls = [...html.matchAll(/<button\b([^>]+)>([\s\S]*?)<\/button>/g)];
+  assert.equal(controls.length, 6);
+  assert.deepEqual(controls.map(match => /data-action="([^"]+)"/.exec(match[1])[1]), actions);
+  for (const [, attributes, content] of controls) {
+    assert.match(attributes, /aria-label="[^"]+"/);
+    assert.match(attributes, /title="[^"]+"/);
+    assert.match(attributes, /disabled/);
+    assert.match(content, /<svg[^>]+aria-hidden="true"/);
+    assert.match(content, /class="control-label"/);
+    assert.match(content, /class="control-tooltip"/);
+  }
+  assert.ok(css.includes(".control:focus-visible .control-tooltip"));
+  assert.ok(css.includes("outline: 2px solid var(--teal)"));
+});
+test("main portrait view contains no raw diagnostic block", async () => {
+  const html = fs.readFileSync(path.join(__dirname, "../web/index.html"), "utf8");
+  assert.doesNotMatch(html, /<pre|id="last-call"|id="runtime-details"|portrait-mark/);
+  assert.match(html, /alt="Portrét Panam"/);
+  const h = harness(async () => ok(status({last_call: {status: "FAILED", closure_confirmed: false}})));
+  await tick();
+  assert.equal(h.elements["last-call"], undefined);
+  assert.equal(h.elements.state.textContent, "Fault");
+  h.api.stop();
+});
+test("admin remains read-only even when status authorizes lifecycle actions", async () => {
+  const h = harness(async () => ok(status()), () => {throw new Error("admin must not prompt");}, true);
+  await tick();
+  for (const action of actions) await h.api.command(action);
+  assert.equal(h.calls.length, 1);
+  assert.ok(h.calls.every(([url]) => url === "/api/status"));
+  assert.equal(JSON.parse(h.elements["runtime-details"].textContent).runtime_instance_id, status().runtime_instance_id);
+  assert.equal(h.buttons.length, 0);
+  h.api.stop();
+});
+test("admin disconnection clears diagnostic observations rather than implying cleanup", async () => {
+  let connected = true;
+  const h = harness(async () => {if (!connected) throw new Error("offline"); return ok(status({last_call: {closure_confirmed: true}}));}, () => true, true);
+  await tick();
+  connected = false;
+  await h.api.poll();
+  assert.equal(h.elements.state.textContent, "Runtime status unavailable");
+  assert.equal(h.elements["runtime-details"].textContent, "Runtime status unavailable");
+  assert.ok(h.elements["last-call"].textContent.startsWith("Runtime status unavailable"));
+  assert.ok(h.calls.every(([, options]) => !options.method));
+  h.api.stop();
+});
+test("human states and ambient tones follow lifecycle including mute and pending", () => {
+  assert.equal(view(status()).title, "Listening Off");
+  assert.equal(view(status({lifecycle_state: "LOCAL_LISTENING"})).title, "Local Listening");
+  assert.equal(view(status({lifecycle_state: "ACTIVE"})).title, "In Conversation");
+  const muted = view(status({lifecycle_state: "ACTIVE", muted: true}));
+  assert.equal(muted.title, "Muted");
+  assert.equal(muted.tone, "muted");
+  assert.equal(view(status({current_operation: "start"})).tone, "pending");
+  assert.equal(view(status({current_operation: "end"})).title, "Closing");
+});
+test("ambient effects honor reduced motion and admin has no controls or capture", () => {
+  const directory = path.join(__dirname, "../web");
+  const css = fs.readFileSync(path.join(directory, "voice-deck.css"), "utf8");
+  const html = fs.readFileSync(path.join(directory, "admin.html"), "utf8");
+  assert.ok(css.includes("prefers-reduced-motion: reduce"));
+  assert.ok(css.includes("animation: none !important"));
+  assert.ok(css.includes("transition: none !important"));
+  assert.doesNotMatch(html, /<button|data-action|<audio|<video|https?:\/\//);
+  assert.ok(html.includes('id="last-call"'));
+  assert.ok(html.includes('id="runtime-details"'));
 });

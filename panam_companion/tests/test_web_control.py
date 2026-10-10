@@ -1,6 +1,7 @@
 """Offline web control: fake lifecycle operations, synthetic diagnostics only."""
 import asyncio
 import contextlib
+import hashlib
 import io
 import json
 from pathlib import Path
@@ -379,7 +380,7 @@ class HttpBoundaryTests(unittest.IsolatedAsyncioTestCase):
         return await self.app._handle(request)
 
     async def test_page_refresh_static_and_status_have_no_effect(self):
-        for path in ("/", "/", "/api/status", "/voice-deck.css", "/voice-deck.js"):
+        for path in ("/", "/", "/admin", "/api/status", "/voice-deck.css", "/voice-deck.js", "/static/panam-selfie.png"):
             response = await self.request(path=path)
             self.assertEqual(response.status, 200)
             self.assertEqual(response.headers["Cache-Control"], "no-store")
@@ -408,9 +409,46 @@ class HttpBoundaryTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(any(key.lower().startswith("access-control-") for key in response.headers))
 
     async def test_traversal_admin_and_secret_paths_not_served(self):
-        for path in ("/../config.py", "/%2e%2e/config.py", "/web/../../.env", "/.env", "/admin", "/arbitrary"):
+        for path in ("/../config.py", "/%2e%2e/config.py", "/web/../../.env", "/.env", "/arbitrary", "/static/../config.py", "/static/other.png"):
             with self.subTest(path=path):
                 self.assertEqual((await self.request(path=path)).status, 404)
+
+    async def test_main_references_approved_portrait_without_diagnostic_blocks(self):
+        response = await self.request(path="/")
+        html = response.body.decode("utf-8")
+        self.assertIn('src="/static/panam-selfie.png"', html)
+        self.assertIn('alt="Portrét Panam"', html)
+        self.assertIn('href="/admin"', html)
+        for technical in ('<pre', 'id="last-call"', 'id="runtime-details"', 'portrait-mark'):
+            self.assertNotIn(technical, html)
+
+    async def test_admin_technical_surface_is_read_only(self):
+        response = await self.request(path="/admin")
+        html = response.body.decode("utf-8")
+        self.assertEqual(response.status, 200)
+        self.assertIn('data-surface="admin"', html)
+        self.assertIn('id="last-call"', html)
+        self.assertIn('id="runtime-details"', html)
+        self.assertNotIn('<button', html)
+        self.assertNotIn('data-action', html)
+        self.assertEqual((await self.request("POST", "/admin", body=b"{}")).status, 405)
+        self.assertEqual(self.controller.calls, [])
+
+    async def test_portrait_binary_mime_and_approved_fingerprint(self):
+        response = await self.request(path="/static/panam-selfie.png")
+        self.assertEqual(response.status, 200)
+        self.assertEqual(response.headers['Content-Type'], 'image/png')
+        self.assertEqual(response.body[:8], b'\x89PNG\r\n\x1a\n')
+        self.assertEqual(hashlib.sha256(response.body).hexdigest(), '6a0ab4dec8423c486e9ac08faef2aedb1f8ec269767f356e912a785d08d8832f')
+
+    async def test_new_assets_and_admin_keep_host_origin_and_cors_boundaries(self):
+        for path in ('/admin', '/static/panam-selfie.png'):
+            self.assertEqual((await self.request(path=path, headers={'Host': 'evil.test:8767'})).status, 403)
+            self.assertEqual((await self.request(path=path, headers={'Origin': 'http://evil.test'})).status, 403)
+            response = await self.request('OPTIONS', path)
+            self.assertEqual(response.status, 405)
+            self.assertFalse(any(key.lower().startswith('access-control-') for key in response.headers))
+        self.assertEqual(self.controller.calls, [])
 
     async def test_oversized_declared_and_streamed_requests(self):
         for headers in ({}, {"Content-Length": "2048"}):

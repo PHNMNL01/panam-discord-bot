@@ -11,6 +11,8 @@ PORT = 8767
 ORIGIN = f"http://{HOST}:{PORT}"
 MAX_REQUEST = 1024
 ASSETS = {"/": ("index.html", "text/html"),
+          "/admin": ("admin.html", "text/html"),
+          "/static/panam-selfie.png": ("static/panam-selfie.png", "image/png"),
           "/voice-deck.css": ("voice-deck.css", "text/css"),
           "/voice-deck.js": ("voice-deck.js", "text/javascript")}
 HEADERS = {
@@ -72,7 +74,7 @@ def create_app(runtime):
 
     async def asset(request):
         data, mime = assets[request.path]
-        return web.Response(body=data, content_type=mime, charset="utf-8")
+        return web.Response(body=data, content_type=mime, charset="utf-8" if mime.startswith("text/") else None)
 
     async def status(_request):
         return web.json_response(runtime.snapshot())

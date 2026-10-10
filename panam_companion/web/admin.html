@@ -1,0 +1,30 @@
+<!doctype html>
+<html lang="cs">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Panam Companion / Technické informace</title>
+  <link rel="stylesheet" href="/voice-deck.css">
+  <script src="/voice-deck.js" defer></script>
+</head>
+<body data-surface="admin">
+  <main id="deck" class="deck admin-deck" data-state="disconnected">
+    <header class="deck-header"><div><p class="eyebrow">PANAM COMPANION / TECHNICKÉ INFORMACE</p><h1>Runtime overview</h1></div><a class="back-link" href="/">← Voice Deck</a></header>
+    <p class="admin-note">Pouze čtení · tento počítač. Ovládání hovoru je na hlavní stránce.</p>
+    <section class="admin-panel" aria-label="Aktuální stav">
+      <p id="state" class="state-pill" role="status" aria-live="polite">Runtime status unavailable</p>
+      <p id="description">Stav hovoru není známý. Python runtime může pokračovat.</p>
+      <div class="status-strip">
+        <div><span>Mikrofon</span><strong id="microphone">Neznámý stav</strong></div>
+        <div><span>Cloud</span><strong id="cloud">Neznámý stav</strong></div>
+        <div><span>Výstup</span><strong id="output">Neznámý stav</strong></div>
+        <div><span>Čas relace</span><strong id="elapsed">—</strong></div>
+      </div>
+    </section>
+    <section class="admin-panel"><h2>Poslední hovor</h2><p>Bezpečná diagnostika a potvrzení uzavření. Potvrzené uzavření samo o sobě nedokazuje úspěšnou hlasovou komunikaci.</p><pre id="last-call">Zatím žádný záznam.</pre></section>
+    <details class="admin-panel" open><summary>Autoritativní bezpečný stav</summary><p>Identita runtime, revize, vlastnictví prostředků, probíhající operace a výsledek posledního příkazu. Rezervace rozpočtu za běhu hovoru sama neznamená selhání uzavření.</p><pre id="runtime-details">Runtime status unavailable</pre></details>
+    <p id="feedback" class="feedback" role="status" aria-live="polite"></p>
+    <footer class="deck-footer"><p>Tato stránka žádné prostředky neotevírá ani neuvolňuje.</p><a href="/">Zpět k Panam</a></footer>
+  </main>
+</body>
+</html>

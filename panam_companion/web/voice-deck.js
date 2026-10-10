@@ -1,32 +1,42 @@
 "use strict";
 (function (root) {
   const ACTIONS = ["listen", "start", "mute", "unmute", "end", "stop-listening"];
-  const LABELS = {LISTENING_OFF: "LISTENING_OFF · lokální poslech vypnutý", LOCAL_LISTENING: "LOCAL_LISTENING · lokální poslech", ACTIVE: "ACTIVE · cloudový hovor"};
-  const OPERATIONS = {listen: "STARTING · otevírám mikrofon", start: "STARTING · připravuji placený hovor", mute: "Ztlumuji", unmute: "Obnovuji mikrofon", end: "CLOSING · ukončuji hovor", "stop-listening": "CLOSING · uvolňuji prostředky"};
+  const LABELS = {LISTENING_OFF: "Listening Off", LOCAL_LISTENING: "Local Listening", ACTIVE: "In Conversation"};
+  const OPERATIONS = {listen: "Starting", start: "Starting", mute: "Muting", unmute: "Unmuting", end: "Closing", "stop-listening": "Closing"};
 
   function view(status, pending = false) {
-    if (!status) return {title: "Runtime status unavailable", description: "Stav hovoru není známý. Python runtime může pokračovat.", allowed: []};
+    if (!status) return {title: "Runtime status unavailable", description: "Stav hovoru není známý. Hovor může pokračovat i bez této karty.", tone: "disconnected", allowed: []};
     const uncertain = status.last_call && status.last_call.closure_confirmed !== true;
     let title = LABELS[status.lifecycle_state] || "Neznámý stav runtime";
-    let description = status.lifecycle_state === "ACTIVE" ? "Zvuk obsluhuje Python runtime a headset." : "Žádná aktivní cloudová konverzace.";
-    if (status.lifecycle_state === "LISTENING_OFF") description = "Start Listening otevře lokální mikrofon. Cloud se automaticky nepřipojí.";
-    if (status.lifecycle_state === "LOCAL_LISTENING") description = "Mikrofon je otevřený; vstup bez hovoru se nezachovává.";
+    let tone = {LISTENING_OFF: "off", LOCAL_LISTENING: "listening", ACTIVE: "active"}[status.lifecycle_state] || "disconnected";
+    let description = "Aktuální stav není známý. Hovor může pokračovat.";
+    if (status.lifecycle_state === "ACTIVE") description = "Jsem tu. Můžeme si povídat přes váš headset.";
+    if (status.lifecycle_state === "ACTIVE" && status.muted) { title = "Muted"; tone = "muted"; description = "Mikrofon je ztlumený. Panam můžete dál slyšet."; }
+    if (status.lifecycle_state === "LISTENING_OFF") description = "Až budete chtít, zapněte mikrofon. Hovor se sám nespustí.";
+    if (status.lifecycle_state === "LOCAL_LISTENING") description = "Mikrofon je připravený. Placený hovor spustíte tlačítkem Call.";
     if (status.fault || status.cleanup_failed || uncertain) {
-      title = "FAULT / UNCERTAIN CLEANUP";
-      description = "Zkontrolujte bezpečnou diagnostiku. Nepotvrzené uzavření není úspěšné ukončení.";
+      title = "Fault";
+      tone = "fault";
+      description = "Hovor nebo jeho uzavření vyžaduje kontrolu. Podrobnosti najdete v technických informacích.";
     }
-    if (status.session_closing) title = "CLOSING · čekám na uzavření";
-    if (status.current_operation) title = OPERATIONS[status.current_operation] || "Probíhá operace";
-    if (status.shutting_down) title = "CLOSING · Python runtime se ukončuje";
-    return {title, description, allowed: pending || status.current_operation || status.shutting_down ? [] : ACTIONS.filter(a => status.allowed_commands.includes(a))};
+    if (status.session_closing) { title = "Closing"; tone = "closing"; description = "Čekám na potvrzení uzavření hovoru."; }
+    if (status.current_operation) {
+      title = OPERATIONS[status.current_operation] || "Probíhá operace";
+      tone = ["end", "stop-listening"].includes(status.current_operation) ? "closing" : "pending";
+      description = "Čekám na potvrzení. Ovládání se zpřístupní po dokončení operace.";
+    }
+    if (status.shutting_down) { title = "Closing"; tone = "closing"; description = "Aplikace se ukončuje a uvolňuje prostředky."; }
+    return {title, description, tone, allowed: pending || status.current_operation || status.shutting_down ? [] : ACTIONS.filter(a => status.allowed_commands.includes(a))};
   }
 
   function attach(document, deps) {
     let status = null, submitting = false, polling = false, stopped = false, timer = null, generation = 0;
     const element = id => document.getElementById(id);
     const buttons = [...document.querySelectorAll("[data-action]")];
+    const admin = document.body?.dataset.surface === "admin";
     function render() {
       const model = view(status, submitting);
+      if (element("deck")) element("deck").dataset.state = model.tone;
       element("state").textContent = model.title;
       element("description").textContent = model.description;
       for (const button of buttons) {
@@ -34,14 +44,17 @@
         button.hidden = !!status && status.lifecycle_state !== "ACTIVE" && ["mute", "unmute", "end"].includes(button.dataset.action) && !status.current_operation && !model.allowed.includes(button.dataset.action);
       }
       element("microphone").textContent = status ? (status.microphone_owned ? (status.muted ? "Otevřený · ztlumený" : "Otevřený") : "Uzavřený") : "Neznámý stav";
-      element("cloud").textContent = !status ? "Neznámý stav" : status.cloud_ready ? "ACTIVE / připravený" : status.cloud_session_owned ? "Relace vlastněna · připravenost nepotvrzena" : "Žádná vlastněná relace";
+      element("cloud").textContent = !status ? "Neznámý stav" : status.cloud_ready ? "Připojený" : status.cloud_session_owned ? "Připravenost nepotvrzena" : "Odpojený";
       element("output").textContent = status ? (status.output_owned ? "Otevřený" : "Uzavřený") : "Neznámý stav";
       const elapsed = status && status.elapsed_session_seconds;
       element("elapsed").textContent = typeof elapsed === "number" && Number.isFinite(elapsed) ? `${Math.floor(elapsed / 60)}:${String(Math.floor(elapsed % 60)).padStart(2, "0")}` : "—";
-      element("last-call").textContent = status && status.last_call ? JSON.stringify(status.last_call, null, 2) : "Zatím žádný záznam.";
+      if (admin) {
+        element("last-call").textContent = !status ? "Runtime status unavailable — poslední hovor nelze ověřit." : status.last_call ? JSON.stringify(status.last_call, null, 2) : "Zatím žádný záznam.";
+        element("runtime-details").textContent = status ? JSON.stringify(status, null, 2) : "Runtime status unavailable";
+      }
       if (status && status.last_command_outcome) {
         const outcome = status.last_command_outcome;
-        element("feedback").textContent = outcome.status === "ACCEPTED" ? "Příkaz přijat; čekám na potvrzení runtime." : outcome.status === "SUCCEEDED" ? "Operace potvrzena runtime; stav uzavření je uveden v diagnostice." : "Operace selhala nebo uzavření není potvrzené.";
+        element("feedback").textContent = outcome.status === "ACCEPTED" ? "Přijato. Čekám na potvrzení." : outcome.status === "SUCCEEDED" ? "Hotovo. Stav hovoru je uveden výše." : "Operace selhala nebo uzavření není potvrzené.";
       }
     }
     async function poll() {
@@ -63,7 +76,7 @@
       }
     }
     async function command(action) {
-      if (submitting || !status || !view(status).allowed.includes(action)) return;
+      if (admin || submitting || !status || !view(status).allowed.includes(action)) return;
       if (action === "start" && !deps.confirm("Spustit jednu placenou GPT-Live relaci s mikrofonem a výstupem headsetu?")) return;
       const payload = {command_id: deps.uuid(), runtime_instance_id: status.runtime_instance_id,
         expected_control_revision: status.control_revision, action};
