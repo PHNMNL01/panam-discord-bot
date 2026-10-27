@@ -1,5 +1,29 @@
 # Future music sources: separate feasibility note
 
+## DJ-P2.1 implementation boundary (2026-10-27)
+
+`HAD-DJ-P2-1-YOUTUBE-POC-IMPLEMENTATION-001` authorizes metadata-only yt-dlp
+integration and explicit mappings to separately approved local catalog media.
+Requested video identity is now separate from playable asset identity. Metadata
+lookup is disabled in the shipped configuration and mappings are empty. No new
+recording or source approval is supplied by this milestone.
+
+Revision authority `HAD-DJ-P2-1-REVISION-001-CORRECTION-001` narrows metadata
+discovery to configured approved video mappings before any worker launch. The
+worker inherits only the Windows OS-directory variable, not bot credentials or
+other parent secrets. These corrections do not authorize live requests or expand
+source/media permissions.
+
+No YouTube audio is retrieved or retransmitted. Format URLs never leave the
+metadata worker. Cookies, login, JS runtimes, plugins and remote components are
+disabled. A mapping plays and labels the approved local asset; it does not claim
+the audio came from YouTube. General URL audio, remote downloading, broad music
+coverage and provider permissions remain open. See [README](README.md) for exact
+configuration and lifecycle bounds. The earlier investigation below is background
+evidence, not authorization for external operations.
+
+## Original DJ-P0 investigation
+
 Investigated on 2026-10-26 using public documentation only. No media was
 downloaded, no provider account was accessed, and no external integration was
 implemented or activated. URL-based playback with broad music availability

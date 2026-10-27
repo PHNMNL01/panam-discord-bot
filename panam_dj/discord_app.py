@@ -5,13 +5,15 @@ from io import BytesIO
 import logging
 import os
 import shutil
+import threading
 
 import discord
 from discord import app_commands
 
 from .catalog import DJError, LocalCatalog, Track
 from .config import Settings
-from .playback import OwnedSource, PlaybackManager, QueueView, finish_cleanup
+from .playback import OwnedSource, PlaybackManager, QueueView, SourceConstructionError, finish_cleanup
+from .sources import DJSourceProvider
 
 
 logger = logging.getLogger("panam_dj")
@@ -19,6 +21,60 @@ logger = logging.getLogger("panam_dj")
 
 class DiscordOwnedSource(OwnedSource, discord.AudioSource):
     """Supported AudioSource wrapper with the core's cleanup completion signal."""
+
+
+class ManagedFFmpegOpusAudio(discord.FFmpegOpusAudio):
+    """Keep the process and pipes until termination and explicit closure finish.
+
+    discord.py 2.7.1 can discard an exited process without closing stdout. Its
+    cleanup also races its stdin writer by clearing shared attributes. This
+    narrowly scoped adapter uses the inspected FFmpegAudio process/thread fields;
+    dependency upgrades must rerun the real-process ownership regressions.
+    """
+
+    def __init__(self, source: BytesIO, **kwargs):
+        self._dj_input = source
+        self._dj_cleanup_lock = threading.Lock()
+        self._dj_cleanup_done = False
+        try:
+            super().__init__(source, **kwargs)
+        except BaseException as error:
+            # Never clean an unregistered partial resource synchronously. Carry
+            # it across the factory boundary so the manager owns the first
+            # off-loop cleanup attempt, including any failure or timeout.
+            raise SourceConstructionError(self) from error
+
+    def cleanup(self):
+        with self._dj_cleanup_lock:
+            if self._dj_cleanup_done:
+                return
+            self._stopped = True
+            process = getattr(self, "_process", None)
+            streams = [self._dj_input]
+            if process:
+                # Do not use communicate(): discord.py's writer owns stdin.
+                # Keep all inherited references valid until that writer exits.
+                if process.poll() is None:
+                    process.kill()
+                process.wait()
+                for name in ("_pipe_writer_thread", "_pipe_reader_thread"):
+                    thread = getattr(self, name, None)
+                    if thread is not None and thread.ident is not None:
+                        thread.join()
+                streams.extend((process.stdin, process.stdout, process.stderr))
+            errors = []
+            for stream in streams:
+                if stream is not None:
+                    try:
+                        stream.close()
+                        if not stream.closed:
+                            raise RuntimeError("FFmpeg stream closure is unresolved")
+                    except Exception as error:
+                        errors.append(error)
+            if errors:
+                # OwnedSource records the failure and the manager retains us.
+                raise ExceptionGroup("FFmpeg stream cleanup failed", errors)
+            self._dj_cleanup_done = True
 
 
 class FFmpegSourceFactory:
@@ -33,7 +89,7 @@ class FFmpegSourceFactory:
         # discord.py expects a file object for stderr, not subprocess.DEVNULL.
         # Popen duplicates the handle before this context closes it.
         with open(os.devnull, "wb") as errors:
-            return discord.FFmpegOpusAudio(
+            return ManagedFFmpegOpusAudio(
                 # codec describes the INPUT. Leaving it unset transcodes PCM to Opus;
                 # passing "libopus" would copy an existing Opus stream.
                 BytesIO(data), executable=self.executable, pipe=True,
@@ -45,11 +101,17 @@ class FFmpegSourceFactory:
 
 def queue_message(view: QueueView) -> str:
     def title(track):
-        return discord.utils.escape_markdown(track.title)
+        result = discord.utils.escape_markdown(track.title)
+        if track.requested_url:
+            result += " [approved local audio; YouTube metadata only]"
+            result += " (requested: " + discord.utils.escape_markdown(track.requested_title or "video") + ")"
+        return result
 
     lines = [f"Now: {title(view.current)}{' (paused)' if view.paused else ''}"
              if view.current else "Nothing is playing."]
     lines.append(f"Waiting: {len(view.pending)}")
+    if view.resolving:
+        lines.append(f"Preparing requests: {view.resolving}")
     for index, track in enumerate(view.pending[:10], 1):
         lines.append(f"{index}. {title(track)}")
     if len(view.pending) > 10:
@@ -71,7 +133,8 @@ class DJClient(discord.Client):
         self._dj_close_task: asyncio.Task | None = None
         self.tree = app_commands.CommandTree(self)
         factory = source_factory or FFmpegSourceFactory(catalog, shutil.which("ffmpeg") or "ffmpeg")
-        self.playback = PlaybackManager(catalog, factory, self._connect_voice,
+        provider = DJSourceProvider.load(catalog, settings.youtube_path)
+        self.playback = PlaybackManager(provider, factory, self._connect_voice,
                                         guild_ids=settings.guild_ids, queue_limit=settings.queue_limit,
                                         source_wrapper=DiscordOwnedSource)
         self._register_commands()
@@ -87,9 +150,9 @@ class DJClient(discord.Client):
     def _register_commands(self):
         guilds = [discord.Object(id=value) for value in self.settings.guild_ids]
 
-        @self.tree.command(name="play", description="Play an approved local catalog ID", guilds=guilds)
+        @self.tree.command(name="play", description="Play approved audio by catalog ID or mapped YouTube URL", guilds=guilds)
         @app_commands.guild_only()
-        @app_commands.describe(track="Approved catalog ID; URL playback is not available yet")
+        @app_commands.describe(track="Catalog ID or YouTube video URL mapped to approved local audio")
         async def play(interaction: discord.Interaction, track: str):
             await self._dispatch(interaction, "play", track)
 

@@ -19,7 +19,11 @@ async def finish_cleanup(task: asyncio.Task):
     cancelled = False
     while True:
         try:
-            result = await asyncio.shield(task)
+            # wait() does not cancel its input. Unlike shield(), it also does
+            # not emit an unhandled-error diagnostic for an already-observed
+            # task that fails after caller cancellation (Python 3.14).
+            await asyncio.wait((task,))
+            result = task.result()
             break
         except asyncio.CancelledError:
             if task.cancelled():
@@ -32,6 +36,24 @@ async def finish_cleanup(task: asyncio.Task):
     if cancelled:
         raise asyncio.CancelledError()
     return result
+
+
+class SourceConstructionError(Exception):
+    """Transfer one partial resource from its constructor to cleanup ownership.
+
+    The resource only needs cleanup(); read/is_opus need not exist yet. Holding
+    it here prevents finalization between failed construction and registration.
+    """
+
+    def __init__(self, resource: Any):
+        super().__init__("Audio source construction failed; cleanup is required.")
+        self._resource = resource
+
+    def take_resource(self):
+        if self._resource is None:
+            raise RuntimeError("Construction resource ownership was already transferred")
+        resource, self._resource = self._resource, None
+        return resource
 
 
 class OwnedSource:
@@ -97,11 +119,27 @@ class QueueView:
     paused: bool
     channel_id: int | None
     last_error: str | None
+    resolving: int = 0
+
+
+@dataclass(eq=False)
+class _Request:
+    channel_id: int
+    task: asyncio.Task | None = None
+    valid: bool = True
+
+    def cancel(self):
+        if self.valid:
+            self.valid = False
+            if self.task is not None:
+                self.task.cancel()
 
 
 @dataclass
 class _Session:
     lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+    resolve_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+    requests: list[_Request] = field(default_factory=list)
     voice: VoiceClient | None = None
     channel_id: int | None = None
     current: Track | None = None
@@ -118,17 +156,22 @@ class PlaybackManager:
         *, guild_ids: tuple[int, ...], queue_limit: int = 20,
         source_wrapper: Callable[[Any, Track], OwnedSource] = OwnedSource,
         cleanup_timeout: float = 5.0,
+        resolution_timeout: float = 10.0,
     ):
         if type(queue_limit) is not int or not 1 <= queue_limit <= 100:
             raise ValueError("queue_limit must be from 1 to 100")
         if type(cleanup_timeout) not in (int, float) or not math.isfinite(cleanup_timeout) or cleanup_timeout <= 0:
             raise ValueError("cleanup_timeout must be a positive finite number")
+        if type(resolution_timeout) not in (int, float) or not math.isfinite(resolution_timeout) or resolution_timeout <= 0:
+            raise ValueError("resolution_timeout must be a positive finite number")
         self.provider = provider
         self.source_factory = source_factory
         self.connector = connector
         self.queue_limit = queue_limit  # Waiting tracks; the current track is separate.
         self.source_wrapper = source_wrapper
         self.cleanup_timeout = cleanup_timeout
+        self.resolution_timeout = resolution_timeout
+        self._preparations: dict[asyncio.Task, int] = {}
         self._sources: dict[OwnedSource, int] = {}
         self._cleanup_tasks: dict[asyncio.Task, int] = {}
         self._sessions = {guild: _Session() for guild in guild_ids}
@@ -151,6 +194,8 @@ class PlaybackManager:
         session.current = None
         session.paused = False
         session.pending.clear()
+        for request in session.requests:
+            request.cancel()
         if session.voice is not None:
             session.voice.stop()
 
@@ -158,6 +203,8 @@ class PlaybackManager:
     def _channel_check(session: _Session, channel_id: int) -> None:
         if session.voice is not None and session.channel_id != channel_id:
             raise DJError("Join the bot's voice channel before controlling its queue.")
+        if any(request.valid and request.channel_id != channel_id for request in session.requests):
+            raise DJError("Join the channel preparing this queue before controlling it.")
 
     @staticmethod
     def _connection_check(voice: VoiceClient, guild_id: int, channel_id: int) -> None:
@@ -210,8 +257,14 @@ class PlaybackManager:
                 task.exception()  # The source completion also preserves the error.
             self._cleanup_tasks.pop(task, None)
 
+    def _own_source(self, resource: Any, track: Track, guild_id: int) -> OwnedSource:
+        source = self.source_wrapper(resource, track)
+        self._sources[source] = guild_id
+        source.completion.add_done_callback(lambda _: self._source_finished(source))
+        return source
+
     def _cleanup_unplayed(self, source: OwnedSource, guild_id: int):
-        # play() rejected the source, so no audio thread owns cleanup. Retain and
+        # Construction or play() failed, so no audio thread owns cleanup. Retain and
         # observe this one off-loop attempt; close includes it in its deadline.
         task = asyncio.create_task(asyncio.to_thread(source.cleanup))
         self._cleanup_tasks[task] = guild_id
@@ -225,9 +278,7 @@ class PlaybackManager:
             generation = session.generation
             source = None
             try:
-                source = self.source_wrapper(self.source_factory(track), track)
-                self._sources[source] = guild_id
-                source.completion.add_done_callback(lambda _, owned=source: self._source_finished(owned))
+                source = self._own_source(self.source_factory(track), track, guild_id)
                 session.current = track
                 session.paused = False
 
@@ -239,12 +290,21 @@ class PlaybackManager:
 
                 session.voice.play(source, after=after)
                 return
-            except Exception:
+            except Exception as error:
                 session.generation += 1
                 session.current = None
                 session.last_error = "Audio could not start; the failed track was discarded."
+                if isinstance(error, SourceConstructionError):
+                    # Register the incomplete resource before scheduling any
+                    # cleanup. A failed attempt remains in the same source
+                    # registry as a failed cleanup after successful playback.
+                    source = self._own_source(error.take_resource(), track, guild_id)
                 if source is not None:
                     self._cleanup_unplayed(source, guild_id)
+                if isinstance(error, SourceConstructionError) and isinstance(error.__cause__, BaseException) \
+                        and not isinstance(error.__cause__, Exception):
+                    # Keep cancellation/interrupt semantics after securing cleanup.
+                    raise error.__cause__
         session.current = None
         session.paused = False
 
@@ -276,43 +336,107 @@ class PlaybackManager:
             await self._reconcile(session)
             self._authorize(authorize)
             self._channel_check(session, channel_id)
-            if len(session.pending) >= self.queue_limit:
+            # Reservations count against capacity before any asynchronous work.
+            # Even cancelled but unfinished requests retain a slot until cleanup.
+            if len(session.pending) + len(session.requests) + bool(session.current) >= self.queue_limit + 1:
                 raise DJError("The music queue is full.")
-            track = await asyncio.wait_for(self.provider.resolve(query), timeout=10)
-            if self._closing or self._closed:
-                raise DJError("DJ Panam is shutting down.")
-            self._authorize(authorize)
-            # The guild lock does not freeze Discord's external voice state.
-            # Reject a result resolved for a stale connection without enqueueing
-            # or starting it; lifecycle reconciliation owns connection cleanup.
-            if session.voice is not None:
-                self._connection_check(session.voice, guild_id, channel_id)
-            if session.voice is None:
-                voice = await self.connector(guild_id, channel_id)
-                if not voice.is_connected() or voice.guild.id != guild_id or voice.channel.id != channel_id:
-                    # Never adopt or disconnect an unexpected guild's client.
-                    raise DJError("Voice connection did not match the requested guild and channel.")
-                session.voice = voice
-                session.channel_id = channel_id
-                try:
+            request = _Request(channel_id)
+            session.requests.append(request)
+            task = request.task = asyncio.create_task(
+                self._resolve_request(guild_id, session, request, query, authorize))
+            self._preparations[task] = guild_id
+            task.add_done_callback(self._preparation_done)
+        try:
+            await asyncio.wait((task,))
+            return task.result()
+        except asyncio.CancelledError:
+            # Session controls cancel the owned request, not the command caller.
+            if task.cancelled() and not asyncio.current_task().cancelling():
+                raise DJError("Source request cancelled; nothing was added.") from None
+            request.cancel()
+            try:
+                await finish_cleanup(task)
+            except (Exception, asyncio.CancelledError):
+                pass
+            raise
+
+    def _preparation_done(self, task: asyncio.Task):
+        if task.done():
+            if not task.cancelled():
+                task.exception()
+            self._preparations.pop(task, None)
+            # A task cancelled before its first instruction never enters finally.
+            for session in self._sessions.values():
+                session.requests[:] = [r for r in session.requests if r.task is not task]
+
+    async def _resolve_request(self, guild_id, session, request, query, authorize):
+        try:
+            # Fair lock preserves request order while the separate guild lock
+            # remains available to queue/stop/skip/leave and audio callbacks.
+            async with session.resolve_lock:
+                async with session.lock:
+                    if not request.valid or self._closing:
+                        raise DJError("Source request is no longer active.")
                     self._authorize(authorize)
-                except Exception:
-                    # Connection creation yielded. Release only the newly owned
-                    # connection if its caller left; no track has been enqueued.
-                    await voice.disconnect(force=True)
-                    session.voice = None
-                    session.channel_id = None
-                    raise
-            if self._closing or self._closed:
-                # close() is waiting on this lock and owns the disconnect.
-                raise DJError("DJ Panam is shutting down.")
-            session.last_error = None
-            session.pending.append(track)
+                    self._channel_check(session, request.channel_id)
+                    if session.voice is not None:
+                        self._connection_check(session.voice, guild_id, request.channel_id)
+                try:
+                    deadline = asyncio.get_running_loop().time() + self.resolution_timeout
+                    track = await asyncio.wait_for(self.provider.resolve(query), self.resolution_timeout)
+                    if asyncio.get_running_loop().time() > deadline:
+                        raise TimeoutError
+                except TimeoutError:
+                    raise DJError("Source preparation timed out; nothing was added.") from None
+                async with session.lock:
+                    return await self._accept_track(guild_id, session, request, track, authorize)
+        finally:
+            # Registry ownership is released only by the task's done callback.
+            if request in session.requests:
+                session.requests.remove(request)
+
+    async def _accept_track(self, guild_id, session, request, track, authorize):
+        channel_id = request.channel_id
+        if not request.valid:
+            raise DJError("Source request is no longer active.")
+        if self._closing or self._closed:
+            raise DJError("DJ Panam is shutting down.")
+        self._authorize(authorize)
+        self._channel_check(session, channel_id)
+        # The guild lock does not freeze Discord's external voice state.
+        # Reject a result resolved for a stale connection without enqueueing
+        # or starting it; lifecycle reconciliation owns connection cleanup.
+        if session.voice is not None:
+            self._connection_check(session.voice, guild_id, channel_id)
+        if session.voice is None:
+            voice = await self.connector(guild_id, channel_id)
+            if not voice.is_connected() or voice.guild.id != guild_id or voice.channel.id != channel_id:
+                # Never adopt or disconnect an unexpected guild's client.
+                raise DJError("Voice connection did not match the requested guild and channel.")
+            session.voice = voice
+            session.channel_id = channel_id
+            try:
+                if not request.valid:
+                    raise DJError("Source request is no longer active.")
+                self._authorize(authorize)
+            except Exception:
+                # Connection creation yielded. Release only the newly owned
+                # connection if its caller left; no track has been enqueued.
+                await voice.disconnect(force=True)
+                session.voice = None
+                session.channel_id = None
+                raise
+        if self._closing or self._closed:
+            # close() is waiting on this lock and owns the disconnect.
+            raise DJError("DJ Panam is shutting down.")
+        session.last_error = None
+        session.requests.remove(request)
+        session.pending.append(track)
+        if session.current is None:
+            self._start_next(guild_id, session)
             if session.current is None:
-                self._start_next(guild_id, session)
-                if session.current is None:
-                    raise DJError(session.last_error or "Audio could not start.")
-            return self._view(session)
+                raise DJError(session.last_error or "Audio could not start.")
+        return self._view(session)
 
     async def control(
         self, guild_id: int, channel_id: int, action: str,
@@ -337,6 +461,8 @@ class PlaybackManager:
                     await voice.disconnect(force=True)
                     session.voice = None
                     session.channel_id = None
+            elif action == "skip" and session.current is None and any(r.valid for r in session.requests):
+                next(r for r in session.requests if r.valid).cancel()
             elif voice is None or session.current is None:
                 raise DJError("Nothing is playing.")
             elif action == "skip":
@@ -360,7 +486,8 @@ class PlaybackManager:
     @staticmethod
     def _view(session: _Session) -> QueueView:
         return QueueView(session.current, tuple(session.pending), session.paused,
-                         session.channel_id, session.last_error)
+                         session.channel_id, session.last_error,
+                         sum(r.valid for r in session.requests))
 
     async def reconcile(self, guild_id: int) -> None:
         if self._closing or self._closed or guild_id not in self._sessions:
@@ -425,20 +552,24 @@ class PlaybackManager:
         # pending futures/tasks intact on timeout; ownership remains explicit.
         pending = {source.completion for source in self._sources}
         pending.update(self._cleanup_tasks)
+        pending.update(self._preparations)
         if pending:
             await asyncio.wait(pending, timeout=self.cleanup_timeout)
         for source in tuple(self._sources):
             self._source_finished(source)
         for task in tuple(self._cleanup_tasks):
             self._cleanup_done(task)
-        unresolved = set(self._sources.values()) | set(self._cleanup_tasks.values())
+        for task in tuple(self._preparations):
+            self._preparation_done(task)
+        unresolved = (set(self._sources.values()) | set(self._cleanup_tasks.values())
+                      | set(self._preparations.values()))
         for guild_id in unresolved:
             if not any(source.completion.done() and source.completion.result() is not None
                        for source, owner in self._sources.items() if owner == guild_id):
                 self._sessions[guild_id].last_error = "Audio cleanup timed out; ownership retained."
         failed.update(unresolved)
         self._closed = (all(session.voice is None for session in self._sessions.values())
-                        and not self._sources and not self._cleanup_tasks)
+                        and not self._sources and not self._cleanup_tasks and not self._preparations)
         # On failure stay in the closing state, reject new playback, and retain
         # ownership. Later close calls recheck pending cleanup and retry remaining
         # voice disconnects. They never duplicate a source cleanup attempt.

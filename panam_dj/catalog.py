@@ -21,9 +21,20 @@ class DJError(Exception):
 
 
 @dataclass(frozen=True)
+class LocalMedia:
+    """Playable identity, independent of a requested video's metadata."""
+
+    catalog_id: str
+    sha256: str
+
+
+@dataclass(frozen=True)
 class Track:
     key: str
     title: str
+    media: LocalMedia | None = None
+    requested_url: str | None = None
+    requested_title: str | None = None
 
 
 class SourceProvider(Protocol):
@@ -69,7 +80,8 @@ class LocalCatalog:
                 raise ConfigurationError("Each track requires explicit authorization metadata.")
             if not isinstance(digest, str) or not re.fullmatch(r"[0-9a-f]{64}", digest):
                 raise ConfigurationError("Each track requires its SHA-256 digest.")
-            entries[key] = CatalogEntry(Track(key, title), item["path"], digest, authority)
+            entries[key] = CatalogEntry(Track(key, title, LocalMedia(key, digest)),
+                                        item["path"], digest, authority)
         catalog = cls(path.parent.resolve(strict=True), entries)
         for entry in entries.values():
             catalog.audio_bytes(entry.track)
@@ -86,8 +98,8 @@ class LocalCatalog:
 
     def audio_bytes(self, track: Track) -> bytes:
         """Revalidate on use and return the exact verified bytes for FFmpeg's pipe."""
-        entry = self._entries.get(track.key)
-        if entry is None or entry.track != track:
+        entry = self._entries.get(track.media.catalog_id) if track.media else None
+        if entry is None or entry.track.media != track.media:
             raise DJError("Track is not in the approved catalog.")
         try:
             path = confined_file(self.root, entry.relative_path, ".wav")

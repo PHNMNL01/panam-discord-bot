@@ -56,12 +56,13 @@ class Settings:
     guild_ids: tuple[int, ...]
     queue_limit: int
     catalog_path: Path
+    youtube_path: Path | None = None
 
     @classmethod
     def load(cls, relative: str = "config.example.json", *, root: Path = PACKAGE_ROOT):
         data = read_json(confined_file(root, relative, ".json"))
         keys = {"application_id", "guild_ids", "queue_limit", "catalog"}
-        if not isinstance(data, dict) or set(data) != keys:
+        if not isinstance(data, dict) or set(data) not in (keys, keys | {"youtube"}):
             raise ConfigurationError("Configuration must contain only the documented keys.")
 
         def snowflake(value):
@@ -80,4 +81,5 @@ class Settings:
         if type(limit) is not int or not 1 <= limit <= 100:
             raise ConfigurationError("queue_limit must be an integer from 1 to 100.")
         catalog = confined_file(root, data["catalog"], ".json")
-        return cls(data["application_id"], tuple(guilds), limit, catalog)
+        youtube = confined_file(root, data["youtube"], ".json") if "youtube" in data else None
+        return cls(data["application_id"], tuple(guilds), limit, catalog, youtube)

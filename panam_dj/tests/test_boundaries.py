@@ -7,7 +7,7 @@ import unittest
 class BoundaryTests(unittest.TestCase):
     def test_only_stdlib_discord_and_dj_imports(self):
         root = Path(__file__).resolve().parents[1]
-        allowed = sys.stdlib_module_names | {"discord", "panam_dj"}
+        allowed = sys.stdlib_module_names | {"discord", "panam_dj", "yt_dlp"}
         for path in root.rglob("*.py"):
             tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
             for node in ast.walk(tree):
@@ -24,4 +24,4 @@ class BoundaryTests(unittest.TestCase):
         root = Path(__file__).resolve().parents[1]
         requirements = [line for line in (root / "requirements.txt").read_text().splitlines()
                         if line and not line.startswith("#")]
-        self.assertEqual(requirements, ["discord.py[voice]>=2.7.1,<3"])
+        self.assertEqual(requirements, ["discord.py[voice]>=2.7.1,<3", "yt-dlp==2026.10.26"])

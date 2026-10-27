@@ -8,6 +8,7 @@ import shutil
 
 from .catalog import DJError, LocalCatalog
 from .config import ConfigurationError, Settings
+from .sources import DJSourceProvider
 
 
 def prerequisites() -> list[str]:
@@ -46,6 +47,13 @@ def main(argv=None) -> int:
     try:
         settings = Settings.load(args.config)
         catalog = LocalCatalog.load(settings.catalog_path)
+        provider = DJSourceProvider.load(catalog, settings.youtube_path)
+        if provider.enabled:
+            try:
+                if importlib.metadata.version("yt-dlp") != "2026.10.26":
+                    raise ConfigurationError("Enabled metadata lookup requires the declared yt-dlp version.")
+            except importlib.metadata.PackageNotFoundError:
+                raise ConfigurationError("yt-dlp is required for enabled metadata lookup.") from None
     except (ConfigurationError, DJError, OSError):
         print("Configuration/catalog validation failed; inspect the non-secret JSON and approved audio.")
         return 2

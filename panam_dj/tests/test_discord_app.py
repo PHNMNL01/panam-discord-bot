@@ -192,7 +192,7 @@ class DiscordAdapterTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_ffmpeg_adapter_uses_verified_bytes_and_no_network_protocols(self):
         factory = FFmpegSourceFactory(self.catalog, "ffmpeg")
-        with patch("panam_dj.discord_app.discord.FFmpegOpusAudio") as opus:
+        with patch("panam_dj.discord_app.ManagedFFmpegOpusAudio") as opus:
             factory(self.catalog.tracks[0])
         args, kwargs = opus.call_args
         self.assertEqual(args[0].getvalue(), self.catalog.audio_bytes(self.catalog.tracks[0]))

@@ -1,4 +1,6 @@
-# Existing repository dependency family; installation is NOT authorized by DJ-P0.
+# Scoped declarations only; installation is NOT authorized by DJ-P2.1.
 # Python >=3.12 is required and enforced at package import.
 # 2.7 adds DAVE; 2.7.1 also detects missing davey before voice use.
 discord.py[voice]>=2.7.1,<3
+# DJ-P2.1 metadata worker uses the inspected API/options. No installation implied.
+yt-dlp==2026.10.26
