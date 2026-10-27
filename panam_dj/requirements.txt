@@ -1,0 +1,4 @@
+# Existing repository dependency family; installation is NOT authorized by DJ-P0.
+# Python >=3.12 is required and enforced at package import.
+# 2.7 adds DAVE; 2.7.1 also detects missing davey before voice use.
+discord.py[voice]>=2.7.1,<3

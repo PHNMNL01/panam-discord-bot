@@ -1,0 +1,13 @@
+{
+  "version": 1,
+  "tracks": [
+    {
+      "id": "demo",
+      "title": "DJ Panam original demo tones",
+      "path": "audio/dj_panam_demo.wav",
+      "sha256": "1e9564c6823f2c20b82d62d2a631521a1de61a0025f33d55e4854a9a33a4a668",
+      "approved": true,
+      "authorization": "Original synthetic 440/660 Hz triangle tones generated for DJ-P0 under HAD-DJ-P0-IMPLEMENTATION-AUTHORIZATION-001. No sampled or third-party audio; authorized for this prototype and its tests."
+    }
+  ]
+}

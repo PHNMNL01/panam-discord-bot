@@ -1,0 +1,6 @@
+{
+  "application_id": 111111111111111111,
+  "guild_ids": [222222222222222222],
+  "queue_limit": 20,
+  "catalog": "catalog/catalog.json"
+}
